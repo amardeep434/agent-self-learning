@@ -107,6 +107,11 @@ claude-self-learning/
     research/                   # 15 research documents (~789KB)
 ```
 
+## Documentation
+
+- [`docs/project-creation-plan.md`](docs/project-creation-plan.md) -- The original plan used to create this project (structure, execution steps, verification)
+- [`docs/research/07-implementation-guide-for-claude-code.md`](docs/research/07-implementation-guide-for-claude-code.md) -- Full implementation guide (~10,000 lines) with 5-phase roadmap, deliverable tables, verification checklists
+
 ## Research
 
 The `docs/research/` directory contains the full analysis of NousResearch's Hermes Agent self-learning architecture:
