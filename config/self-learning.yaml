@@ -1,0 +1,93 @@
+# ~/.claude/self-learning.yaml
+# Self-Learning System Configuration
+# Adapted from NousResearch Hermes Agent architecture.
+# All values shown are defaults -- omit to use default.
+
+version: "1.0"
+
+# Master switch
+enabled: true
+
+# Background Review
+review:
+  enabled: true
+  interval: 10                     # Turns between mid-session reviews
+  max_iterations: 16               # Max tool uses per review subagent
+  max_memory_writes: 3             # Max memory entries per review cycle
+  max_skill_ops: 2                 # Max skill create/update per review cycle
+  digest_size: 24                  # Max messages in conversation digest
+  quiet: true                      # Suppress review output from user view
+  on_stop: true                    # Run final review on session end
+  min_turns_for_stop: 5            # Minimum turns before Stop hook review fires
+  cooldown_secs: 60                # Minimum seconds between review cycles
+  log_dir: "~/.claude/logs/reviews"
+
+# Memory System
+memory:
+  memory_char_limit: 2200          # Max characters for MEMORY.md
+  user_char_limit: 1375            # Max characters for USER.md
+  entry_delimiter: "\n\u00a7\n"    # Entry separator (section sign)
+  threat_scan_scope: "strict"      # Threat scanning strictness
+  drift_detection: true            # Detect external modifications
+  backup_on_drift: true            # Save .bak before overwriting drifted file
+
+# Skill Library
+skills:
+  root_dir: "~/.claude/learned-skills"
+  archive_dir: "~/.claude/learned-skills/.archive"
+  usage_file: "~/.claude/learned-skills/.usage.json"
+  stale_after_days: 30             # Days of inactivity before marking stale
+  archive_after_days: 90           # Days of inactivity before archiving
+  template_vars: true              # Enable ${VAR} substitution in skills
+  inline_shell: false              # Enable !`cmd` execution (security: opt-in)
+  inline_shell_timeout: 10         # Seconds before inline shell times out
+  inline_shell_max_output: 4000    # Max chars from inline shell output
+  protected_skills:                # Skills that cannot be archived
+    - plan
+
+# Curator
+curator:
+  enabled: true
+  interval_hours: 168              # Hours between curator runs (7 days)
+  min_idle_hours: 2                # Minimum idle time before running
+  consolidate: false               # Enable LLM consolidation pass (opt-in)
+  prune_builtins: false            # Include builtins in curation candidates
+  log_dir: "~/.claude/logs/curator"
+
+# Session Search
+session_search:
+  enabled: true
+  db_path: "~/.claude/sessions/search.db"
+  retention_days: 90               # Auto-delete sessions older than this
+  discover_scan_limit: 300         # Max FTS rows scanned before dedup
+  discovery_limit: 3               # Default sessions per DISCOVERY query
+  scroll_window: 5                 # Messages before/after anchor in SCROLL
+  read_head: 20                    # First N messages in READ (large sessions)
+  read_tail: 10                    # Last N messages in READ (large sessions)
+  browse_limit: 10                 # Default sessions in BROWSE
+  bookend_size: 3                  # Start/end messages per DISCOVERY result
+  hit_context_window: 5            # Messages around FTS hit in DISCOVERY
+  hidden_sources:                  # Sources excluded from search/browse
+    - subagent
+    - tool
+  demoted_sources:                 # Sources ranked below interactive
+    - cron
+  index_on_stop: true              # Index session when Stop hook fires
+  batch_index_cron: "17 3 * * 0"   # Weekly batch index (Sunday 3:17am)
+
+# Identity
+identity:
+  file: "~/.claude/IDENTITY.md"    # Identity file path
+  hot_reload: false                # Reload identity each turn (not each session)
+
+# Security
+security:
+  threat_scan_on_write: true       # Scan memory/skill writes
+  threat_scan_on_load: true        # Scan memory at load time
+  block_on_threat: true            # Block writes with threats (vs. warn)
+
+# Prompt Assembly
+prompt:
+  date_format: "date_only"         # "date_only" for cache stability, "datetime" for precision
+  skills_cache_enabled: true       # Cache assembled skills text to disk
+  skills_cache_path: "~/.claude/cache/skills-manifest.json"

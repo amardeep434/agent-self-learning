@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+#
+# Self-learning system health check / diagnostics.
+# Verifies all components are correctly installed and functioning.
+#
+# Checks:
+# 1. Required directories exist
+# 2. All scripts are present and executable
+# 3. Hooks are registered in settings.json
+# 4. Turn counter state is valid
+# 5. SQLite search database is accessible
+# 6. Learned skills usage file is valid
+# 7. Required dependencies available
+#
+# Usage:
+#   bash self-learning-health.sh          # Run all checks
+#   bash self-learning-health.sh --quiet  # Only show failures
+#
+# Exit codes:
+#   0 - All checks passed
+#   1 - One or more checks failed
+
+set -euo pipefail
+
+QUIET="${1:-}"
+PASS_COUNT=0
+FAIL_COUNT=0
+WARN_COUNT=0
+
+# --- Helpers ---
+
+pass() {
+    PASS_COUNT=$((PASS_COUNT + 1))
+    if [[ "$QUIET" != "--quiet" ]]; then
+        echo "  [PASS] $1"
+    fi
+}
+
+fail() {
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    echo "  [FAIL] $1"
+    if [[ -n "${2:-}" ]]; then
+        echo "         Fix: $2"
+    fi
+}
+
+warn() {
+    WARN_COUNT=$((WARN_COUNT + 1))
+    echo "  [WARN] $1"
+}
+
+section() {
+    if [[ "$QUIET" != "--quiet" ]]; then
+        echo ""
+        echo "=== $1 ==="
+    fi
+}
+
+# --- Check 1: Required directories ---
+
+section "Directories"
+
+REQUIRED_DIRS=(
+    "${HOME}/.claude/state/self-learning"
+    "${HOME}/.claude/learned-skills"
+    "${HOME}/.claude/sessions"
+    "${HOME}/.claude/logs/reviews"
+    "${HOME}/.claude/logs/curator"
+    "${HOME}/.claude/scripts/self-learning"
+)
+
+for dir in "${REQUIRED_DIRS[@]}"; do
+    if [[ -d "$dir" ]]; then
+        pass "$dir exists"
+    else
+        fail "$dir missing" "Run install.sh or: mkdir -p $dir"
+    fi
+done
+
+# --- Check 2: Scripts present and executable ---
+
+section "Scripts"
+
+REQUIRED_SCRIPTS=(
+    "turn-counter.sh"
+    "session-review.sh"
+    "index-session.sh"
+    "index-session.py"
+    "scan-threats.py"
+    "skill-lifecycle.py"
+    "curator-run.sh"
+    "self-learning-health.sh"
+)
+
+SCRIPT_DIR="${HOME}/.claude/scripts/self-learning"
+for script in "${REQUIRED_SCRIPTS[@]}"; do
+    script_path="${SCRIPT_DIR}/${script}"
+    if [[ -f "$script_path" ]]; then
+        if [[ -x "$script_path" ]] || [[ "$script" == *.py ]]; then
+            pass "$script present"
+        else
+            fail "$script not executable" "chmod +x $script_path"
+        fi
+    else
+        fail "$script missing" "Run install.sh"
+    fi
+done
+
+# --- Check 3: Hooks registered in settings.json ---
+
+section "Hook Registration"
+
+SETTINGS_FILE="${HOME}/.claude/settings.json"
+if [[ -f "$SETTINGS_FILE" ]]; then
+    # Check for PostToolUse hook (turn counter)
+    if grep -q "turn-counter" "$SETTINGS_FILE" 2>/dev/null; then
+        pass "PostToolUse turn-counter hook registered"
+    else
+        fail "PostToolUse turn-counter hook not found in settings.json" \
+            "Add PostToolUse hook for turn-counter.sh to ~/.claude/settings.json"
+    fi
+
+    # Check for Stop hooks (session-review, index-session)
+    if grep -q "session-review" "$SETTINGS_FILE" 2>/dev/null; then
+        pass "Stop session-review hook registered"
+    else
+        fail "Stop session-review hook not found in settings.json" \
+            "Add Stop hook for session-review.sh to ~/.claude/settings.json"
+    fi
+
+    if grep -q "index-session" "$SETTINGS_FILE" 2>/dev/null; then
+        pass "Stop index-session hook registered"
+    else
+        fail "Stop index-session hook not found in settings.json" \
+            "Add Stop hook for index-session.sh to ~/.claude/settings.json"
+    fi
+else
+    fail "settings.json not found" "Create ~/.claude/settings.json with hook configuration"
+fi
+
+# --- Check 4: Turn counter state ---
+
+section "Turn Counter"
+
+COUNTER_FILE="${HOME}/.claude/state/self-learning/turn_counter.json"
+if [[ -f "$COUNTER_FILE" ]]; then
+    if jq empty "$COUNTER_FILE" 2>/dev/null; then
+        pass "turn_counter.json is valid JSON"
+        TOTAL=$(jq -r '.total_turns_this_session // 0' "$COUNTER_FILE" 2>/dev/null)
+        if [[ "$QUIET" != "--quiet" ]]; then
+            echo "         Current total turns: $TOTAL"
+        fi
+    else
+        fail "turn_counter.json is corrupt" "Delete and let it recreate: rm $COUNTER_FILE"
+    fi
+else
+    warn "turn_counter.json not found (normal if no session has run yet)"
+fi
+
+# Check for stale lock
+LOCK_DIR="${HOME}/.claude/state/self-learning/counter.lock"
+if [[ -d "$LOCK_DIR" ]]; then
+    LOCK_AGE=$(( $(date +%s) - $(stat -c %Y "$LOCK_DIR" 2>/dev/null || echo 0) ))
+    if [[ "$LOCK_AGE" -gt 30 ]]; then
+        warn "Stale lock directory found (${LOCK_AGE}s old). Removing."
+        rmdir "$LOCK_DIR" 2>/dev/null || rm -rf "$LOCK_DIR"
+    else
+        pass "Lock directory exists but is fresh (active operation)"
+    fi
+fi
+
+# --- Check 5: SQLite search database ---
+
+section "Session Search Database"
+
+DB_PATH="${HOME}/.claude/sessions/search.db"
+if [[ -f "$DB_PATH" ]]; then
+    if command -v sqlite3 &>/dev/null; then
+        SESSION_COUNT=$(sqlite3 "$DB_PATH" "SELECT count(*) FROM sessions" 2>/dev/null || echo "ERROR")
+        if [[ "$SESSION_COUNT" == "ERROR" ]]; then
+            fail "search.db exists but query failed" "Database may be corrupt. Delete and re-index."
+        else
+            pass "search.db accessible ($SESSION_COUNT sessions indexed)"
+        fi
+    else
+        warn "sqlite3 not found -- cannot verify database"
+    fi
+else
+    warn "search.db not found (normal if no session has been indexed yet)"
+fi
+
+# --- Check 6: Learned skills usage file ---
+
+section "Learned Skills"
+
+USAGE_FILE="${HOME}/.claude/learned-skills/.usage.json"
+if [[ -f "$USAGE_FILE" ]]; then
+    if jq empty "$USAGE_FILE" 2>/dev/null; then
+        SKILL_COUNT=$(jq 'keys | length' "$USAGE_FILE" 2>/dev/null || echo 0)
+        pass ".usage.json is valid JSON ($SKILL_COUNT skills tracked)"
+
+        # Check for skills in invalid states
+        INVALID=$(jq '[to_entries[] | select(.value.state != "active" and .value.state != "stale" and .value.state != "archived")] | length' "$USAGE_FILE" 2>/dev/null || echo 0)
+        if [[ "$INVALID" -gt 0 ]]; then
+            warn "$INVALID skill(s) in invalid state (expected: active, stale, or archived)"
+        fi
+    else
+        fail ".usage.json is corrupt" "Back up and recreate: cp $USAGE_FILE ${USAGE_FILE}.bak && echo '{}' > $USAGE_FILE"
+    fi
+else
+    warn ".usage.json not found (normal if no skills have been learned yet)"
+fi
+
+# --- Check 7: Dependencies ---
+
+section "Dependencies"
+
+for cmd in jq sqlite3 python3; do
+    if command -v "$cmd" &>/dev/null; then
+        pass "$cmd available ($(command -v "$cmd"))"
+    else
+        fail "$cmd not found" "Install $cmd (required for self-learning system)"
+    fi
+done
+
+# --- Summary ---
+
+echo ""
+echo "=============================="
+echo "Health Check Summary"
+echo "=============================="
+echo "  Passed:   $PASS_COUNT"
+echo "  Failed:   $FAIL_COUNT"
+echo "  Warnings: $WARN_COUNT"
+echo ""
+
+if [[ "$FAIL_COUNT" -gt 0 ]]; then
+    echo "Status: UNHEALTHY ($FAIL_COUNT failure(s) found)"
+    exit 1
+else
+    echo "Status: HEALTHY"
+    exit 0
+fi
