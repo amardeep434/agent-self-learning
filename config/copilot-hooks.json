@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionEnd": [
+      {
+        "type": "command",
+        "bash": "bash ~/.claude/scripts/self-learning/copilot-session-review.sh",
+        "timeoutSec": 30
+      }
+    ]
+  }
+}
