@@ -1,38 +1,32 @@
 {
-  "env": {
-    "CLAUDE_REVIEW_INTERVAL": "10",
-    "CLAUDE_SKILL_REVIEW_INTERVAL": "10",
-    "CLAUDE_REVIEW_ENABLED": "true",
-    "CLAUDE_REVIEW_ON_STOP": "true",
-    "CLAUDE_REVIEW_MAX_TURNS": "16",
-    "CLAUDE_REVIEW_COOLDOWN_SECS": "60",
-    "CLAUDE_REVIEW_MIN_TURNS": "5",
-    "CLAUDE_REVIEW_QUIET": "true",
-    "CLAUDE_REVIEW_LOG_DIR": "~/.claude/logs/reviews"
-  },
   "hooks": {
     "PostToolUse": [
       {
         "matcher": "",
-        "command": "bash ~/.claude/scripts/turn-counter.sh",
-        "timeout": 3000
-      },
-      {
-        "matcher": "",
-        "command": "bash ~/.claude/scripts/rolling-transcript.sh",
-        "timeout": 2000
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.claude/scripts/self-learning/turn-counter.sh",
+            "timeout": 3
+          }
+        ]
       }
     ],
     "Stop": [
       {
         "matcher": "",
-        "command": "bash ~/.claude/scripts/session-review.sh",
-        "timeout": 15000
-      },
-      {
-        "matcher": "",
-        "command": "bash ~/.claude/scripts/index-session.sh",
-        "timeout": 10000
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.claude/scripts/self-learning/session-review.sh",
+            "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "bash ~/.claude/scripts/self-learning/index-session.sh",
+            "timeout": 10
+          }
+        ]
       }
     ]
   }

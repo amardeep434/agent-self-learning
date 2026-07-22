@@ -14,11 +14,23 @@
 
 set -euo pipefail
 
-STATE_DIR="${HOME}/.claude/state/self-learning"
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/lib" && pwd)"
+
+# Recursion guard: a spawned reviewer's own Stop hook must not re-trigger review.
+if [[ -n "${SL_REVIEW_ACTIVE:-}" ]]; then
+    exit 0
+fi
+
+# shellcheck disable=SC1091
+source "${LIB_DIR}/config.sh"
+# shellcheck disable=SC1091
+source "${LIB_DIR}/hook-input.sh"
+
+STATE_DIR="${SL_STATE_DIR}"
 COUNTER_FILE="${STATE_DIR}/turn_counter.json"
 REVIEW_ENABLED="${CLAUDE_REVIEW_ENABLED:-true}"
-MIN_TURNS_FOR_REVIEW=5
-LOG_DIR="${HOME}/.claude/logs/reviews"
+MIN_TURNS_FOR_REVIEW="${SL_REVIEW_MIN_TURNS}"
+LOG_DIR="${SL_LOG_DIR}/reviews"
 
 if [[ "$REVIEW_ENABLED" != "true" ]]; then
     exit 0
@@ -72,14 +84,31 @@ Then perform a combined memory + skill review:
 RPEOF
 )"
 
+# --- Append Coach signals (Route A/B output) when present and fresh ---
+if [[ -f "${SL_COACH_SIGNALS_FILE}" ]]; then
+    SIGNALS_AGE_DAYS=$(( ( $(date +%s) - $(date -r "${SL_COACH_SIGNALS_FILE}" +%s) ) / 86400 ))
+    if (( SIGNALS_AGE_DAYS <= 7 )); then
+        COACH_SECTION=$(jq -r '
+            "\n## Coach signals (observed anti-patterns — prioritize fixes for these)\n" +
+            ( [.signals[] | "- [\(.id)] severity=\(.severity): \(.suggestion)"] | join("\n") )
+        ' "${SL_COACH_SIGNALS_FILE}" 2>/dev/null || true)
+        if [[ -n "${COACH_SECTION}" ]]; then
+            REVIEW_PROMPT="${REVIEW_PROMPT}${COACH_SECTION}
+
+For each Coach signal above, prefer writing ONE memory entry or skill that would
+prevent that anti-pattern in future sessions. Do not exceed the write limits."
+        fi
+    fi
+fi
+
 # --- Spawn review process in background ---
 # The review runs as a detached process so it does not block session exit.
 
 REVIEW_LOG="${LOG_DIR}/$(date +%Y%m%d-%H%M%S)-session-review.log"
 
 if command -v claude &>/dev/null; then
-    nohup claude -p "$REVIEW_PROMPT" \
-        --max-turns 16 \
+    SL_REVIEW_ACTIVE=1 nohup claude -p "$REVIEW_PROMPT" \
+        --max-turns "${SL_REVIEW_MAX_TURNS}" \
         --output-format text \
         > "$REVIEW_LOG" 2>&1 &
     disown
