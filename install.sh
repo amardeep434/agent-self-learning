@@ -138,6 +138,8 @@ SCRIPTS=(
     "skill-lifecycle.py"
     "curator-run.sh"
     "self-learning-health.sh"
+    "copilot-session-review.sh"
+    "inject-agents-md.py"
 )
 
 DEST_DIR="${HOME}/.claude/scripts/self-learning"
@@ -149,6 +151,15 @@ for script in "${SCRIPTS[@]}"; do
         do_chmod "${DEST_DIR}/${script}"
     else
         echo "  [WARN] Script not found: $src"
+    fi
+done
+
+echo ""
+echo "Step 2b: Copying shared libraries..."
+do_mkdir "${DEST_DIR}/lib"
+for lib in "${SCRIPT_DIR}/scripts/lib/"*.sh; do
+    if [[ -f "$lib" ]]; then
+        do_copy "$lib" "${DEST_DIR}/lib/$(basename "$lib")"
     fi
 done
 
@@ -182,8 +193,8 @@ echo ""
 
 echo "Step 4: Copying configuration..."
 
-CONFIG_SRC="${SCRIPT_DIR}/config/self-learning.yaml"
-CONFIG_DST="${HOME}/.claude/self-learning.yaml"
+CONFIG_SRC="${SCRIPT_DIR}/config/self-learning.conf"
+CONFIG_DST="${HOME}/.claude/self-learning.conf"
 
 if [[ -f "$CONFIG_SRC" ]]; then
     if [[ -f "$CONFIG_DST" ]]; then
@@ -192,7 +203,21 @@ if [[ -f "$CONFIG_SRC" ]]; then
         do_copy "$CONFIG_SRC" "$CONFIG_DST"
     fi
 else
-    echo "  No config/self-learning.yaml found (optional)"
+    echo "  No config/self-learning.conf found (optional)"
+fi
+
+echo ""
+echo "Step 4b: Copilot CLI adapter (optional)..."
+if [[ -d "${HOME}/.copilot" ]]; then
+    do_mkdir "${HOME}/.copilot/hooks"
+    COPILOT_HOOK_DST="${HOME}/.copilot/hooks/self-learning.json"
+    if [[ -f "$COPILOT_HOOK_DST" ]]; then
+        echo "  Already exists: $COPILOT_HOOK_DST (skipping)"
+    else
+        do_copy "${SCRIPT_DIR}/config/copilot-hooks.json" "$COPILOT_HOOK_DST"
+    fi
+else
+    echo "  ~/.copilot not found — Copilot CLI not installed; skipping (re-run install.sh after installing it)"
 fi
 
 echo ""
