@@ -16,12 +16,24 @@ Route failures are non-fatal: a failing route contributes no signals.
 
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+
+_SAFE_CHARS = re.compile(r"[^A-Za-z0-9 .,:;()\[\]/_-]")
+
+
+def sanitize_text(s):
+    """Coach signals are untrusted input; strip everything except a plain-text
+    allowlist, collapse whitespace, and cap length before it can reach a
+    reviewer prompt."""
+    s = _SAFE_CHARS.sub(" ", str(s))
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:240]
 
 
 def flag(name):
@@ -68,14 +80,27 @@ def main():
             "SL_SEARCH_DB", os.path.join(home, ".claude", "sessions", "search.db"))
         for sig in run_route([sys.executable, str(SCRIPT_DIR / "coach-rules-eval.py"),
                               rules_dir, db_path]):
-            merged[sig["id"]] = sig
+            merged[sanitize_text(sig["id"])] = {
+                "id": sanitize_text(sig["id"]),
+                "severity": sanitize_text(sig.get("severity", "unknown")),
+                "suggestion": sanitize_text(sig.get("suggestion", "")),
+                "count": int(sig.get("count", 0) or 0),
+                "source": sig.get("source", "unknown"),
+            }
 
     if export_enabled:
         export_path = os.environ.get(
             "SL_COACH_EXPORT_PATH", os.path.join(home, ".aiec", "summary-latest.json"))
         for sig in run_route([sys.executable, str(SCRIPT_DIR / "coach-export-read.py"),
                               export_path]):
-            merged[sig["id"]] = sig  # export runs second: wins dedupe by design
+            # export runs second: wins dedupe by design
+            merged[sanitize_text(sig["id"])] = {
+                "id": sanitize_text(sig["id"]),
+                "severity": sanitize_text(sig.get("severity", "unknown")),
+                "suggestion": sanitize_text(sig.get("suggestion", "")),
+                "count": int(sig.get("count", 0) or 0),
+                "source": sig.get("source", "unknown"),
+            }
 
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
