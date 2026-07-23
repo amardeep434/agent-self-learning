@@ -75,6 +75,25 @@ The install script:
 | 4 | **Curator** | Periodic maintenance daemon that consolidates narrow skills into class-level umbrellas and archives unused skills. |
 | 5 | **Session Search** | SQLite FTS5-indexed cross-session search with four query shapes: discover, scroll, read, browse. |
 
+## AI Engineering Coach integration (optional)
+
+Two independent, off-by-default integrations with
+[microsoft/AI-Engineering-Coach](https://github.com/microsoft/AI-Engineering-Coach).
+Enable either or both in `~/.claude/self-learning.conf`:
+
+| Flag | Route | What it does | Requires |
+|------|-------|--------------|----------|
+| `SL_COACH_RULES_ENABLED=true` | A — rules mode | Evaluates Coach's MIT-licensed anti-pattern rules (vendored in `vendor/coach-rules/`) against our own session index; triggered rules steer the background review. Fully automatic. | nothing extra |
+| `SL_COACH_EXPORT_ENABLED=true` | B — export mode | Reads the full Coach analysis from `~/.aiec/summary-latest.json`, written automatically by our maintained fork's auto-export patch. Richer signals than Route A. | the fork's `.vsix` installed in VS Code |
+
+When both are enabled, signals are merged and deduplicated by rule id; Route B
+(export) data wins because it comes from Coach's complete analyzer.
+
+Route A rule coverage is a documented subset of Coach's detect DSL; unsupported
+rules are skipped and logged, never guessed at. Re-vendor rules with
+`bash scripts/sync-coach-rules.sh`. The fork lives at
+`<org>/ai-engineering-coach-fork` (see its FORK-NOTES.md for the sync protocol).
+
 ## Roadmap
 
 | Phase | Name | Timeframe | Status |
