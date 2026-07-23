@@ -58,3 +58,10 @@
   refinement for a later task; the Gate 2 contract (hook fires + headless review completes +
   no disallowed writes) is satisfied.
 - Verdict: PASS
+
+## Gate 3 — Coach fork auto-export (Task 13) — PENDING MANUAL
+- Fork: https://github.com/amardeep434/AI-Engineering-Coach (branch feature/auto-export, commit 3fd9c4e)
+- Build: `npm run package` succeeded → ai-engineer-coach-0.1.0.vsix; `npm test` = 1215 passed (65 files)
+- Auto-export command `aiEngineerCoach.exportSummaryAuto` + export-on-reload wired into src/extension.ts
+- REMAINING (needs a human in VS Code): install the .vsix, run the command, confirm no dialog and ~/.aiec/summary-latest.json is written. See fork FORK-NOTES.md.
+- Verdict: IMPLEMENTATION COMPLETE / LIVE-VERIFY PENDING
