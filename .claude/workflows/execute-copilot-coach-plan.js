@@ -8,6 +8,7 @@ export const meta = {
     { title: 'Phase C: Copilot CLI adapter', model: 'opus' },
     { title: 'Phase D: Coach Route A' },
     { title: 'Phase E: Coach fork Route B', model: 'opus' },
+    { title: 'Phase F: Hardening, uninstall, Windows, docs' },
     { title: 'Final checks' },
   ],
 }
@@ -38,6 +39,10 @@ const TASKS = [
   { n: 13, title: 'Create and patch the Coach fork',           model: 'opus',   phase: 'Phase E: Coach fork Route B', gate: true },
   { n: 14, title: 'Fork maintenance tooling',                  model: 'sonnet', phase: 'Phase E: Coach fork Route B' },
   { n: 15, title: 'Document routes in README',                 model: 'sonnet', phase: 'Phase E: Coach fork Route B' },
+  { n: 16, title: 'Security hardening (signal sanitization)',  model: 'opus',   phase: 'Phase F: Hardening, uninstall, Windows, docs' },
+  { n: 17, title: 'Single-command complete uninstall',         model: 'sonnet', phase: 'Phase F: Hardening, uninstall, Windows, docs' },
+  { n: 18, title: 'Windows support (ps1 wrappers + hooks)',    model: 'sonnet', phase: 'Phase F: Hardening, uninstall, Windows, docs' },
+  { n: 19, title: 'Documentation overhaul',                    model: 'sonnet', phase: 'Phase F: Hardening, uninstall, Windows, docs' },
 ]
 
 const RESULT_SCHEMA = {
