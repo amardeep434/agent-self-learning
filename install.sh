@@ -140,6 +140,9 @@ SCRIPTS=(
     "self-learning-health.sh"
     "copilot-session-review.sh"
     "inject-agents-md.py"
+    "coach-rules-eval.py"
+    "coach-export-read.py"
+    "coach-signals.py"
 )
 
 DEST_DIR="${HOME}/.claude/scripts/self-learning"
@@ -185,6 +188,30 @@ if [[ -d "$PROMPTS_SRC" ]]; then
     fi
 else
     echo "  No prompts/ directory found (optional)"
+fi
+
+echo ""
+
+# --- Step 3b: Copy vendored Coach rules (if present) ---
+
+echo "Step 3b: Copying vendored Coach rules..."
+
+COACH_RULES_SRC="${SCRIPT_DIR}/vendor/coach-rules"
+COACH_RULES_DST="${DEST_DIR}/coach-rules"
+
+if [[ -d "$COACH_RULES_SRC" ]]; then
+    COACH_RULE_COUNT=0
+    for rule_file in "${COACH_RULES_SRC}"/*.md; do
+        if [[ -f "$rule_file" ]]; then
+            do_copy "$rule_file" "${COACH_RULES_DST}/$(basename "$rule_file")"
+            COACH_RULE_COUNT=$((COACH_RULE_COUNT + 1))
+        fi
+    done
+    if [[ "$COACH_RULE_COUNT" -eq 0 ]]; then
+        echo "  No Coach rule files found in ${COACH_RULES_SRC}/"
+    fi
+else
+    echo "  No vendor/coach-rules/ directory found (optional)"
 fi
 
 echo ""

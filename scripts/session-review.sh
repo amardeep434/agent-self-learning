@@ -84,6 +84,8 @@ Then perform a combined memory + skill review:
 RPEOF
 )"
 
+python3 "$(dirname "${BASH_SOURCE[0]}")/coach-signals.py" 2>> "${SL_LOG_DIR}/reviews/coach-signals.err" || true
+
 # --- Append Coach signals (Route A/B output) when present and fresh ---
 if [[ -f "${SL_COACH_SIGNALS_FILE}" ]]; then
     SIGNALS_AGE_DAYS=$(( ( $(date +%s) - $(date -r "${SL_COACH_SIGNALS_FILE}" +%s) ) / 86400 ))
