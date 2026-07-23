@@ -21,7 +21,7 @@
 - Recursion guard: any script that spawns a headless agent (`claude -p` or `copilot -p`) must export `SL_REVIEW_ACTIVE=1` into the child environment, and every hook entry script must exit 0 immediately when `SL_REVIEW_ACTIVE` is set (a spawned reviewer's own session-end must never trigger another review).
 - Commit after every task using conventional commits (`feat:`, `fix:`, `test:`, `docs:`, `chore:`). No attribution footers (user has attribution disabled globally).
 - Verification gates (Tasks 8 and 9) are **hard stops**: if a gate fails, record the observed behavior in `docs/verification-log.md`, do not improvise a workaround, and stop for human review.
-- Out of scope for this plan (deliberately — follow-up plans required): VS Code Copilot adapter, session-search parser ports for Copilot formats, curator LLM consolidation pass, org pilot metrics protocol. Do not build any of these.
+- Out of scope for this plan (deliberately — follow-up plans required): VS Code Copilot adapter, session-search parser ports for Copilot formats, curator LLM consolidation pass, org pilot metrics protocol, and Route C / SkillOpt integration (see the "Deferred — Route C" section at the end of this document). Do not build any of these.
 
 ## File Structure
 
@@ -2589,6 +2589,35 @@ Expected: `5`
 git add README.md
 git commit -m "docs: requirements, install/uninstall for Linux/macOS/Windows, compatibility matrix, config reference"
 ```
+
+---
+
+## Deferred — Route C: SkillOpt integration (decided 2026-07-23, deliberately NOT scheduled)
+
+**What:** optional integration with [microsoft/SkillOpt](https://github.com/microsoft/SkillOpt) /
+`skillopt-sleep` — validation-gated offline optimization of our learned skills
+(the quality-measurement piece this system otherwise lacks). Would ship as a
+third off-by-default flag (`SL_SKILLOPT_ENABLED`), file-based only (its MCP/plugin
+integration shells are unusable here: org policy disables MCP).
+
+**Why deferred, not rejected:**
+1. Rollout-heavy optimization loop = the most token-expensive feature considered so far; not before v1 proves skills get used at all.
+2. Its validation gate needs mined task sets; whether that works on our ad-hoc harvested skills is unverified (README-level knowledge only).
+3. Python 3.10+ / pip dependency conflicts with the stdlib-only 3.8+ install story; needs its own dependency gate.
+4. Fast-moving research project (v0.2.0); coupling v1 to it adds churn risk we don't control.
+
+**Prerequisite before any Route C plan is written:** a verification spike —
+install `skillopt`, run `skillopt-sleep` file-based (no MCP) against real
+session history, and measure the actual token cost of one optimization cycle.
+The spike's results decide; if it fails or costs too much, Route C stays out.
+
+**Sketch if the spike passes:** curator-triggered handoff of the top-N
+most-used skills → `skillopt` optimization → validated `best_skill.md`
+imported back with provenance, original kept until the optimized version wins,
+hard monthly token budget. `SL_SKILLOPT_ENABLED=false` default, same
+independent-flag semantics as Routes A/B.
+
+**Implementing agents: do not build any part of this from the current plan.**
 
 ---
 
