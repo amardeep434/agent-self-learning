@@ -63,5 +63,30 @@ OUT=$(env -i HOME="$HOME" PATH="$PATH" SL_CONFIG_FILE="/nonexistent/x.conf" \
     bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; echo \"\$SL_CONFIG_FILE\"")
 check "pre-set SL_CONFIG_FILE overrides paths.py default" "/nonexistent/x.conf" "$OUT"
 
+# All six path variables get a working, vendor-neutral literal fallback when
+# python3/paths.py is entirely unavailable (e.g. not on PATH). A minimal PATH
+# is built containing only the external commands config.sh itself needs
+# (dirname) so python3 cannot be found, without relying on any GNU-only tool.
+_sl_no_python_dir=$(mktemp -d)
+ln -s "$(command -v dirname)" "$_sl_no_python_dir/dirname"
+ln -s "$(command -v bash)" "$_sl_no_python_dir/bash"
+OUT=$(env -i HOME="$HOME" PATH="$_sl_no_python_dir" \
+    bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; echo \"\$SL_HOME|\$SL_STATE_DIR|\$SL_SKILLS_DIR|\$SL_MEMORY_DIR|\$SL_LOG_DIR|\$SL_SEARCH_DB\"")
+rm -rf "$_sl_no_python_dir"
+_sl_no_python_ok=true
+IFS='|' read -r _h _st _sk _me _lo _se <<< "$OUT"
+for _val in "$_h" "$_st" "$_sk" "$_me" "$_lo" "$_se"; do
+    case "$_val" in
+        "") _sl_no_python_ok=false ;;
+        *.claude*) _sl_no_python_ok=false ;;
+    esac
+done
+if [[ "$_sl_no_python_ok" == "true" ]]; then
+    echo "PASS: all six paths are non-empty and vendor-neutral with no python3 ($OUT)"
+else
+    echo "FAIL: paths broke with no python3 on PATH ($OUT)"
+    FAILURES=$((FAILURES+1))
+fi
+
 if [[ "$FAILURES" -gt 0 ]]; then exit 1; fi
 echo "All config tests passed."

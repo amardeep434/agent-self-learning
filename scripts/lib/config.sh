@@ -49,13 +49,17 @@ fi
 # Re-apply environment snapshot (env beats file)
 eval "$_sl_env_snapshot"
 
-# Defaults for anything still unset
-SL_HOME="${SL_HOME:-$_sl_pp_home}"
-SL_STATE_DIR="${SL_STATE_DIR:-$_sl_pp_state}"
-SL_SKILLS_DIR="${SL_SKILLS_DIR:-$_sl_pp_skills}"
-SL_MEMORY_DIR="${SL_MEMORY_DIR:-$_sl_pp_memory}"
-SL_LOG_DIR="${SL_LOG_DIR:-$_sl_pp_logs}"
-SL_SEARCH_DB="${SL_SEARCH_DB:-$_sl_pp_sessions_db}"
+# Defaults for anything still unset. Each falls back to the same
+# vendor-neutral literal paths.py would produce on Linux/macOS with no
+# overrides, so config.sh stays fully functional even with no python3 on
+# PATH — never silently degrading to an empty/root-relative path, and never
+# reintroducing ~/.claude.
+SL_HOME="${SL_HOME:-${_sl_pp_home:-${HOME}/.local/share/agent-learning}}"
+SL_STATE_DIR="${SL_STATE_DIR:-${_sl_pp_state:-${HOME}/.local/share/agent-learning/state}}"
+SL_SKILLS_DIR="${SL_SKILLS_DIR:-${_sl_pp_skills:-${HOME}/.local/share/agent-learning/learned-skills}}"
+SL_MEMORY_DIR="${SL_MEMORY_DIR:-${_sl_pp_memory:-${HOME}/.local/share/agent-learning/memory}}"
+SL_LOG_DIR="${SL_LOG_DIR:-${_sl_pp_logs:-${HOME}/.local/share/agent-learning/logs}}"
+SL_SEARCH_DB="${SL_SEARCH_DB:-${_sl_pp_sessions_db:-${HOME}/.local/share/agent-learning/sessions/search.db}}"
 SL_COACH_RULES_ENABLED="${SL_COACH_RULES_ENABLED:-false}"
 SL_COACH_EXPORT_ENABLED="${SL_COACH_EXPORT_ENABLED:-false}"
 SL_COACH_EXPORT_PATH="${SL_COACH_EXPORT_PATH:-${HOME}/.aiec/summary-latest.json}"
