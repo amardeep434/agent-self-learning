@@ -49,5 +49,19 @@ OUT=$(env -i HOME="$HOME" PATH="$PATH" CLAUDE_REVIEW_ENABLED=false SL_REVIEW_ENA
     bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; echo \"\$SL_REVIEW_ENABLED\"")
 check "SL_REVIEW_ENABLED beats legacy" "true" "$OUT"
 
+# SL_CONFIG_FILE default comes from paths.py's config_file key, not ~/.claude
+OUT=$(env -i HOME="$HOME" PATH="$PATH" \
+    bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; echo \"\$SL_CONFIG_FILE\"")
+case "$OUT" in
+    *.claude*) echo "FAIL: default SL_CONFIG_FILE still points into .claude ($OUT)"; FAILURES=$((FAILURES+1)) ;;
+    *agent-learning*) echo "PASS: default SL_CONFIG_FILE is vendor-neutral" ;;
+    *) echo "FAIL: unexpected default SL_CONFIG_FILE ($OUT)"; FAILURES=$((FAILURES+1)) ;;
+esac
+
+# Pre-set SL_CONFIG_FILE still wins over the paths.py default
+OUT=$(env -i HOME="$HOME" PATH="$PATH" SL_CONFIG_FILE="/nonexistent/x.conf" \
+    bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; echo \"\$SL_CONFIG_FILE\"")
+check "pre-set SL_CONFIG_FILE overrides paths.py default" "/nonexistent/x.conf" "$OUT"
+
 if [[ "$FAILURES" -gt 0 ]]; then exit 1; fi
 echo "All config tests passed."
