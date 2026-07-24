@@ -143,6 +143,7 @@ SCRIPTS=(
     "coach-rules-eval.py"
     "coach-export-read.py"
     "coach-signals.py"
+    "skillopt-run.sh"
 )
 
 DEST_DIR="${HOME}/.claude/scripts/self-learning"

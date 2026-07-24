@@ -204,6 +204,9 @@ Environment variables with the same names override the file.
 | `SL_REVIEW_MIN_TURNS` | `5` | Minimum session turns before a review runs |
 | `SL_REVIEW_MAX_TURNS` | `16` | Turn cap for the spawned reviewer |
 | `SL_COPILOT_REVIEW_MODEL` | (CLI default) | Model for Copilot reviews; use the cheapest available. Must match `^[A-Za-z0-9._-]+$` |
+| `SL_SKILLOPT_ENABLED` | `false` | Route C: SkillOpt skill optimization (opt-in) |
+| `SL_SKILLOPT_REPO` | (empty) | path to a microsoft/SkillOpt checkout |
+| `SL_SKILLOPT_RUN_CONFIRMED` | `false` | safety gate; the expensive `run` verb refuses until set true after a dry-run cost review |
 
 ## License
 
