@@ -67,9 +67,10 @@ class TestRejects(unittest.TestCase):
             "skills", [{"name": f"s{i}", "content": "x"} for i in range(ps.MAX_SKILLS + 1)]))
 
     def test_total_size_cap(self):
-        chunk = "x" * (ps.MAX_SKILL_BYTES - 1)
+        # Each chunk is exactly MAX_SKILL_BYTES, so together they exceed total cap
+        chunk = "x" * ps.MAX_SKILL_BYTES
         self._bad(lambda p: p.__setitem__(
-            "skills", [{"name": f"s{i}", "content": chunk} for i in range(ps.MAX_SKILLS)]))
+            "skills", [{"name": f"s{i}", "content": chunk} for i in range(9)]))
 
     def test_non_dict(self):
         with self.assertRaises(ps.ValidationError):
@@ -77,6 +78,236 @@ class TestRejects(unittest.TestCase):
 
     def test_extract_returns_none_when_absent(self):
         self.assertIsNone(ps.extract_proposal("no json here at all"))
+
+
+class TestSecurityCritical1TrailingNewline(unittest.TestCase):
+    """CRITICAL 1: skill-name regex accepts trailing newline"""
+    def _reject_name(self, name):
+        p = good()
+        p["skills"][0]["name"] = name
+        with self.assertRaises(ps.ValidationError):
+            ps.validate_proposal(p)
+
+    def test_skill_name_trailing_newline(self):
+        self._reject_name("evil\n")
+
+    def test_skill_name_embedded_newline(self):
+        self._reject_name("a\nb")
+
+    def test_skill_name_only_newline(self):
+        self._reject_name("\n")
+
+    def test_skill_name_trailing_carriage_return(self):
+        self._reject_name("a\r")
+
+
+class TestSecurityCritical2RecursionError(unittest.TestCase):
+    """CRITICAL 2: RecursionError escapes extract_proposal"""
+    def test_deeply_nested_input_returns_none(self):
+        # Adversarial input that causes RecursionError in json.loads
+        nested = '{"a":' + '['*100000 + ']'*100000 + '}'
+        # Should return None, not raise RecursionError
+        result = ps.extract_proposal(nested)
+        self.assertIsNone(result)
+
+    def test_oversized_input_returns_none(self):
+        # Input exceeding MAX_INPUT_BYTES should return None before regex
+        oversized = 'x' * (ps.MAX_INPUT_BYTES + 1)
+        result = ps.extract_proposal(oversized)
+        self.assertIsNone(result)
+
+
+class TestSecurityCritical2Fallback(unittest.TestCase):
+    """CRITICAL 2: Fenced garbage falls back to bare scan"""
+    def test_fenced_garbage_then_valid_bare_json(self):
+        # Fenced candidate fails to parse, should fall back to bare JSON
+        text = 'chatter\n```json\ngarbage\n```\n{"version": 1}'
+        result = ps.extract_proposal(text)
+        self.assertEqual(result, {"version": 1})
+
+
+class TestImportant3UnhashableTypes(unittest.TestCase):
+    """IMPORTANT 3: unhashable values raise TypeError, not ValidationError"""
+    def test_unhashable_file_raises_validation_error(self):
+        p = good()
+        p["memory"][0]["file"] = []
+        with self.assertRaises(ps.ValidationError):
+            ps.validate_proposal(p)
+
+    def test_unhashable_mode_raises_validation_error(self):
+        p = good()
+        p["memory"][0]["mode"] = {}
+        with self.assertRaises(ps.ValidationError):
+            ps.validate_proposal(p)
+
+
+class TestImportant4MemoryCaps(unittest.TestCase):
+    """IMPORTANT 4: cap on memory entries and duplicate detection"""
+    def test_too_many_memory_entries(self):
+        p = good()
+        p["memory"] = [
+            {"file": "MEMORY.md", "mode": "replace", "content": "a"},
+            {"file": "USER.md", "mode": "replace", "content": "b"},
+            {"file": "MEMORY.md", "mode": "append", "content": "c"},
+            {"file": "USER.md", "mode": "append", "content": "d"},
+            {"file": "MEMORY.md", "mode": "replace", "content": "e"},
+        ]
+        with self.assertRaises(ps.ValidationError):
+            ps.validate_proposal(p)
+
+    def test_duplicate_memory_files(self):
+        p = good()
+        p["memory"] = [
+            {"file": "MEMORY.md", "mode": "replace", "content": "a"},
+            {"file": "MEMORY.md", "mode": "append", "content": "b"},
+        ]
+        with self.assertRaises(ps.ValidationError):
+            ps.validate_proposal(p)
+
+    def test_duplicate_skill_names(self):
+        p = good()
+        p["skills"] = [
+            {"name": "my-skill", "content": "a"},
+            {"name": "my-skill", "content": "b"},
+        ]
+        with self.assertRaises(ps.ValidationError):
+            ps.validate_proposal(p)
+
+
+class TestImportant5WindowsReserved(unittest.TestCase):
+    """IMPORTANT 5: Windows reserved device names validate"""
+    def test_windows_reserved_con(self):
+        p = good()
+        p["skills"][0]["name"] = "CON"
+        with self.assertRaises(ps.ValidationError):
+            ps.validate_proposal(p)
+
+    def test_windows_reserved_nul_lowercase(self):
+        p = good()
+        p["skills"][0]["name"] = "nul"
+        with self.assertRaises(ps.ValidationError):
+            ps.validate_proposal(p)
+
+    def test_windows_reserved_com1(self):
+        p = good()
+        p["skills"][0]["name"] = "COM1"
+        with self.assertRaises(ps.ValidationError):
+            ps.validate_proposal(p)
+
+    def test_windows_reserved_lpt9(self):
+        p = good()
+        p["skills"][0]["name"] = "LPT9"
+        with self.assertRaises(ps.ValidationError):
+            ps.validate_proposal(p)
+
+
+class TestMinor6VersionType(unittest.TestCase):
+    """MINOR 6: True and 1.0 pass the version check"""
+    def test_version_true_rejected(self):
+        with self.assertRaises(ps.ValidationError):
+            ps.validate_proposal({"version": True})
+
+    def test_version_float_rejected(self):
+        with self.assertRaises(ps.ValidationError):
+            ps.validate_proposal({"version": 1.0})
+
+
+class TestMinor8NulBytes(unittest.TestCase):
+    """MINOR 8: NUL bytes in content"""
+    def test_nul_byte_in_memory_content_rejected(self):
+        p = good()
+        p["memory"][0]["content"] = "hello\x00world"
+        with self.assertRaises(ps.ValidationError):
+            ps.validate_proposal(p)
+
+    def test_nul_byte_in_skill_content_rejected(self):
+        p = good()
+        p["skills"][0]["content"] = "# Skill\x00"
+        with self.assertRaises(ps.ValidationError):
+            ps.validate_proposal(p)
+
+
+class TestTypeChecks(unittest.TestCase):
+    """Ensure all type checks are enforced"""
+    def test_memory_not_a_list(self):
+        p = good()
+        p["memory"] = "not a list"
+        with self.assertRaises(ps.ValidationError):
+            ps.validate_proposal(p)
+
+    def test_skills_not_a_list(self):
+        p = good()
+        p["skills"] = "not a list"
+        with self.assertRaises(ps.ValidationError):
+            ps.validate_proposal(p)
+
+    def test_memory_entry_not_a_dict(self):
+        p = good()
+        p["memory"] = ["not a dict"]
+        with self.assertRaises(ps.ValidationError):
+            ps.validate_proposal(p)
+
+    def test_skill_entry_not_a_dict(self):
+        p = good()
+        p["skills"] = ["not a dict"]
+        with self.assertRaises(ps.ValidationError):
+            ps.validate_proposal(p)
+
+    def test_memory_content_not_a_string(self):
+        p = good()
+        p["memory"][0]["content"] = 123
+        with self.assertRaises(ps.ValidationError):
+            ps.validate_proposal(p)
+
+    def test_skill_content_not_a_string(self):
+        p = good()
+        p["skills"][0]["content"] = 123
+        with self.assertRaises(ps.ValidationError):
+            ps.validate_proposal(p)
+
+
+class TestByteCounting(unittest.TestCase):
+    """Ensure byte counting (not char counting) is used"""
+    def test_multibyte_counted_as_bytes(self):
+        # "é" is 2 bytes in UTF-8, so this should exceed the byte limit
+        p = good()
+        p["memory"][0]["content"] = "é" * (ps.MAX_MEMORY_BYTES // 2 + 1)
+        with self.assertRaises(ps.ValidationError):
+            ps.validate_proposal(p)
+
+    def test_skill_byte_cap(self):
+        # One skill exceeding the per-skill byte cap
+        p = good()
+        p["skills"][0]["content"] = "x" * (ps.MAX_SKILL_BYTES + 1)
+        with self.assertRaises(ps.ValidationError):
+            ps.validate_proposal(p)
+
+
+class TestInputMutation(unittest.TestCase):
+    """Ensure validate_proposal does not mutate input"""
+    def test_validate_does_not_mutate_input(self):
+        p = good()
+        original = str(p)
+        try:
+            ps.validate_proposal(p)
+        except ps.ValidationError:
+            pass
+        self.assertEqual(str(p), original)
+
+
+class TestExtractEdgeCases(unittest.TestCase):
+    """Additional extract_proposal tests"""
+    def test_extract_non_string_returns_none(self):
+        result = ps.extract_proposal(123)
+        self.assertIsNone(result)
+
+    def test_extract_multiple_json_objects(self):
+        # Multiple JSON objects in text - should extract the valid one from bare scan
+        text = '{"version": 1}\nsome text {"extra": "data"}'
+        result = ps.extract_proposal(text)
+        # find("{") gets first, rfind("}") gets last, so we get the full text
+        # which is not valid JSON, so returns None - this is expected behavior
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":
