@@ -310,5 +310,50 @@ class TestExtractEdgeCases(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class TestFencePerformance(unittest.TestCase):
+    """Regression tests for ReDoS vulnerability in fence scanning"""
+
+    def test_many_fence_openers_is_fast(self):
+        """872 KB payload with many fence openers but no closers must complete quickly.
+
+        Adversarial input: ("```json\n{" + "a"*100) * 8000 = 872 KB
+        Previous regex took 26+ seconds due to catastrophic backtracking.
+        Linear scanning should complete in milliseconds, well under 1.0 second.
+        """
+        import time
+        payload = ("```json\n{" + "a"*100) * 8000
+        start = time.monotonic()
+        result = ps.extract_proposal(payload)
+        elapsed = time.monotonic() - start
+
+        self.assertIsNone(result, "Should return None, not hang")
+        self.assertLess(elapsed, 1.0, f"Must complete in under 1.0 seconds, took {elapsed:.4f}s")
+
+    def test_first_valid_fenced_block_wins(self):
+        """When multiple fenced blocks exist, first valid JSON wins"""
+        text = 'text\n```json\n{"version": 1}\n```\nmore\n```json\n{"version": 2}\n```'
+        result = ps.extract_proposal(text)
+        self.assertEqual(result, {"version": 1})
+
+    def test_ordinary_fenced_block(self):
+        """Prose, valid fenced JSON block, trailing prose: extracts correctly"""
+        text = 'Some prose explaining things\n```json\n{"version": 1}\n```\nMore trailing text'
+        result = ps.extract_proposal(text)
+        self.assertEqual(result, {"version": 1})
+
+    def test_fence_without_closer_falls_back_to_bare(self):
+        """Opening fence with no closer falls back to bare JSON extraction"""
+        text = '```json\n{"version": 1}\nno closing fence'
+        result = ps.extract_proposal(text)
+        # Falls back to bare JSON scan and finds the JSON object
+        self.assertEqual(result, {"version": 1})
+
+    def test_fenced_block_with_optional_language_tag(self):
+        """Fence without json tag should still extract"""
+        text = '```\n{"version": 1}\n```'
+        result = ps.extract_proposal(text)
+        self.assertEqual(result, {"version": 1})
+
+
 if __name__ == "__main__":
     unittest.main()

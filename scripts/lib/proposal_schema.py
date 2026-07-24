@@ -25,7 +25,8 @@ ALLOWED_MEMORY_FILES = frozenset({"MEMORY.md", "USER.md"})
 ALLOWED_MODES = frozenset({"replace", "append"})
 SKILL_NAME_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 
-_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+_FENCE = "```"
+_MAX_FENCE_CANDIDATES = 10
 
 _WINDOWS_RESERVED = frozenset(
     {"CON", "PRN", "AUX", "NUL"}
@@ -45,6 +46,31 @@ def _need(cond: bool, msg: str) -> None:
 
 def _size(text: str) -> int:
     return len(text.encode("utf-8"))
+
+
+def _fenced_candidates(text: str):
+    """Yield candidate JSON strings from fenced blocks, without backtracking.
+
+    A regex such as ```(?:json)?\\s*(\\{.*?\\})\\s*``` under DOTALL retries from
+    every fence opener when there is no valid closer: 872 KB of adversarial
+    reviewer output cost 26 seconds. str.find scanning is linear and cannot be
+    driven into that behaviour.
+    """
+    pos = 0
+    yielded = 0
+    while yielded < _MAX_FENCE_CANDIDATES:
+        start = text.find(_FENCE, pos)
+        if start == -1:
+            return
+        line_end = text.find("\n", start + len(_FENCE))
+        if line_end == -1:
+            return
+        end = text.find(_FENCE, line_end + 1)
+        if end == -1:
+            return
+        yield text[line_end + 1:end].strip()
+        yielded += 1
+        pos = end + len(_FENCE)
 
 
 def validate_proposal(obj: object) -> dict:
@@ -121,13 +147,12 @@ def extract_proposal(text: str) -> dict | None:
     if len(text.encode("utf-8", errors="ignore")) > MAX_INPUT_BYTES:
         return None
 
-    # Try fenced block first
-    match = _FENCE_RE.search(text)
-    if match:
+    # Try fenced blocks first (in order, linear-time scan prevents ReDoS)
+    for candidate in _fenced_candidates(text):
         try:
-            return json.loads(match.group(1))
+            return json.loads(candidate)
         except (json.JSONDecodeError, RecursionError, ValueError, TypeError):
-            pass  # Fall through to bare scan
+            pass  # Try next candidate
 
     # Fall back to bare JSON
     start = text.find("{")
