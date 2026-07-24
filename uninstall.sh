@@ -41,17 +41,21 @@ remove "${HOME}/.claude/backups/curator"
 SETTINGS="${HOME}/.claude/settings.json"
 if [[ -f "$SETTINGS" ]] && grep -q self-learning "$SETTINGS"; then
     BAK="${SETTINGS}.pre-uninstall-$(date +%s)"
-    cp "$SETTINGS" "$BAK"
-    jq '
-      if .hooks then
-        .hooks |= with_entries(
-          .value |= (
-            map(.hooks |= map(select(.command | test("self-learning") | not)))
-            | map(select((.hooks | length) > 0))
+    # settings.json may hold sensitive values; keep backup/temp files private.
+    ( umask 077
+      cp "$SETTINGS" "$BAK"
+      jq '
+        if .hooks then
+          .hooks |= with_entries(
+            .value |= (
+              map(.hooks |= map(select(.command | test("self-learning") | not)))
+              | map(select((.hooks | length) > 0))
+            )
           )
-        )
-      else . end
-    ' "$BAK" > "${SETTINGS}.tmp"
+        else . end
+      ' "$BAK" > "${SETTINGS}.tmp"
+    )
+    chmod 600 "$BAK" "${SETTINGS}.tmp" 2>/dev/null || true
     jq . "${SETTINGS}.tmp" > /dev/null   # validate before replacing
     mv "${SETTINGS}.tmp" "$SETTINGS"
     echo "  stripped self-learning hooks from settings.json (backup: $BAK)"
