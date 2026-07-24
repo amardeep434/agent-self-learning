@@ -14,7 +14,8 @@
 
 set -euo pipefail
 
-LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/lib" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB_DIR="${SCRIPT_DIR}/lib"
 
 # Recursion guard: a spawned reviewer's own Stop hook must not re-trigger review.
 if [[ -n "${SL_REVIEW_ACTIVE:-}" ]]; then
@@ -28,7 +29,7 @@ source "${LIB_DIR}/hook-input.sh"
 
 STATE_DIR="${SL_STATE_DIR}"
 COUNTER_FILE="${STATE_DIR}/turn_counter.json"
-REVIEW_ENABLED="${CLAUDE_REVIEW_ENABLED:-true}"
+REVIEW_ENABLED="${SL_REVIEW_ENABLED:-true}"
 MIN_TURNS_FOR_REVIEW="${SL_REVIEW_MIN_TURNS}"
 LOG_DIR="${SL_LOG_DIR}/reviews"
 
@@ -63,7 +64,7 @@ Then perform a combined memory + skill review:
 ## Task: Combined Review
 
 1. **Memory review**: Scan for user corrections, project facts, user preferences,
-   and user profile information. Write to MEMORY.md or USER.md as appropriate.
+   and user profile information worth proposing for MEMORY.md or USER.md.
 
 2. **Skill review**: Scan for reusable patterns, commands, or workflows that
    should be saved as learned skills. Prefer updating existing skills over
@@ -78,9 +79,24 @@ Then perform a combined memory + skill review:
 - Skill names must match ^[a-z0-9][a-z0-9._-]*\$ and be max 64 characters
 - Skill descriptions must be max 60 characters, one sentence, end with period
 - Set created_by="agent" in .usage.json for any new skill
-- You may ONLY use Read, Write, Edit, Glob, and Grep tools
-- Do NOT use Bash for anything except mkdir and listing files
+- You may ONLY use Read, Glob, and Grep tools to gather context
+- Do NOT use Bash for anything except listing files
 - Do NOT make network requests or install packages
+
+OUTPUT CONTRACT — follow exactly:
+Do NOT write, create, or edit any file. You have no permission to do so and
+any attempt will be discarded. Emit exactly one JSON object as your entire
+final message, in a fenced json block:
+
+\`\`\`json
+{"version": 1,
+ "memory": [{"file": "MEMORY.md", "mode": "replace", "content": "<full new contents>"}],
+ "skills": [{"name": "kebab-case-name", "content": "<full skill markdown>"}]}
+\`\`\`
+
+Rules: "file" must be MEMORY.md or USER.md. "mode" is "replace" or "append".
+"name" must match [A-Za-z0-9][A-Za-z0-9_-]{0,63}. Omit "memory" or "skills"
+entirely when there is nothing to record. Emit nothing after the block.
 RPEOF
 )"
 
@@ -105,16 +121,36 @@ prevent that anti-pattern in future sessions. Do not exceed the write limits."
 fi
 
 # --- Spawn review process in background ---
-# The review runs as a detached process so it does not block session exit.
-
-REVIEW_LOG="${LOG_DIR}/$(date +%Y%m%d-%H%M%S)-session-review.log"
+# The reviewer proposes; this script persists. The ENTIRE pipeline is
+# backgrounded: a review takes minutes while the Stop hook timeout is
+# 15000 ms, so running it synchronously would have the harness kill the
+# review mid-flight. Backgrounding the pipeline (not merely the reviewer)
+# keeps the hook fast while still ensuring the writer — never the agent —
+# owns every write.
+#
+# Arguments are passed positionally into `bash -c`, never interpolated into
+# the script body: $REVIEW_PROMPT contains model-generated text, and
+# interpolating it would be a shell-injection hole.
+#
+# Because the pipeline is detached, this hook cannot report persistence
+# failure through its own exit code. Failures are appended to
+# "${SL_LOG_DIR}/persist-failures.log", which scripts/doctor.sh surfaces --
+# that log is the visibility mechanism replacing the exit code.
 
 if command -v claude &>/dev/null; then
-    SL_REVIEW_ACTIVE=1 nohup claude -p "$REVIEW_PROMPT" \
-        --max-turns "${SL_REVIEW_MAX_TURNS}" \
-        --output-format text \
-        > "$REVIEW_LOG" 2>&1 &
-    disown
+    mkdir -p "${SL_LOG_DIR}"
+    SL_REVIEW_ACTIVE=1 nohup bash -c '
+        set -o pipefail
+        "$1" -p "$2" 2>>"$3/review-stderr.log" \
+            | python3 "$4" >>"$3/persist.log" 2>&1
+        status=$?
+        if [[ $status -ne 0 ]]; then
+            printf "%s session-review: pipeline failed (status %s)\n" \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$status" >>"$3/persist-failures.log"
+        fi
+    ' _ claude "$REVIEW_PROMPT" "$SL_LOG_DIR" "${SCRIPT_DIR}/persist-proposal.py" \
+        >/dev/null 2>&1 &
+    disown 2>/dev/null || true
 fi
 
 # --- Update counter state ---

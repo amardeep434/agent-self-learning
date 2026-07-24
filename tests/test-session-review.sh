@@ -54,5 +54,42 @@ check "settings-hooks.json nested schema" "yes" "$SCHEMA_OK"
 ROLLING=$(grep -c 'rolling-transcript' "${SCRIPT_DIR}/config/settings-hooks.json" || true)
 check "no reference to nonexistent rolling-transcript.sh" "0" "$ROLLING"
 
+# 5) Reviewer output is persisted by the writer, not by the agent.
+TMP_HOME="$(mktemp -d)"
+FAKE_BIN="$(mktemp -d)"
+cat > "${FAKE_BIN}/claude" <<'FAKE'
+#!/usr/bin/env bash
+# Ignore all arguments; emit a valid proposal on stdout and write nothing.
+cat <<'JSON'
+```json
+{"version": 1, "memory": [{"file": "MEMORY.md", "mode": "replace", "content": "persisted-by-writer"}]}
+```
+JSON
+FAKE
+chmod +x "${FAKE_BIN}/claude"
+
+# The script exits early unless a turn counter above the min-turns gate
+# already exists, so seed one under the resolved state dir before invoking.
+mkdir -p "${TMP_HOME}/store/state"
+echo '{"session_id":"s5","total_turns_this_session":9,"memory_turns":0,"skill_iterations":0}' \
+    > "${TMP_HOME}/store/state/turn_counter.json"
+
+env -i HOME="$TMP_HOME" PATH="${FAKE_BIN}:${PATH}" \
+    AGENT_LEARNING_HOME="${TMP_HOME}/store" \
+    SL_CONFIG_FILE="/nonexistent/x.conf" \
+    bash "${SCRIPT_DIR}/scripts/session-review.sh" </dev/null >/dev/null 2>&1 || true
+
+for _ in $(seq 1 50); do
+    [[ -f "${TMP_HOME}/store/memory/MEMORY.md" ]] && break
+    sleep 0.2
+done
+
+if [[ -f "${TMP_HOME}/store/memory/MEMORY.md" ]]; then
+    check "reviewer proposal persisted" "persisted-by-writer" "$(cat "${TMP_HOME}/store/memory/MEMORY.md")"
+else
+    echo "FAIL: MEMORY.md was not written by the writer"; FAILURES=$((FAILURES+1))
+fi
+rm -rf "$TMP_HOME" "$FAKE_BIN"
+
 if [[ "$FAILURES" -gt 0 ]]; then exit 1; fi
 echo "All session-review tests passed."
