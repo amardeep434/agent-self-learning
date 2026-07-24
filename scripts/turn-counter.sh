@@ -9,26 +9,33 @@
 # 3. Write a signal file when either threshold is reached
 # 4. Handle session boundary detection (reset on new session)
 #
-# Environment variables (set by Claude Code hook system):
-#   CLAUDE_TOOL_NAME     - Name of the tool that was used
-#   CLAUDE_SESSION_ID    - Current session identifier (if available)
-#
-# Configuration (via environment or defaults):
-#   CLAUDE_MEMORY_REVIEW_INTERVAL  - Turns between memory reviews (default: 10)
-#   CLAUDE_SKILL_REVIEW_INTERVAL   - Tool iterations between skill reviews (default: 10)
+# Input: Claude Code hook payload JSON on stdin (session_id, tool_name, ...).
+# Configuration: scripts/lib/config.sh (env > $SL_HOME/self-learning.conf > defaults).
 #
 # Performance target: <50ms execution time (pure bash + jq, no Python)
 
 set -euo pipefail
 
-STATE_DIR="${HOME}/.claude/state/self-learning"
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/lib" && pwd)"
+
+# Recursion guard: never count tool calls made by a spawned background reviewer.
+if [[ -n "${SL_REVIEW_ACTIVE:-}" ]]; then
+    exit 0
+fi
+
+# shellcheck disable=SC1091
+source "${LIB_DIR}/config.sh"
+# shellcheck disable=SC1091
+source "${LIB_DIR}/hook-input.sh"
+
+STATE_DIR="${SL_STATE_DIR}"
 COUNTER_FILE="${STATE_DIR}/turn_counter.json"
 SIGNAL_FILE="${STATE_DIR}/review_signal.json"
 LOCK_DIR="${STATE_DIR}/counter.lock"
-MEMORY_INTERVAL="${CLAUDE_MEMORY_REVIEW_INTERVAL:-10}"
-SKILL_INTERVAL="${CLAUDE_SKILL_REVIEW_INTERVAL:-10}"
-SESSION_ID="${CLAUDE_SESSION_ID:-unknown}"
-TOOL_NAME="${CLAUDE_TOOL_NAME:-unknown}"
+MEMORY_INTERVAL="${SL_MEMORY_REVIEW_INTERVAL}"
+SKILL_INTERVAL="${SL_SKILL_REVIEW_INTERVAL}"
+SESSION_ID="${HOOK_SESSION_ID}"
+TOOL_NAME="${HOOK_TOOL_NAME}"
 
 mkdir -p "$STATE_DIR"
 

@@ -45,25 +45,51 @@ SESSION START
 +-------------------+
 ```
 
-## Quick Start
+## Requirements
 
+| Dependency | Needed for | Version | Windows notes |
+|------------|-----------|---------|---------------|
+| bash | all scripts | 4.0+ | via Git for Windows (Git Bash) or WSL |
+| jq | hook payload + settings/JSON handling | 1.6+ | `winget install jqlang.jq` |
+| python3 | injector, coach signals, session indexing | 3.8+ (stdlib only) | `winget install Python.Python.3.12` |
+| sqlite3 | session search index | 3.35+ | bundled with Python or `winget install SQLite.SQLite` |
+| Claude Code | Claude adapter (optional) | current | — |
+| GitHub Copilot CLI | Copilot adapter (optional) | current, authenticated | PowerShell 7+ required for its hooks |
+| gh CLI | vendoring Coach rules, fork maintenance | 2.40+ | `winget install GitHub.cli` |
+| Node.js + npm | building the Coach fork VSIX (Route B only) | Node 22+ | `winget install OpenJS.NodeJS` |
+
+At least one of Claude Code / Copilot CLI must be installed for the system to do anything.
+
+## Install
+
+**Linux / macOS**
 ```bash
-# Clone and install
-git clone https://github.com/<your-org>/claude-self-learning.git
-cd claude-self-learning
-bash install.sh
-
-# Verify installation
-bash scripts/self-learning-health.sh
+git clone <this-repo> && cd claude-self-learning
+bash install.sh            # add --dry-run to preview
 ```
 
-The install script:
-1. Copies hook scripts to `~/.claude/scripts/`
-2. Copies review prompts to `~/.claude/scripts/review-prompts/`
-3. Registers PostToolUse and Stop hooks in `~/.claude/settings.json`
-4. Creates required directories (`state/`, `memory/`, `learned-skills/`, `sessions/`, `logs/`)
-5. Initializes the SQLite FTS5 database for session search
-6. Appends the self-learning protocol to `~/.claude/CLAUDE.md`
+**Windows (PowerShell, with Git for Windows installed)**
+```powershell
+git clone <this-repo>; cd claude-self-learning
+.\install.ps1              # delegates to install.sh via Git Bash
+```
+
+Then register the Claude Code hooks by merging `config/settings-hooks.json` into
+`~/.claude/settings.json` (the installer prints the exact JSON). The Copilot CLI
+hook is installed automatically to `~/.copilot/hooks/self-learning.json` when
+`~/.copilot` exists.
+
+## Uninstall (single command)
+
+```bash
+bash uninstall.sh            # removes EVERYTHING incl. learned data (asks first)
+bash uninstall.sh --keep-data  # keep memory, skills, and the session index
+bash uninstall.sh --yes        # non-interactive
+```
+
+Windows: `.\uninstall.ps1` (same flags). This also strips the self-learning
+hooks from `~/.claude/settings.json` (a timestamped backup is written first)
+and removes `~/.copilot/hooks/self-learning.json`.
 
 ## Subsystems
 
@@ -74,6 +100,37 @@ The install script:
 | 3 | **Memory System** | Bounded MEMORY.md (agent notes) and USER.md (user profile) stores with frozen snapshot loading and threat scanning. |
 | 4 | **Curator** | Periodic maintenance daemon that consolidates narrow skills into class-level umbrellas and archives unused skills. |
 | 5 | **Session Search** | SQLite FTS5-indexed cross-session search with four query shapes: discover, scroll, read, browse. |
+
+## Agent compatibility
+
+| Capability | Claude Code | GitHub Copilot CLI | Notes |
+|------------|-------------|--------------------|-------|
+| Learned memory + skills stores | ✅ | ✅ | shared files, agent-agnostic |
+| AGENTS.md learned-context injection | ✅ | ✅ | Copilot also reads CLAUDE.md |
+| Session-end background review | ✅ Stop hook | ✅ sessionEnd hook | both spawn a headless reviewer |
+| Mid-session turn counting | ✅ PostToolUse hook | ❌ not wired | deliberate: session-end loop is the portable core |
+| Session search indexing | ✅ (Claude JSONL) | ❌ planned | Copilot session-state parser is a follow-up plan |
+| Coach signals (Routes A/B) | ✅ | ✅ | consumed by both reviewers |
+| Windows | ✅ via Git Bash/WSL | ✅ via Git Bash/WSL | Copilot hooks additionally need PowerShell 7+ |
+
+## AI Engineering Coach integration (optional)
+
+Two independent, off-by-default integrations with
+[microsoft/AI-Engineering-Coach](https://github.com/microsoft/AI-Engineering-Coach).
+Enable either or both in `~/.claude/self-learning.conf`:
+
+| Flag | Route | What it does | Requires |
+|------|-------|--------------|----------|
+| `SL_COACH_RULES_ENABLED=true` | A — rules mode | Evaluates Coach's MIT-licensed anti-pattern rules (vendored in `vendor/coach-rules/`) against our own session index; triggered rules steer the background review. Fully automatic. | nothing extra |
+| `SL_COACH_EXPORT_ENABLED=true` | B — export mode | Reads the full Coach analysis from `~/.aiec/summary-latest.json`, written automatically by our maintained fork's auto-export patch. Richer signals than Route A. | the fork's `.vsix` installed in VS Code |
+
+When both are enabled, signals are merged and deduplicated by rule id; Route B
+(export) data wins because it comes from Coach's complete analyzer.
+
+Route A rule coverage is a documented subset of Coach's detect DSL; unsupported
+rules are skipped and logged, never guessed at. Re-vendor rules with
+`bash scripts/sync-coach-rules.sh`. The fork lives at
+`<org>/ai-engineering-coach-fork` (see its FORK-NOTES.md for the sync protocol).
 
 ## Roadmap
 
@@ -130,6 +187,26 @@ The `docs/research/` directory contains the full analysis of NousResearch's Herm
 2. **Frozen snapshot** -- Memory and skills are snapshotted into the system prompt at session start. Mid-session writes update disk but do not mutate the running prompt (preserves prefix cache hits).
 3. **Bounded storage** -- Character limits on memory stores, lifecycle pruning on skills. The system cannot grow without bound.
 4. **Class-level skills over narrow skills** -- Prefer broad, reusable skills ("Python testing patterns") over narrow ones ("how to mock datetime in pytest"). The Curator enforces this via consolidation.
+
+## Configuration reference
+
+All settings live in `~/.claude/self-learning.conf` (shell syntax, `VAR=value`).
+Environment variables with the same names override the file.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `SL_HOME` | `~/.claude` | Root for all state |
+| `SL_COACH_RULES_ENABLED` | `false` | Coach Route A (rule evaluation) |
+| `SL_COACH_EXPORT_ENABLED` | `false` | Coach Route B (fork auto-export) |
+| `SL_COACH_EXPORT_PATH` | `~/.aiec/summary-latest.json` | Route B input file |
+| `SL_MEMORY_REVIEW_INTERVAL` | `10` | Turns between memory review signals |
+| `SL_SKILL_REVIEW_INTERVAL` | `10` | Tool calls between skill review signals |
+| `SL_REVIEW_MIN_TURNS` | `5` | Minimum session turns before a review runs |
+| `SL_REVIEW_MAX_TURNS` | `16` | Turn cap for the spawned reviewer |
+| `SL_COPILOT_REVIEW_MODEL` | (CLI default) | Model for Copilot reviews; use the cheapest available. Must match `^[A-Za-z0-9._-]+$` |
+| `SL_SKILLOPT_ENABLED` | `false` | Route C: SkillOpt skill optimization (opt-in) |
+| `SL_SKILLOPT_REPO` | (empty) | path to a microsoft/SkillOpt checkout |
+| `SL_SKILLOPT_RUN_CONFIRMED` | `false` | safety gate; the expensive `run` verb refuses until set true after a dry-run cost review |
 
 ## License
 
