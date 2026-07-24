@@ -9,6 +9,7 @@ export const meta = {
     { title: 'Phase D: Coach Route A' },
     { title: 'Phase E: Coach fork Route B', model: 'opus' },
     { title: 'Phase F: Hardening, uninstall, Windows, docs' },
+    { title: 'Phase G: Route C opt-in (SkillOpt)' },
     { title: 'Final checks' },
   ],
 }
@@ -43,6 +44,7 @@ const TASKS = [
   { n: 17, title: 'Single-command complete uninstall',         model: 'sonnet', phase: 'Phase F: Hardening, uninstall, Windows, docs' },
   { n: 18, title: 'Windows support (ps1 wrappers + hooks)',    model: 'sonnet', phase: 'Phase F: Hardening, uninstall, Windows, docs' },
   { n: 19, title: 'Documentation overhaul',                    model: 'sonnet', phase: 'Phase F: Hardening, uninstall, Windows, docs' },
+  { n: 20, title: 'Route C opt-in — SkillOpt CLI wrapper',     model: 'sonnet', phase: 'Phase G: Route C opt-in (SkillOpt)' },
 ]
 
 const RESULT_SCHEMA = {
@@ -104,7 +106,7 @@ function taskPrompt(t) {
 // done inline in the fork repo (the subagent path is blocked by the safety
 // classifier on the public fork/push, so they cannot run here). Default the
 // start point to 15 so a plain relaunch resumes the remaining main-repo work.
-const startTask = (args && args.startTask) || 18
+const startTask = (args && args.startTask) || 20
 const results = []
 
 for (const t of TASKS) {

@@ -21,7 +21,7 @@
 - Recursion guard: any script that spawns a headless agent (`claude -p` or `copilot -p`) must export `SL_REVIEW_ACTIVE=1` into the child environment, and every hook entry script must exit 0 immediately when `SL_REVIEW_ACTIVE` is set (a spawned reviewer's own session-end must never trigger another review).
 - Commit after every task using conventional commits (`feat:`, `fix:`, `test:`, `docs:`, `chore:`). No attribution footers (user has attribution disabled globally).
 - Verification gates (Tasks 8 and 9) are **hard stops**: if a gate fails, record the observed behavior in `docs/verification-log.md`, do not improvise a workaround, and stop for human review.
-- Out of scope for this plan (deliberately — follow-up plans required): VS Code Copilot adapter, session-search parser ports for Copilot formats, curator LLM consolidation pass, org pilot metrics protocol, and Route C / SkillOpt integration (see the "Deferred — Route C" section at the end of this document). Do not build any of these.
+- Out of scope for this plan (deliberately — follow-up plans required): VS Code Copilot adapter, session-search parser ports for Copilot formats, curator LLM consolidation pass, org pilot metrics protocol. Do not build any of these. Route C / SkillOpt: Task 20 builds ONLY the opt-in switch + safe CLI passthrough; the automatic optimization loop remains deferred behind a cost spike (see the "Route C — SkillOpt integration" section).
 
 ## File Structure
 
@@ -2592,32 +2592,181 @@ git commit -m "docs: requirements, install/uninstall for Linux/macOS/Windows, co
 
 ---
 
-## Deferred — Route C: SkillOpt integration (decided 2026-07-23, deliberately NOT scheduled)
+## Route C — SkillOpt integration (opt-in feature; concrete path confirmed 2026-07-24)
 
 **What:** optional integration with [microsoft/SkillOpt](https://github.com/microsoft/SkillOpt) /
 `skillopt-sleep` — validation-gated offline optimization of our learned skills
-(the quality-measurement piece this system otherwise lacks). Would ship as a
-third off-by-default flag (`SL_SKILLOPT_ENABLED`), file-based only (its MCP/plugin
-integration shells are unusable here: org policy disables MCP).
+(the quality-measurement piece this system otherwise lacks). Ships as a third
+off-by-default flag (`SL_SKILLOPT_ENABLED`), same independent-flag semantics as
+Coach Routes A/B. **File-based only — we do NOT use SkillOpt's Copilot MCP
+server** (org policy disables MCP).
 
-**Why deferred, not rejected:**
-1. Rollout-heavy optimization loop = the most token-expensive feature considered so far; not before v1 proves skills get used at all.
-2. Its validation gate needs mined task sets; whether that works on our ad-hoc harvested skills is unverified (README-level knowledge only).
-3. Python 3.10+ / pip dependency conflicts with the stdlib-only 3.8+ install story; needs its own dependency gate.
-4. Fast-moving research project (v0.2.0); coupling v1 to it adds churn risk we don't control.
+**Concrete integration surface (verified by reading the repo, 2026-07-24):**
+SkillOpt's `plugins/` ship a shared CLI runner, `run-sleep.sh`, described in its
+own header as *"used by all platform plugins (Claude Code, Codex, Copilot)."* It
+resolves a Python ≥3.10 and execs the engine with subcommands
+`status | harvest | dry-run | run | adopt`. Their Claude Code plugin drives it
+from a non-blocking `SessionEnd` hook + nightly cron; their Copilot plugin wraps
+the *same* CLI in an `mcp_server.py`. Because the runner is a plain CLI, we call
+it directly and skip the MCP wrapper entirely — the file-based path their own
+Claude Code plugin already uses. Cheap verbs: `status`, `harvest`, `dry-run`.
+Expensive verb (rollout optimizer, many LLM calls): `run`.
 
-**Prerequisite before any Route C plan is written:** a verification spike —
-install `skillopt`, run `skillopt-sleep` file-based (no MCP) against real
-session history, and measure the actual token cost of one optimization cycle.
-The spike's results decide; if it fails or costs too much, Route C stays out.
+**Cost/dependency posture (why it is opt-in and spike-gated, not on by default):**
+1. `run` is the most token-expensive operation in the whole system; it must never fire unless the user explicitly enabled it AND a dry-run cost check has been recorded.
+2. Python 3.10+ requirement (from `run-sleep.sh`) conflicts with our stdlib-only 3.8+ core; SkillOpt is an optional dependency the user installs separately.
+3. Validation-set fit on our ad-hoc harvested skills is unproven until `harvest` is run for real.
 
-**Sketch if the spike passes:** curator-triggered handoff of the top-N
-most-used skills → `skillopt` optimization → validated `best_skill.md`
-imported back with provenance, original kept until the optimized version wins,
-hard monthly token budget. `SL_SKILLOPT_ENABLED=false` default, same
-independent-flag semantics as Routes A/B.
+Task 20 below implements the opt-in switch and the cheap, safe parts unconditionally;
+the expensive `run` stays behind both the flag and a recorded dry-run gate.
 
-**Implementing agents: do not build any part of this from the current plan.**
+### Task 20: Route C opt-in — SkillOpt wrapper (flag + cheap verbs; `run` gated)
+
+**Files:**
+- Modify: `config/self-learning.conf` (add `SL_SKILLOPT_ENABLED=false`)
+- Modify: `scripts/lib/config.sh` (export `SL_SKILLOPT_ENABLED`, `SL_SKILLOPT_REPO`, `SL_SKILLOPT_RUN_CONFIRMED`)
+- Create: `scripts/skillopt-run.sh`
+- Test: `tests/test-skillopt-run.sh`
+
+**Interfaces:**
+- Consumes: `scripts/lib/config.sh`. New config vars: `SL_SKILLOPT_ENABLED` (default `false`), `SL_SKILLOPT_REPO` (default `""` — path to a SkillOpt source checkout containing `skillopt_sleep/` and `plugins/run-sleep.sh`), `SL_SKILLOPT_RUN_CONFIRMED` (default `false` — the dry-run cost gate; `run` refuses unless this is `true`).
+- Produces: `scripts/skillopt-run.sh <status|harvest|dry-run|run|adopt> [args...]`. Behavior:
+  - When `SL_SKILLOPT_ENABLED != true`: print `skillopt: disabled (SL_SKILLOPT_ENABLED=false)` to stderr and exit 0 (no-op — feature fully off).
+  - When enabled but `SL_SKILLOPT_REPO` is empty or lacks `plugins/run-sleep.sh`: print a stderr note explaining how to point at a checkout, exit 0 (never crash the caller).
+  - Subcommand `run` additionally requires `SL_SKILLOPT_RUN_CONFIRMED=true`; otherwise print `skillopt: 'run' blocked — set SL_SKILLOPT_RUN_CONFIRMED=true after reviewing dry-run cost` to stderr and exit 0. All other verbs pass through.
+  - Otherwise exec `bash "$SL_SKILLOPT_REPO/plugins/run-sleep.sh" <subcommand> [args...]`.
+
+- [ ] **Step 1: Write the failing test**
+
+```bash
+#!/usr/bin/env bash
+# tests/test-skillopt-run.sh
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+export SL_CONFIG_FILE="/nonexistent"
+FAILURES=0
+check() { if [[ "$2" == "$3" ]]; then echo "PASS: $1"; else echo "FAIL: $1 (expected '$2', got '$3')"; FAILURES=$((FAILURES+1)); fi; }
+
+# Fake SkillOpt checkout whose run-sleep.sh just echoes its args
+mkdir -p "$TMP/skillopt/plugins" "$TMP/skillopt/skillopt_sleep"
+cat > "$TMP/skillopt/plugins/run-sleep.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "RUNSLEEP:$*"
+EOF
+chmod +x "$TMP/skillopt/plugins/run-sleep.sh"
+
+run() { bash "${SCRIPT_DIR}/scripts/skillopt-run.sh" "$@" 2>"$TMP/err"; }
+
+# 1) Disabled by default: no-op, exit 0, nothing passed through
+OUT=$(SL_SKILLOPT_ENABLED=false run status || echo "EXIT$?")
+check "disabled is no-op" "" "$OUT"
+check "disabled notes reason" "yes" "$(grep -q 'disabled' "$TMP/err" && echo yes || echo no)"
+
+# 2) Enabled but no repo: graceful stderr, exit 0
+OUT=$(SL_SKILLOPT_ENABLED=true SL_SKILLOPT_REPO="" run status || echo "EXIT$?")
+check "enabled+no-repo exit 0" "" "$OUT"
+check "enabled+no-repo explains" "yes" "$(grep -qi 'checkout\|SL_SKILLOPT_REPO' "$TMP/err" && echo yes || echo no)"
+
+# 3) Enabled + repo: cheap verb passes through
+OUT=$(SL_SKILLOPT_ENABLED=true SL_SKILLOPT_REPO="$TMP/skillopt" run harvest --since 1d)
+check "harvest passes through" "RUNSLEEP:harvest --since 1d" "$OUT"
+
+# 4) 'run' blocked unless confirmed
+OUT=$(SL_SKILLOPT_ENABLED=true SL_SKILLOPT_REPO="$TMP/skillopt" SL_SKILLOPT_RUN_CONFIRMED=false run run || echo "EXIT$?")
+check "run blocked without confirm" "" "$OUT"
+check "run block explains gate" "yes" "$(grep -q 'SL_SKILLOPT_RUN_CONFIRMED' "$TMP/err" && echo yes || echo no)"
+
+# 5) 'run' allowed when confirmed
+OUT=$(SL_SKILLOPT_ENABLED=true SL_SKILLOPT_REPO="$TMP/skillopt" SL_SKILLOPT_RUN_CONFIRMED=true run run)
+check "run passes when confirmed" "RUNSLEEP:run" "$OUT"
+
+if [[ "$FAILURES" -gt 0 ]]; then exit 1; fi
+echo "All skillopt-run tests passed."
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `bash tests/test-skillopt-run.sh`
+Expected: FAIL — `scripts/skillopt-run.sh: No such file or directory`.
+
+- [ ] **Step 3: Add the three config vars**
+
+In `config/self-learning.conf`, append: `SL_SKILLOPT_ENABLED=false`
+
+In `scripts/lib/config.sh`, add to the snapshot loop var list and the defaults+export block:
+
+```bash
+SL_SKILLOPT_ENABLED="${SL_SKILLOPT_ENABLED:-false}"
+SL_SKILLOPT_REPO="${SL_SKILLOPT_REPO:-}"
+SL_SKILLOPT_RUN_CONFIRMED="${SL_SKILLOPT_RUN_CONFIRMED:-false}"
+```
+
+and add all three names to the `export ...` line.
+
+- [ ] **Step 4: Write scripts/skillopt-run.sh**
+
+```bash
+#!/usr/bin/env bash
+# scripts/skillopt-run.sh — opt-in wrapper around SkillOpt's run-sleep.sh CLI.
+# File-based only; does NOT use SkillOpt's MCP server (org policy disables MCP).
+# Never crashes the caller: all handled paths exit 0.
+#
+# Usage: skillopt-run.sh <status|harvest|dry-run|run|adopt> [args...]
+
+set -uo pipefail
+
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/lib" && pwd)"
+# shellcheck disable=SC1091
+source "${LIB_DIR}/config.sh"
+
+if [[ "${SL_SKILLOPT_ENABLED}" != "true" ]]; then
+    echo "skillopt: disabled (SL_SKILLOPT_ENABLED=false)" >&2
+    exit 0
+fi
+
+RUNNER="${SL_SKILLOPT_REPO}/plugins/run-sleep.sh"
+if [[ -z "${SL_SKILLOPT_REPO}" || ! -f "${RUNNER}" ]]; then
+    echo "skillopt: no SkillOpt checkout found. Set SL_SKILLOPT_REPO to a clone of" >&2
+    echo "          microsoft/SkillOpt (must contain plugins/run-sleep.sh). Skipping." >&2
+    exit 0
+fi
+
+SUBCMD="${1:-status}"
+if [[ "${SUBCMD}" == "run" && "${SL_SKILLOPT_RUN_CONFIRMED}" != "true" ]]; then
+    echo "skillopt: 'run' blocked — set SL_SKILLOPT_RUN_CONFIRMED=true after reviewing dry-run cost" >&2
+    exit 0
+fi
+
+exec bash "${RUNNER}" "$@"
+```
+
+- [ ] **Step 5: Run test to verify it passes**
+
+Run: `bash tests/test-skillopt-run.sh`
+Expected: `All skillopt-run tests passed.` exit 0
+
+- [ ] **Step 6: Add to install.sh and document**
+
+Add `skillopt-run.sh` to the `SCRIPTS=(...)` array in `install.sh`. In `README.md`
+"Configuration reference" table, add rows for `SL_SKILLOPT_ENABLED` (default
+`false` — "Route C: SkillOpt skill optimization (opt-in)"), `SL_SKILLOPT_REPO`
+(default empty — "path to a microsoft/SkillOpt checkout"), and
+`SL_SKILLOPT_RUN_CONFIRMED` (default `false` — "safety gate; the expensive
+`run` verb refuses until set true after a dry-run cost review").
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add config/self-learning.conf scripts/lib/config.sh scripts/skillopt-run.sh tests/test-skillopt-run.sh install.sh README.md
+git commit -m "feat: Route C opt-in — SkillOpt CLI wrapper (flag off by default, run verb cost-gated)"
+```
+
+**Deferred beyond Task 20 (requires the cost spike first — do NOT build):** the
+automatic curator/cron trigger that calls `skillopt-run.sh run` on a schedule,
+and the `best_skill.md` import-back-with-provenance flow. Task 20 delivers only
+the user-enablable switch and safe manual passthrough; wiring the expensive loop
+into automation waits until `dry-run` cost on real data is measured and recorded.
 
 ---
 
