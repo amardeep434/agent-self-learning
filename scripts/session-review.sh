@@ -53,10 +53,10 @@ NOW=$(date -Iseconds)
 
 # --- Build the review prompt ---
 
-REVIEW_PROMPT="$(cat <<'RPEOF'
+REVIEW_PROMPT="$(cat <<RPEOF
 You are a Background Review agent for Claude Code, performing an end-of-session
-review. Read ~/.claude/memory/MEMORY.md, ~/.claude/memory/USER.md, and scan the
-learned-skills directory ~/.claude/learned-skills/ for existing skills.
+review. Read ${SL_MEMORY_DIR}/MEMORY.md, ${SL_MEMORY_DIR}/USER.md, and scan the
+learned-skills directory ${SL_SKILLS_DIR}/ for existing skills.
 
 Then perform a combined memory + skill review:
 
@@ -75,7 +75,7 @@ Then perform a combined memory + skill review:
 - Each memory entry must be a single line, under 120 characters
 - Never save: secrets, tokens, API keys, passwords, personal data beyond name/role
 - Check existing memory before adding -- do not duplicate
-- Skill names must match ^[a-z0-9][a-z0-9._-]*$ and be max 64 characters
+- Skill names must match ^[a-z0-9][a-z0-9._-]*\$ and be max 64 characters
 - Skill descriptions must be max 60 characters, one sentence, end with period
 - Set created_by="agent" in .usage.json for any new skill
 - You may ONLY use Read, Write, Edit, Glob, and Grep tools

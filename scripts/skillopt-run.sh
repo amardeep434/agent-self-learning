@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # scripts/skillopt-run.sh — opt-in wrapper around SkillOpt's run-sleep.sh CLI.
 # File-based only; does NOT use SkillOpt's MCP server (org policy disables MCP).
-# Never crashes the caller: all handled paths exit 0.
+#
+# Exit behavior: the guard paths (disabled, missing checkout, un-confirmed `run`)
+# all exit 0 so they never break a caller. The final passthrough exec'd the
+# SkillOpt runner and therefore returns the runner's OWN exit code — callers that
+# require a guaranteed 0 (e.g. a hook) must invoke this with a trailing `|| true`.
 #
 # Usage: skillopt-run.sh <status|harvest|dry-run|run|adopt> [args...]
 

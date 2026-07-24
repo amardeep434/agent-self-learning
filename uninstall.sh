@@ -37,28 +37,44 @@ remove "${HOME}/.claude/logs/reviews"
 remove "${HOME}/.claude/logs/curator"
 remove "${HOME}/.claude/backups/curator"
 
-# Strip our hooks from settings.json (backup first, keep everything else intact)
+# Strip our hooks from settings.json (backup first, keep everything else intact).
+# Best-effort: this runs AFTER files are deleted, so it must never abort the
+# uninstall — guard on jq, tolerate both the nested and legacy-flat hook schemas,
+# and warn (not fail) if the edit cannot be applied.
 SETTINGS="${HOME}/.claude/settings.json"
 if [[ -f "$SETTINGS" ]] && grep -q self-learning "$SETTINGS"; then
-    BAK="${SETTINGS}.pre-uninstall-$(date +%s)"
-    # settings.json may hold sensitive values; keep backup/temp files private.
-    ( umask 077
-      cp "$SETTINGS" "$BAK"
-      jq '
-        if .hooks then
-          .hooks |= with_entries(
-            .value |= (
-              map(.hooks |= map(select(.command | test("self-learning") | not)))
-              | map(select((.hooks | length) > 0))
-            )
-          )
-        else . end
-      ' "$BAK" > "${SETTINGS}.tmp"
-    )
-    chmod 600 "$BAK" "${SETTINGS}.tmp" 2>/dev/null || true
-    jq . "${SETTINGS}.tmp" > /dev/null   # validate before replacing
-    mv "${SETTINGS}.tmp" "$SETTINGS"
-    echo "  stripped self-learning hooks from settings.json (backup: $BAK)"
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "  jq not found — leaving settings.json unchanged; remove self-learning hooks manually" >&2
+    else
+        BAK="${SETTINGS}.pre-uninstall-$(date +%s)"
+        stripped=false
+        # settings.json may hold sensitive values; keep backup/temp files private.
+        # Filter handles both schemas: nested groups ({matcher,hooks:[{command}]})
+        # and legacy-flat entries ({matcher,command}).
+        ( umask 077
+          cp "$SETTINGS" "$BAK" && \
+          jq '
+            if .hooks then
+              .hooks |= map_values(
+                map(if has("hooks")
+                    then (.hooks |= map(select((.command // "") | test("self-learning") | not)))
+                    else . end)
+                | map(select(if has("hooks")
+                             then ((.hooks | length) > 0)
+                             else ((.command // "") | test("self-learning") | not) end))
+              )
+            else . end
+          ' "$BAK" > "${SETTINGS}.tmp" 2>/dev/null
+        ) && [[ -s "${SETTINGS}.tmp" ]] && jq . "${SETTINGS}.tmp" >/dev/null 2>&1 && stripped=true || true
+        chmod 600 "$BAK" "${SETTINGS}.tmp" 2>/dev/null || true
+        if [[ "$stripped" == "true" ]]; then
+            mv "${SETTINGS}.tmp" "$SETTINGS"
+            echo "  stripped self-learning hooks from settings.json (backup: $BAK)"
+        else
+            rm -f "${SETTINGS}.tmp" 2>/dev/null || true
+            echo "  WARNING: could not edit settings.json automatically (backup: $BAK) — remove self-learning hooks manually" >&2
+        fi
+    fi
 fi
 
 if [[ "$KEEP_DATA" != "true" ]]; then

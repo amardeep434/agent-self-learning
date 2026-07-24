@@ -201,6 +201,7 @@ COACH_RULES_SRC="${SCRIPT_DIR}/vendor/coach-rules"
 COACH_RULES_DST="${DEST_DIR}/coach-rules"
 
 if [[ -d "$COACH_RULES_SRC" ]]; then
+    do_mkdir "$COACH_RULES_DST"
     COACH_RULE_COUNT=0
     for rule_file in "${COACH_RULES_SRC}"/*.md; do
         if [[ -f "$rule_file" ]]; then
