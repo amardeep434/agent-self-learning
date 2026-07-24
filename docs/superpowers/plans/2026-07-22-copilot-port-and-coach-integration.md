@@ -2429,7 +2429,7 @@ Expected: FAIL — no `powershell` key, no `.ps1` files.
       {
         "type": "command",
         "bash": "bash ~/.claude/scripts/self-learning/copilot-session-review.sh",
-        "powershell": "bash -lc '~/.claude/scripts/self-learning/copilot-session-review.sh'",
+        "powershell": "bash -lc \"$HOME/.claude/scripts/self-learning/copilot-session-review.sh\"",
         "timeoutSec": 30
       }
     ]

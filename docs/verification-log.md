@@ -65,3 +65,8 @@
 - Auto-export command `aiEngineerCoach.exportSummaryAuto` + export-on-reload wired into src/extension.ts
 - REMAINING (needs a human in VS Code): install the .vsix, run the command, confirm no dialog and ~/.aiec/summary-latest.json is written. See fork FORK-NOTES.md.
 - Verdict: IMPLEMENTATION COMPLETE / LIVE-VERIFY PENDING
+
+## Gate 4 — Windows Copilot hook (config/copilot-hooks.json) — PENDING MANUAL
+- The `powershell` hook command uses `bash -lc "$HOME/.claude/.../copilot-session-review.sh"` (double-quoted + $HOME, per PR review #5). This form is NOT runtime-verified: no Windows machine was available. Home-dir expansion across the PowerShell→Git-Bash boundary is environment-dependent.
+- REMAINING (needs a human on Windows): install the Copilot CLI hook, end a session, confirm ~/.claude/logs/reviews/*-copilot-session-review.log is written (i.e. the path resolved). The Copilot PR reviewer is static LLM analysis, not a Windows execution — it cannot confirm this.
+- Verdict: NEEDS WINDOWS SMOKE TEST
