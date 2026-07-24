@@ -17,7 +17,7 @@ COMMIT_SHA=$(gh api "repos/${REPO}/commits/HEAD" --jq '.sha')
 COUNT=0
 for FILE in $(gh api "repos/${REPO}/contents/${RULES_PATH}?ref=${COMMIT_SHA}" --jq '.[] | select(.name | endswith(".md")) | .name'); do
     gh api "repos/${REPO}/contents/${RULES_PATH}/${FILE}?ref=${COMMIT_SHA}" --jq '.content' \
-        | base64 -d > "${DEST}/${FILE}"
+        | python3 -c 'import base64,sys;sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' > "${DEST}/${FILE}"
     COUNT=$((COUNT + 1))
     echo "  vendored: ${FILE}"
 done
