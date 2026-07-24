@@ -40,6 +40,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import paths  # noqa: E402
 from proposal_schema import ValidationError, extract_proposal, validate_proposal  # noqa: E402
 
+# Bounds the *accumulated* size of a memory file across repeated append-mode
+# proposals. proposal_schema caps a single proposal's content, but says
+# nothing about the file it lands in after many proposals have appended to
+# it over time -- without this, an adversary who cannot get past the
+# per-proposal cap in one shot can still grow MEMORY.md without bound across
+# many small, individually-valid proposals. 1 MiB is generous for a curated
+# memory/skill file while still bounding unattended growth.
+MAX_MEMORY_FILE_BYTES = 1 * 1024 * 1024
+
 
 class PersistError(Exception):
     """A filesystem-level confinement or write failure. Maps to exit code 2."""
@@ -54,9 +63,23 @@ def _reject_if_symlink(path: Path, what: str) -> None:
     this check races it. We still refuse explicitly and loudly: a planted
     symlink means something is wrong (attack or corrupted store), and
     silently overwriting-in-place would hide that.
+
+    Also refuses Windows reparse points (directory junctions in particular):
+    `Path.is_symlink()` does not detect them, but `os.lstat().st_reparse_tag`
+    does (present on Windows since Python 3.8; simply absent, and therefore a
+    harmless no-op, on POSIX). Junction creation on Windows does not require
+    the elevated privilege that symlink creation does, so this is not an
+    edge case -- it is the practical way this exact escape would be staged
+    on that platform.
     """
     if path.is_symlink():
         raise PersistError(f"refusing to use symlinked {what}: {path}")
+    try:
+        reparse_tag = getattr(path.lstat(), "st_reparse_tag", 0)
+    except OSError:
+        reparse_tag = 0  # doesn't exist yet -- nothing to reject
+    if reparse_tag:
+        raise PersistError(f"refusing to use reparse-point {what}: {path}")
 
 
 def _assert_inside(root: Path, target: Path) -> None:
@@ -105,13 +128,38 @@ def _open_nofollow_fd(path: Path, flags: int, mode: int = 0o644) -> int:
 
 
 def _read_existing(target: Path) -> str:
-    """Read the current content of `target` for append mode, or "" if absent."""
+    """Read the current content of `target` for append mode, or "" if absent.
+
+    Raises PersistError (never a raw traceback) for anything that makes the
+    existing file untrustworthy to read: a symlink/reparse-point target
+    (checked above), a hardlink to content outside the store (checked via
+    st_nlink below -- is_symlink() and O_NOFOLLOW are both blind to
+    hardlinks, since a hardlink IS a regular file from the filesystem's
+    point of view, just one with more than one directory entry pointing at
+    the same inode), or content that isn't valid UTF-8 (a write failure, not
+    a proposal-validation failure -- surfaced as PersistError/exit 2, not
+    left to raise UnicodeDecodeError past this function and collapse into
+    whatever the nearest bare `except` happens to catch).
+    """
     _reject_if_symlink(target, "target file")
     if not target.exists():
         return ""
     fd = _open_nofollow_fd(target, os.O_RDONLY)
-    with os.fdopen(fd, "r", encoding="utf-8", newline="") as handle:
-        return handle.read()
+    fd_owned_by_handle = False
+    try:
+        st = os.fstat(fd)
+        if st.st_nlink > 1:
+            raise PersistError(f"refusing to read multiply-linked file: {target}")
+        handle = os.fdopen(fd, "r", encoding="utf-8", newline="")
+        fd_owned_by_handle = True
+        try:
+            with handle:
+                return handle.read()
+        except UnicodeDecodeError as exc:
+            raise PersistError(f"existing file is not valid UTF-8: {target}") from exc
+    finally:
+        if not fd_owned_by_handle:
+            os.close(fd)
 
 
 def _stage(root: Path, data: str) -> str:
@@ -119,6 +167,14 @@ def _stage(root: Path, data: str) -> str:
 
     Writing here never touches the real target -- that only happens in the
     rename phase, once every entry in the proposal has staged successfully.
+
+    `tempfile.mkstemp` creates the file at mode 0600, and `os.replace` carries
+    that mode onto the final target rather than whatever mode a pre-existing
+    file had. That's deliberate, not an oversight: learned content is
+    sensitive by the same threat model that governs everything else here, and
+    0600 removes any window where a partially-written file is readable by
+    anyone but the owner. A previously-0644 MEMORY.md coming back as 0600
+    after a proposal is applied is this policy working as intended.
     """
     fd, tmp_name = tempfile.mkstemp(dir=root, prefix=".persist-tmp-")
     try:
@@ -158,6 +214,12 @@ def _write_all(planned: list[tuple[Path, Path, str, str]]) -> tuple[list[str], i
     rather than a false success; a fully cross-file atomic commit would need
     a journal or a directory-swap trick this stdlib-only, cross-platform
     script does not attempt.
+
+    A narrower, un-closed residual also lives between `_assert_inside(root,
+    ...)` above and `tempfile.mkstemp(dir=root)` inside `_stage`: `root`
+    could in principle be swapped for a symlink in that gap. Closing it
+    would need `dir_fd`-relative operations throughout, and `mkstemp` has no
+    `dir_fd` parameter to hang that off of. Documented, not fixed.
     """
     staged: list[tuple[str, Path]] = []
     total = 0
@@ -175,6 +237,14 @@ def _write_all(planned: list[tuple[Path, Path, str, str]]) -> tuple[list[str], i
                 raise PersistError(f"refusing to write over existing directory: {target}")
 
             data = _read_existing(target) + content if mode == "append" else content
+            if len(data.encode("utf-8")) > MAX_MEMORY_FILE_BYTES:
+                # proposal_schema bounds a single proposal's content; it has
+                # no notion of what's already on disk. Without this, many
+                # individually-valid append proposals could grow a memory
+                # file without bound over time.
+                raise PersistError(
+                    f"{target} would exceed {MAX_MEMORY_FILE_BYTES} bytes after this write"
+                )
             tmp_name = _stage(root, data)
             staged.append((tmp_name, target))
             total += len(content.encode("utf-8"))
@@ -219,7 +289,13 @@ def main(argv: list[str]) -> int:
 
     try:
         written, total = _write_all(planned)
-    except (OSError, PersistError) as exc:
+    except (OSError, PersistError, ValueError) as exc:
+        # ValueError is deliberately included alongside the two expected
+        # failure types: it's the base class for UnicodeDecodeError and
+        # covers any future decode/parse-shaped failure in the write path
+        # too. A write failure must always exit 2, never fall through
+        # uncaught and collapse into a traceback that looks like (or is
+        # mistaken for) the validation-failure exit code of 1.
         print(f"persist-proposal: write failed: {exc}", file=sys.stderr)
         return 2
 
