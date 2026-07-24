@@ -104,7 +104,7 @@ function taskPrompt(t) {
 // done inline in the fork repo (the subagent path is blocked by the safety
 // classifier on the public fork/push, so they cannot run here). Default the
 // start point to 15 so a plain relaunch resumes the remaining main-repo work.
-const startTask = (args && args.startTask) || 15
+const startTask = (args && args.startTask) || 18
 const results = []
 
 for (const t of TASKS) {
