@@ -376,3 +376,200 @@ something in `session_db.py` itself I haven't accounted for on that platform.
   (8/8), and `tests/test-adversarial-sweep.py` (95 attacks executed, 1 loudly
   skipped for an unrelated, pre-existing capability reason — case-sensitive
   filesystem here).
+
+## Round three (CI run 30166469526): Windows test-harness path bug + macOS teardown race
+
+Both prior fixes held: macOS 3.13 green, Ubuntu green both cells, and the macOS
+log showed the FTS5 fallback behaving exactly as designed. Two failures
+remained, both confirmed test-infrastructure, not product bugs.
+
+### Failure A — Windows ×2: `tests/test-index-session-fts5-fallback.sh`
+
+```
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+    import session_db
+ModuleNotFoundError: No module named 'session_db'
+```
+
+**Real cause, confirmed by reading the test, not re-derived**: the suite's own
+sanity check (added in round two, to prove the FTS5-unavailable simulation
+actually works before trusting anything downstream) shelled into
+`python3 -c "..."` with the lib directory baked in as a bash-interpolated
+string literal inside the Python source:
+
+```bash
+PROBE_RESULT="$(... "${NOFTS5_BIN}/python3" -c "
+import sys
+sys.path.insert(0, '${IDX_SCRIPTS}/lib')
+import session_db
+...
+")"
+```
+
+Git Bash auto-translates POSIX-style paths (e.g. `/tmp/xyz`) to Windows form
+(`C:\...` or the native equivalent) only when they appear as their OWN argv
+token passed to a native (non-MSYS) executable — not when embedded inside a
+larger quoted string. `${IDX_SCRIPTS}/lib` here is the middle of a Python
+source string, not its own argv token, so it reached native Windows
+`python3.exe` untranslated and unresolvable. Every OTHER `python3` call in
+this same test file (and in `index-session.sh` itself, which the coordinator
+confirmed already passes on Windows) passes a file path or a value via
+`sys.argv[N]` as its own token — the safe pattern.
+
+**Fix**: write the probe as a real `.py` file (`_probe_fts5_sanity.py`) and
+invoke it with its path as a normal argv token, so Git Bash's translation
+applies the same way it already does everywhere else in this suite; the file
+derives `sys.path` from `Path(__file__).resolve().parent` (the exact pattern
+`index-session.py` and friends already use), with no manually constructed
+path string anywhere.
+
+**Verified on Linux (can't reproduce the failure itself — no Windows
+access)**: reverting to the old embedded-string pattern still passes here,
+confirming the bug is invisible on Linux (exactly why it shipped) and that
+the fix is behavior-neutral where it can be tested directly — it only
+removes a failure mode that requires Windows path translation to trigger.
+
+**Bonus finding, same bug class, in production code**: grepped for the same
+`python3 -c "..."` + bash-interpolated-path-in-source-string pattern across
+`scripts/` and `install.sh`. Two hits, both untouched by the current CI
+matrix's coverage of those code paths: `install.sh`'s legacy-install
+detection and `scripts/doctor.sh`'s dir_fd capability probe. Both fixed the
+same way (`sys.path.insert(0, sys.argv[1])`), in a separate commit, since it
+is the identical class of latent Windows bug this branch exists to catch —
+matches the safe pattern doctor.sh's own legacy-home probe and
+`tests/lib/path-compare.sh`'s `sl_legacy_home` already use a few lines away
+in the same files.
+
+### Failure B — macOS 3.9 only: `tests/test-e2e-skill-visibility.sh`
+
+```
+PASS: dotted skill name: failure logged to persist-failures.log (not a silent no-op)
+rm: /var/folders/.../store/logs: Directory not empty
+rm: /var/folders/.../store: Directory not empty
+```
+
+**Real cause, confirmed by reasoning about the pipeline structure + the
+coordinator's diagnosis, not re-derived**: `session-review.sh` and
+`copilot-session-review.sh` both detach their ENTIRE pipeline (`nohup ... &`
++ `disown`), since a real review can take minutes while the hook that
+launched it has a short timeout. Every test driving either path for real
+used to poll for ONE target file to appear (`SKILL.md`,
+`persist-failures.log`, `MEMORY.md`, a captured prompt file) and treat that
+as "the pipeline is done." That is "a write started," not "the pipeline
+finished" — `persist-proposal.py` can still be mid-write on other files (or
+the shell wrapper still finishing its own bookkeeping) when the polled-for
+file first appears. Read-only tests got away with this by luck (teardown
+deferred to a trap firing much later, after many more instructions). This
+suite's second scenario followed its poll with `rm -rf "$TMP_HOME2"` on the
+very next line — the tightest possible window, and the one that actually
+raced in CI.
+
+**Two things fixed, per the coordinator's framing, in priority order:**
+
+1. **Teardown robustness** (defense in depth): added `sl_rm_rf_retry` to
+   `tests/lib/wait-for-review.sh` — a short, bounded retry loop around plain
+   `rm -rf` (POSIX; no GNU-only flags, works identically under BSD rm and
+   GNU rm). A transient "directory gained a file mid-delete" failure gets a
+   few retries; a genuine persistent failure (permissions, a stuck process)
+   still fails loudly after exhausting them, not silently swallowed.
+
+2. **The real fix — wait for the pipeline to actually finish**: both
+   `session-review.sh` and `copilot-session-review.sh` now write an
+   unconditional (success or failure) completion marker —
+   `"$SL_LOG_DIR/.review-complete"` — as the LAST statement of their detached
+   pipeline. `sl_wait_for_review_complete` (same bounded-polling idiom this
+   repo already uses in `tests/test-copilot-session-review.sh` and
+   `tests/test-session-review.sh` — sleep-between-checks, bounded iteration
+   count, loud diagnostics on timeout) polls for THAT marker instead of any
+   file the pipeline's output happens to produce. `sl_clear_review_marker`
+   removes any stale marker from a prior run in the same log dir before
+   launching, so a reused store can never mistake an old completion for the
+   current run's.
+
+**Applied to** `tests/test-e2e-skill-visibility.sh` (both launches — this is
+the suite that broke), `tests/test-claude-absent.sh` (one launch, same
+poll-then-continue shape), and the real-pipeline-with-file-polling cases in
+`tests/test-session-review.sh` (case 5) and `tests/test-copilot-session-review.sh`
+(cases 7 and 8).
+
+**Other suites checked for the same pattern, per the coordinator's ask**:
+grepped every test file for `session-review.sh`/`copilot-session-review.sh`.
+Two categories exist:
+
+- **Live invocations without the marker wait, now fixed**: the four files
+  above.
+- **No live invocation at all**: `tests/test-script-paths.sh`,
+  `tests/test-uninstall.sh`, `tests/test-install-paths.sh`,
+  `tests/test-config.sh`, `tests/test-doctor.sh`,
+  `tests/test-health-copilot-hooks.sh` all reference
+  `session-review.sh`/`copilot-session-review.sh` only inside **static JSON
+  hook-config fixture strings** the test asserts against textually (e.g.
+  "does the hook-config template point at the right path") — none of them
+  execute either script for real, so none carry this race.
+- **Deliberately left as-is**: cases 1–4 and 6 in
+  `tests/test-copilot-session-review.sh`/`tests/test-session-review.sh` use a
+  DIFFERENT mechanism — a fake `claude`/`copilot` binary that itself
+  synchronously appends to an argv-recording log file the instant it's
+  invoked, checked with a bare `sleep 0.3` (not a poll loop) — and teardown
+  in both files is a single EXIT trap firing only after every remaining case
+  in the file has run, not an immediate post-poll delete. This is the same
+  underlying class of unbounded-wait assumption, just with a much wider,
+  unmeasured safety margin and no observed CI failure; retrofitting all of
+  it would mean restructuring both files' shared `SL_LOG_DIR="$TMP/logs"`
+  setup (global, not per-launch) to support per-launch marker clearing
+  without cross-case interference — judged non-mechanical and out of scope
+  for this round. Flagging here rather than silently leaving it undocumented,
+  per the coordinator's ask.
+
+### Mutation testing
+
+The real pipeline is too fast on this development machine (trivial fake
+binaries, no real model latency) to reliably reproduce the exact CI race
+through the full stack without artificial slowdown, so the mechanism was
+mutation-tested directly, which is also more rigorous (deterministic, not
+timing-dependent luck):
+
+- **`sl_wait_for_review_complete` actually waits, not just polls-and-returns
+  early**: seeded a log dir where a target-shaped file appears at t=0.2s but
+  the completion marker doesn't land until t=1.0s (matching the real
+  pipeline's shape: an early write, more work after). A naive
+  target-file poll returned at **0.22s** (mid-pipeline); the new
+  marker-based wait correctly blocked until **1.05s** (after the pipeline's
+  true last statement). This is the exact mechanism of the original bug,
+  reproduced on demand.
+- **`sl_rm_rf_retry` survives what a bare `rm -rf` does not**: built a
+  deterministic (not probabilistic) transient-failure reproduction — a
+  subdirectory made undeletable (`chmod 000`) for 0.6s, then unlocked by a
+  background job. Mutation (bare `rm -rf`, no retry) under this exact
+  scenario: **left the directory behind, rc=1** — precisely the CI symptom
+  class (`Directory not empty` under `set -e`). Restored
+  (`sl_rm_rf_retry`): **recovered in ~0.75s**, rc=0, directory gone.
+- **Full-suite regression check**: `tests/test-e2e-skill-visibility.sh`,
+  `tests/test-claude-absent.sh`, `tests/test-session-review.sh`, and
+  `tests/test-copilot-session-review.sh` all still pass after every change
+  (multiple repeated runs, no flakiness observed locally).
+
+### What only CI can confirm
+
+Confirmed here: the mechanism (wait-for-marker, retry-on-delete) is sound
+under direct, deterministic mutation testing, and the full local suite is
+green and repeatably so. **Not confirmed here**: whether 30s
+(`sl_wait_for_review_complete`'s default budget, unchanged from the
+existing convention) is generous enough for a real, loaded macOS/Windows CI
+runner under whatever process-spawn overhead it has — if a genuine hang ever
+happens there, the loud `find`-based timeout diagnostic will show a log dir
+missing `.review-complete`, which is now distinguishable from "the pipeline
+finished but produced the wrong content" (my target-shaped assertions run
+afterward). For Failure A, only a green Windows run confirms the
+`Path(__file__).resolve().parent` fix actually resolves cleanly through Git
+Bash's real argv translation on a real Windows box, as opposed to my
+reasoning about how that translation works.
+
+## Suite count / interpreter results (round three)
+
+- `bash tests/run-all.sh`: **37/37 suites passed** (unchanged from round two
+  — round three added no new test files, only fixed existing ones and two
+  production scripts), under both system Python 3.13 and Python 3.9
+  (`~/.pyenv/versions/3.9.24/bin/python3.9`) shimmed first on `PATH`.
+- All Python suites pass individually under the 3.9 interpreter directly.
