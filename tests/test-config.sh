@@ -198,10 +198,27 @@ check "sl_iso_to_epoch: real epoch-adjacent timestamp is distinguishable from th
 # +%Y-%m-%dT%H:%M:%SZ — what session-review.sh, curator-run.sh, and
 # turn-counter.sh all use to persist timestamps) so producer and consumer
 # stay pinned together instead of drifting apart independently.
+#
+# fix-p6 (flaky, not a platform bug -- macOS CI run 30166469526, 3.13 cell):
+# this used to sample BEFORE_EPOCH via a SEPARATE `date -u +%s` call AFTER
+# already capturing WRITTEN via its own `date -u +%Y-%m-%dT%H:%M:%SZ` call,
+# with zero slack on either bound ([$BEFORE_EPOCH, $AFTER_EPOCH] both able
+# to equal the same single second). Two consequences, both real: (1)
+# BEFORE_EPOCH could itself be sampled a second AFTER the instant WRITTEN
+# captured, if the wall clock ticked over between those two separate `date`
+# process spawns -- so the lower bound could already exclude the correct,
+# actually-round-tripped epoch, exactly what happened in CI ("wrote
+# '...:29Z', expected an epoch in [...270, ...270], got '...269'" -- 269 is
+# CORRECT, the window was built one second late); (2) even without that
+# ordering bug, a window of width zero has no slack for the clock ticking
+# during the `sl_iso_to_epoch` subprocess call itself. Fixed by sampling
+# BEFORE_EPOCH first, ahead of WRITTEN, and padding both bounds by a full
+# second -- the property under test is "the round-trip preserves the
+# instant," not "the test and the producer observed the identical second."
+BEFORE_EPOCH=$(($(date -u +%s) - 1))
 WRITTEN=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-BEFORE_EPOCH=$(date -u +%s)
 OUT=$(bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; sl_iso_to_epoch '$WRITTEN'")
-AFTER_EPOCH=$(date -u +%s)
+AFTER_EPOCH=$(($(date -u +%s) + 1))
 if [[ "$OUT" =~ ^[0-9]+$ && "$OUT" -ge "$BEFORE_EPOCH" && "$OUT" -le "$AFTER_EPOCH" ]]; then
     echo "PASS: sl_iso_to_epoch round-trips the repo's own writer format ($WRITTEN -> $OUT)"
 else
