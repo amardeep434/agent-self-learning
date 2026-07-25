@@ -25,6 +25,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/lib/config.sh"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/skill-layout.sh"
 
 QUIET="${1:-}"
 PASS_COUNT=0
@@ -321,7 +323,7 @@ fi
 
 section "Learned Skills"
 
-USAGE_FILE="${SL_SKILLS_DIR}/.usage.json"
+USAGE_FILE="${SL_SKILLS_DIR}/${SL_USAGE_FILENAME}"
 if [[ -f "$USAGE_FILE" ]]; then
     if jq empty "$USAGE_FILE" 2>/dev/null; then
         SKILL_COUNT=$(jq 'keys | length' "$USAGE_FILE" 2>/dev/null || echo 0)

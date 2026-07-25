@@ -21,9 +21,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/lib/config.sh"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/skill-layout.sh"
 
 SKILLS_DIR="$SL_SKILLS_DIR"
-ARCHIVE_DIR="${SKILLS_DIR}/.archive"
+ARCHIVE_DIR="${SKILLS_DIR}/${SL_ARCHIVE_DIRNAME}"
 # No "backups" key in paths.py (out of scope for this task); derive it under
 # the resolved home the same way install.sh does, so the installer and this
 # consumer never disagree about where backups live.
@@ -102,7 +104,7 @@ TOTAL_STALE=0
 TOTAL_ARCHIVED=0
 TOTAL_PINNED=0
 
-USAGE_FILE="${SKILLS_DIR}/.usage.json"
+USAGE_FILE="${SKILLS_DIR}/${SL_USAGE_FILENAME}"
 if [[ -f "$USAGE_FILE" ]]; then
     for SKILL_NAME in $(jq -r 'keys[]' "$USAGE_FILE" 2>/dev/null); do
         state=$(jq -r --arg n "$SKILL_NAME" '.[$n].state // "active"' "$USAGE_FILE" 2>/dev/null || echo "active")
@@ -175,7 +177,7 @@ if [[ "$LLM_PASS" == "true" ]]; then
             fi
 
             description=""
-            SKILL_MD="${SKILLS_DIR}/${SKILL_NAME}/SKILL.md"
+            SKILL_MD="${SKILLS_DIR}/${SKILL_NAME}/${SL_SKILL_MD_FILENAME}"
             if [[ -f "$SKILL_MD" ]]; then
                 description=$(grep "^description:" "$SKILL_MD" 2>/dev/null | head -1 | sed 's/^description: *//')
             fi

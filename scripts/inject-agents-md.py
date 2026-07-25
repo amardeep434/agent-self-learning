@@ -19,6 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import paths  # noqa: E402
+import skill_layout  # noqa: E402  (single definition of the skill-directory layout; see lib/skill_layout.py)
 
 BEGIN = "<!-- BEGIN self-learning:managed -->"
 END = "<!-- END self-learning:managed -->"
@@ -55,7 +56,7 @@ def list_skills(skills_dir: Path) -> list:
     for child in sorted(skills_dir.iterdir()):
         if child.name.startswith(".") or not child.is_dir():
             continue
-        skill_md = child / "SKILL.md"
+        skill_md = skill_layout.skill_md_path(skills_dir, child.name)
         if skill_md.is_file():
             entries.append((child.name, read_skill_description(skill_md)))
     return entries

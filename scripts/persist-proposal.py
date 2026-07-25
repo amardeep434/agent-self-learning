@@ -73,8 +73,14 @@ MAX_MEMORY_FILE_BYTES = 1 * 1024 * 1024
 # SKILL.md, plus one shared metadata file at the top of the skills store.
 # This file used to write a flat `<name>.md` instead -- syntactically valid,
 # semantically invisible, since nothing downstream ever looked for it.
-SKILL_CONTENT_FILENAME = "SKILL.md"
-USAGE_FILENAME = ".usage.json"
+# The values themselves now live in lib/skill_layout.py -- the single
+# definition every consumer (Python via import, bash via its CLI) reads from;
+# see that module's docstring. Aliased here under this module's existing
+# names so the rest of this file, and its tests, need no further changes.
+import skill_layout  # noqa: E402
+
+SKILL_CONTENT_FILENAME = skill_layout.SKILL_MD_FILENAME
+USAGE_FILENAME = skill_layout.USAGE_FILENAME
 
 def _probe_dir_fd_support() -> bool:
     """Real functional probe, not a platform-name check and not a bare

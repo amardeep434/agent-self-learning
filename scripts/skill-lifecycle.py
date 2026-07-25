@@ -30,6 +30,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from isotime import parse_iso  # noqa: E402  (fix round D blocker (a): shared parser, see lib/isotime.py)
+import skill_layout  # noqa: E402  (single definition of the skill-directory layout; see lib/skill_layout.py)
 
 # ---------------------------------------------------------------------------
 # Configuration (overridable via environment variables)
@@ -76,8 +77,10 @@ def _default_skills_dir() -> Path:
 
 
 SKILLS_DIR = _default_skills_dir()
-USAGE_FILE = SKILLS_DIR / ".usage.json"
-ARCHIVE_DIR = SKILLS_DIR / ".archive"
+# Values come from lib/skill_layout.py -- the single definition of the
+# skill-directory layout every consumer shares. See that module's docstring.
+USAGE_FILE = skill_layout.usage_file_path(SKILLS_DIR)
+ARCHIVE_DIR = skill_layout.archive_dir_path(SKILLS_DIR)
 STALE_DAYS = int(os.environ.get("CLAUDE_SKILL_STALE_DAYS", "30"))
 ARCHIVE_DAYS = int(os.environ.get("CLAUDE_SKILL_ARCHIVE_DAYS", "90"))
 
