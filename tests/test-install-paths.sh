@@ -90,6 +90,25 @@ done
 check "lib/config.sh installed" "yes" "$([[ -f "${RESOLVED_SCRIPTS}/lib/config.sh" ]] && echo yes || echo no)"
 check "lib/paths.py installed" "yes" "$([[ -f "${RESOLVED_SCRIPTS}/lib/paths.py" ]] && echo yes || echo no)"
 
+# --- Hardcoded expected-file list: the writer and everything it needs to
+# import must be installed, or the review pipeline burns a paid model call
+# and persists nothing while exiting 0 at the hook level — the exact defect
+# this project exists to eliminate, just moved to a new file. Existence
+# checks alone cannot prove imports resolve; see the end-to-end assertion
+# below for that.
+EXPECTED_FILES=(
+    "persist-proposal.py"
+    "lib/paths.py"
+    "lib/proposal_schema.py"
+    "lib/config.sh"
+    "session-review.sh"
+    "copilot-session-review.sh"
+)
+for f in "${EXPECTED_FILES[@]}"; do
+    check "expected installed file present: $f" "yes" \
+        "$([[ -f "${RESOLVED_SCRIPTS}/${f}" ]] && echo yes || echo no)"
+done
+
 # --- Data directories under the resolved home, not under ~/.claude ---
 check "state dir under store" "yes" "$([[ -d "${STORE}/state" ]] && echo yes || echo no)"
 check "memory dir under store" "yes" "$([[ -d "${STORE}/memory" ]] && echo yes || echo no)"
@@ -122,6 +141,28 @@ if [[ -f "$COPILOT_HOOK" ]]; then
     check "hook-config script path equals installed copilot-session-review.sh" \
         "${RESOLVED_SCRIPTS}/copilot-session-review.sh" "$HOOK_SCRIPT_PATH"
 fi
+
+# --- End-to-end: the INSTALLED persist-proposal.py, run standalone, must be
+# self-sufficient. This is the only assertion that would have caught the
+# missing lib/proposal_schema.py import — file-existence checks pass even
+# when the import at the top of persist-proposal.py fails at runtime.
+E2E_MARKER="installed-writer-e2e-$$"
+E2E_PROPOSAL="$(printf '{"version": 1, "memory": [{"file": "MEMORY.md", "mode": "replace", "content": "%s"}]}' "$E2E_MARKER")"
+E2E_STATUS=0
+printf '%s' "$E2E_PROPOSAL" | env -i HOME="$TMP_HOME" PATH="$MINIMAL_PATH" \
+    AGENT_LEARNING_HOME="$STORE" \
+    ${PYENV_ROOT:+PYENV_ROOT="$PYENV_ROOT"} \
+    python3 "${RESOLVED_SCRIPTS}/persist-proposal.py" >/tmp/e2e-writer-out.$$ 2>&1 || E2E_STATUS=$?
+check "installed persist-proposal.py exits 0 standalone" "0" "$E2E_STATUS"
+check "installed persist-proposal.py wrote the memory file" "yes" \
+    "$([[ -f "${STORE}/memory/MEMORY.md" ]] && echo yes || echo no)"
+check "installed persist-proposal.py wrote the expected content" "$E2E_MARKER" \
+    "$(cat "${STORE}/memory/MEMORY.md" 2>/dev/null || echo MISSING)"
+if [[ "$E2E_STATUS" -ne 0 ]]; then
+    echo "--- installed persist-proposal.py output for debugging ---"
+    cat /tmp/e2e-writer-out.$$
+fi
+rm -f /tmp/e2e-writer-out.$$
 
 # --- Idempotence: re-running must not create ~/.claude either, and must
 # still be correct ---

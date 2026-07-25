@@ -196,6 +196,7 @@ SCRIPTS=(
     "coach-export-read.py"
     "coach-signals.py"
     "skillopt-run.sh"
+    "persist-proposal.py"
 )
 
 DEST_DIR="$SL_SCRIPTS"
@@ -218,9 +219,18 @@ for lib in "${SCRIPT_DIR}/scripts/lib/"*.sh; do
         do_copy "$lib" "${DEST_DIR}/lib/$(basename "$lib")"
     fi
 done
-if [[ -f "${SCRIPT_DIR}/scripts/lib/paths.py" ]]; then
-    do_copy "${SCRIPT_DIR}/scripts/lib/paths.py" "${DEST_DIR}/lib/paths.py"
-fi
+# Python libraries too (e.g. paths.py, proposal_schema.py) — a loop, not a
+# hand-listed file, so a future library is never silently dropped the way
+# proposal_schema.py originally was: persist-proposal.py (in SCRIPTS above)
+# imports it from its own installed directory's lib/, and a missing import
+# fails the whole persistence pipeline on a real install with no error
+# surfaced above the hook layer — exactly the defect this project exists to
+# eliminate.
+for lib in "${SCRIPT_DIR}/scripts/lib/"*.py; do
+    if [[ -f "$lib" ]]; then
+        do_copy "$lib" "${DEST_DIR}/lib/$(basename "$lib")"
+    fi
+done
 
 echo ""
 
