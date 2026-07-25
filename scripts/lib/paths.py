@@ -211,13 +211,36 @@ def _main(argv: list[str]) -> int:
             for key, value in resolve_all().items():
                 print(f"{key}={_to_cli_string(value)}")
             return 0
+        if len(argv) >= 2 and argv[0] == "canon":
+            # Fix round F: tests/lib/path-compare.sh's sl_canon_path used to
+            # reimplement path canonicalization independently in an inline
+            # `python3 -c 'import os,sys; print(os.path.realpath(...))'` --
+            # a SECOND, divergent rendering of the same underlying value,
+            # the exact duplicated-copy pattern that caused the round-D
+            # isotime regression. That inline version printed via plain
+            # str()/print(), which on native Windows renders a WindowsPath
+            # with backslashes (`os.path.realpath` returns a native-flavour
+            # string) -- a THIRD path spelling next to the MSYS form the
+            # rest of this project's CLI output now consistently uses,
+            # observed directly in CI: `sl_canon_path` returned
+            # 'C:\Users\...\real' where every other resolved value in the
+            # same run was already in '/c/Users/...' MSYS form. This
+            # subcommand is the single place that combines realpath
+            # (works on a nonexistent path too, needed since canonicalizing
+            # a path a test hasn't created yet is a real use case) with
+            # THIS module's own _to_cli_string rendering, so bash callers
+            # get exactly the same spelling convention for a canonicalized
+            # path as for any other resolved key -- one implementation,
+            # not two.
+            print(_to_cli_string(Path(os.path.realpath(argv[1]))))
+            return 0
     except RuntimeError as exc:
         # resolve_home()'s loud failure (e.g. $HOME unset, no override) must
         # reach the caller as a clear, non-zero-exit error -- never as a
         # silently empty/CWD-relative path. See resolve_home() above.
         print(f"paths.py: {exc}", file=sys.stderr)
         return 3
-    print("usage: paths.py get <key> | paths.py all", file=sys.stderr)
+    print("usage: paths.py get <key> | paths.py all | paths.py canon <path>", file=sys.stderr)
     return 2
 
 

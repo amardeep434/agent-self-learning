@@ -91,12 +91,30 @@ else
     mkdir -p "$LOCKED_PARENT"
     chmod 500 "$LOCKED_PARENT"
 
-    OUT=$(env -i HOME="$TMP_HOME" PATH="$PATH" AGENT_LEARNING_HOME="${LOCKED_PARENT}/store" \
-          SL_CONFIG_FILE="/nonexistent/x.conf" bash "${SCRIPT_DIR}/scripts/doctor.sh" 2>&1)
-    RC=$?
+    # Fix round F: verify chmod's premise actually holds on THIS filesystem
+    # rather than assuming it, by doing the exact same kind of real
+    # create+delete probe doctor.sh's own _sl_test_writable does (see its
+    # comment: "actually tested, not inferred"). On Windows, write
+    # permission is governed by ACLs, not the POSIX mode bits `chmod`
+    # manipulates -- `chmod -w` is largely a no-op there, so the directory
+    # stays genuinely writable and doctor.sh reporting it "writable" would
+    # be CORRECT, not a bug the test should fail on. Confirmed, not assumed:
+    # if this probe file is created successfully despite chmod 500, the
+    # premise this test depends on does not hold on this platform, and the
+    # two assertions that depend on it are skipped LOUDLY (named reason
+    # printed), never silently, per this project's no-silent-skip rule.
+    _sl_probe="${LOCKED_PARENT}/.sl-writability-probe-$$"
+    if ( : > "$_sl_probe" ) 2>/dev/null; then
+        rm -f "$_sl_probe" 2>/dev/null
+        echo "SKIP: non-writable-directory assertions (chmod 500 did not make '${LOCKED_PARENT}' non-writable on this platform/filesystem -- verified by actually creating a file in it, not assumed; almost certainly Windows, where write access is governed by ACLs rather than POSIX mode bits, so doctor.sh reporting it writable is CORRECT behavior, not a bug)"
+    else
+        OUT=$(env -i HOME="$TMP_HOME" PATH="$PATH" AGENT_LEARNING_HOME="${LOCKED_PARENT}/store" \
+              SL_CONFIG_FILE="/nonexistent/x.conf" bash "${SCRIPT_DIR}/scripts/doctor.sh" 2>&1)
+        RC=$?
 
-    contains "non-writable dir reported as NOT WRITABLE" "$OUT" "NOT WRITABLE"
-    check "non-writable dir flips exit code to 1" "1" "$RC"
+        contains "non-writable dir reported as NOT WRITABLE" "$OUT" "NOT WRITABLE"
+        check "non-writable dir flips exit code to 1" "1" "$RC"
+    fi
 
     chmod 700 "$LOCKED_PARENT"
     rm -rf "$TMP_HOME"

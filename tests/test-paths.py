@@ -1,5 +1,6 @@
 import os, subprocess, sys, tempfile, unittest
 from pathlib import Path, PureWindowsPath
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
@@ -89,12 +90,24 @@ class TestCliFormatting(unittest.TestCase):
     on a non-Windows OS, but PureWindowsPath can be, on any OS."""
 
     def test_windows_path_rendered_with_forward_slashes(self):
-        p = PureWindowsPath(r"C:\Users\runneradmin\.local\share\agent-learning")
-        self.assertEqual(
-            paths._to_cli_string(p),
-            "C:/Users/runneradmin/.local/share/agent-learning",
-        )
-        self.assertNotIn("\\", paths._to_cli_string(p))
+        # Fix round F: this test does not pass is_windows=/msystem=, so it
+        # reads ambient os.environ.get("MSYSTEM") by default. On the real
+        # windows-latest CI runner (Git Bash), MSYSTEM genuinely IS set --
+        # so without pinning it, this test's own environment silently
+        # changes which branch _to_cli_string takes out from under it,
+        # correctly producing the MSYS cygdrive form ('/c/Users/...')
+        # instead of the plain .as_posix() form this test asserts. The
+        # production logic was right; the test never controlled its own
+        # environment. Pinned to empty (falsy, same effect as unset) so
+        # this test is deterministic on every platform, including the one
+        # it used to fail on.
+        with mock.patch.dict(os.environ, {"MSYSTEM": ""}):
+            p = PureWindowsPath(r"C:\Users\runneradmin\.local\share\agent-learning")
+            self.assertEqual(
+                paths._to_cli_string(p),
+                "C:/Users/runneradmin/.local/share/agent-learning",
+            )
+            self.assertNotIn("\\", paths._to_cli_string(p))
 
     def test_posix_path_unaffected(self):
         p = Path("/home/u/.local/share/agent-learning")
@@ -117,9 +130,19 @@ class TestCliFormatting(unittest.TestCase):
         # keep getting the plain .as_posix() form -- switching everyone to
         # cygdrive form unconditionally would break native Windows tools,
         # which do not understand '/c/Users/x'.
-        p = PureWindowsPath(r"C:\Users\runneradmin\.local\share\agent-learning")
-        rendered = paths._to_cli_string(p, is_windows=True, msystem=None)
-        self.assertEqual(rendered, "C:/Users/runneradmin/.local/share/agent-learning")
+        #
+        # Fix round F: passing msystem=None here does NOT mean "force no
+        # MSYSTEM" -- _to_cli_string treats None as "caller didn't specify,
+        # fall back to os.environ.get('MSYSTEM')" (see its signature/docstring),
+        # so on the real windows-latest CI runner (Git Bash, MSYSTEM
+        # genuinely set) this test's own explicit `msystem=None` was being
+        # silently overridden by the ambient environment, defeating the
+        # test's whole point. Pin the environment directly instead so
+        # "no MSYSTEM" is actually enforced, not merely requested.
+        with mock.patch.dict(os.environ, {"MSYSTEM": ""}):
+            p = PureWindowsPath(r"C:\Users\runneradmin\.local\share\agent-learning")
+            rendered = paths._to_cli_string(p, is_windows=True, msystem=None)
+            self.assertEqual(rendered, "C:/Users/runneradmin/.local/share/agent-learning")
 
     def test_non_windows_ignores_msystem(self):
         # A POSIX platform must never take the MSYS branch even if MSYSTEM
@@ -142,6 +165,31 @@ class TestCliFormatting(unittest.TestCase):
         p = PureWindowsPath("C:\\")
         self.assertEqual(paths._to_msys_path(p), "/c")
 
+    def test_driveless_absolute_path_renders_forward_slash_not_backslash(self):
+        # Fix round F: explicit, pinned decision for a drive-less absolute
+        # WindowsPath (e.g. what `Path("/tmp/x")` becomes when constructed
+        # on native Windows -- no drive letter, root "\\"). PureWindowsPath.drive
+        # is empty for this shape, so _to_msys_path's cygdrive branch cannot
+        # apply (there is no single drive letter to build '/x/...' from);
+        # it must fall back to plain .as_posix() -- which itself IS
+        # guaranteed forward-slash, by definition of .as_posix() -- rather
+        # than ever surface the backslash form str()/os.fspath() would give
+        # for the same PureWindowsPath. Pinned for both branches (MSYS-form
+        # requested and not), since a driveless path has nothing
+        # MSYS-specific to convert either way -- the answer must be the
+        # same regardless of which branch of _to_cli_string is taken.
+        p = PureWindowsPath(r"\tmp\x\memory")
+        self.assertEqual(p.drive, "")
+        # Explicit "" (not None) for the "no MSYSTEM" cases throughout --
+        # None is the ambient-fallback sentinel (see the two fixes above in
+        # this class); every case here must be deterministic regardless of
+        # this test's own environment.
+        for is_windows, msystem in ((True, "MINGW64"), (True, ""), (False, "")):
+            with self.subTest(is_windows=is_windows, msystem=msystem):
+                rendered = paths._to_cli_string(p, is_windows=is_windows, msystem=msystem)
+                self.assertEqual(rendered, "/tmp/x/memory")
+                self.assertNotIn("\\", rendered)
+
     def test_main_all_emits_no_backslashes_for_a_windows_style_env(self):
         # Simulate what _main's "all" branch would print for a Windows
         # resolution by monkeypatching resolve_all's underlying platform via
@@ -152,14 +200,20 @@ class TestCliFormatting(unittest.TestCase):
         # _to_cli_string across every value resolve_all() can produce for a
         # Windows env, expressed as PureWindowsPath (matching what a real
         # Windows Path() would contain).
-        raw = {
-            "home": r"C:\Users\runneradmin\.local\share\agent-learning",
-            "scripts": r"C:\Users\runneradmin\.local\share\agent-learning\scripts",
-        }
-        for key, value in raw.items():
-            rendered = paths._to_cli_string(PureWindowsPath(value))
-            self.assertNotIn("\\", rendered, f"key={key}")
-            self.assertTrue(rendered.startswith("C:/"), f"key={key} -> {rendered}")
+        # Fix round F: this test does not pass is_windows=/msystem=, so
+        # (like test_windows_path_rendered_with_forward_slashes above) it
+        # silently read the ambient MSYSTEM env var, which IS set on the
+        # real windows-latest CI runner -- pin it so the assertion is
+        # deterministic rather than platform-dependent.
+        with mock.patch.dict(os.environ, {"MSYSTEM": ""}):
+            raw = {
+                "home": r"C:\Users\runneradmin\.local\share\agent-learning",
+                "scripts": r"C:\Users\runneradmin\.local\share\agent-learning\scripts",
+            }
+            for key, value in raw.items():
+                rendered = paths._to_cli_string(PureWindowsPath(value))
+                self.assertNotIn("\\", rendered, f"key={key}")
+                self.assertTrue(rendered.startswith("C:/"), f"key={key} -> {rendered}")
 
 
 class TestCliHomeUnset(unittest.TestCase):
@@ -219,11 +273,25 @@ class TestCliLineEndings(unittest.TestCase):
 
 class TestCli(unittest.TestCase):
     def test_get_prints_single_path(self):
+        # Fix round F: the expected value used to be str(Path("/tmp/x/memory")),
+        # which is itself platform-dependent -- on native Windows, Path()
+        # constructs a WindowsPath, and str() on a driveless WindowsPath
+        # (no drive letter for "/tmp/x", see
+        # test_driveless_absolute_path_renders_forward_slash_not_backslash)
+        # renders with BACKSLASHES ('\tmp\x\memory'), which is not what the
+        # CLI itself ever prints (paths._to_cli_string always renders
+        # forward-slash, on every platform -- see that test). The bug was
+        # in this test's own ground truth, not the CLI: building the
+        # expected value via _to_cli_string directly (in-process, same
+        # interpreter/OS the subprocess below also runs on) makes the
+        # assertion correct on every platform instead of only on POSIX,
+        # where PosixPath's str() happens to already look like
+        # _to_cli_string's output.
         env = dict(os.environ, AGENT_LEARNING_HOME="/tmp/x")
         out = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "lib" / "paths.py"), "get", "memory"],
             capture_output=True, text=True, env=env, check=True).stdout.strip()
-        self.assertEqual(out, str(Path("/tmp/x/memory")))
+        self.assertEqual(out, paths._to_cli_string(Path("/tmp/x/memory")))
 
     def test_get_unknown_key_exits_nonzero(self):
         r = subprocess.run(

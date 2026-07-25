@@ -55,16 +55,32 @@
 #
 # Sourced by, never copied into, every shell suite that needs any of this.
 
+# Resolved once, at source time, relative to this file's own location --
+# tests/lib/path-compare.sh -> ../../scripts/lib/paths.py -- so every
+# function below shares the ONE path resolver rather than recomputing or
+# reimplementing its logic, matching this project's own global constraint
+# ("paths are computed in exactly one place").
+_SL_PATH_COMPARE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_SL_PATHS_PY="${_SL_PATH_COMPARE_LIB_DIR}/../../scripts/lib/paths.py"
+
 # sl_canon_path <path>
-# Canonicalizes an arbitrary path STRING via Python's os.path.realpath.
-# Works on a nonexistent path (realpath normalizes without requiring
-# existence). On Git Bash/MSYS2, the argv string undergoes the same MSYS
-# auto-conversion into native Win32 form that any other argv/env path
-# crossing into python3.exe would get -- so two differently-spelled inputs
-# naming the same directory converge to the same canonical output.
+# Canonicalizes an arbitrary path STRING for comparison.
+#
+# Fix round F: this used to be an inline `python3 -c 'import os, sys;
+# print(os.path.realpath(sys.argv[1]))'` -- a SECOND, independent
+# reimplementation of path rendering next to paths.py's own
+# `_to_cli_string`, and it showed exactly the divergence that pattern
+# always produces: on Git Bash/MSYS2 CI, this printed raw
+# `os.path.realpath`'s native-flavour string (backslashes, e.g.
+# 'C:\Users\...\real'), a THIRD path spelling alongside the plain
+# '.as_posix()' form and the MSYS '/c/Users/...' cygdrive form the rest of
+# this project's CLI output already uses consistently. Now shells out to
+# paths.py's own `canon` subcommand, which combines the same
+# os.path.realpath call with THIS module's `_to_cli_string` rendering --
+# one implementation of "how a path is spelled for a bash consumer",
+# shared, not reimplemented a second time in bash.
 sl_canon_path() {
-    python3 -c 'import os, sys
-print(os.path.realpath(sys.argv[1]))' "$1" 2>/dev/null
+    python3 "$_SL_PATHS_PY" canon "$1" 2>/dev/null
 }
 
 # sl_same_path <a> <b>

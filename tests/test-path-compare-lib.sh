@@ -31,10 +31,30 @@ mkdir -p "$REAL_DIR"
 check "sl_canon_path resolves an existing directory to itself" \
     "$(cd "$REAL_DIR" && pwd -P)" "$(sl_canon_path "$REAL_DIR")"
 
+# Fix round F: on Windows, `ln -s` commonly cannot create a REAL symlink
+# without Developer Mode or elevation -- Git Bash/MSYS's `ln` is documented
+# to fall back to copying the target instead of linking to it in that case
+# (rather than merely failing outright). Determined, not assumed: `[[ -L ]]`
+# after the attempt is the ground truth for whether a real symlink exists,
+# regardless of which failure mode (silent copy vs. hard failure) actually
+# occurred. Every assertion below that depends on symlink semantics is
+# gated on this and skips LOUDLY (with reason) if it is false, rather than
+# running against what would silently be a same-directory comparison (a
+# copy is not a symlink -- sl_canon_path resolving a COPY to itself proves
+# nothing about symlink-following).
 LINK_DIR="${TMP}/link"
-ln -s "$REAL_DIR" "$LINK_DIR"
-check "sl_canon_path resolves a symlink to its real target" \
-    "$(sl_canon_path "$REAL_DIR")" "$(sl_canon_path "$LINK_DIR")"
+ln -s "$REAL_DIR" "$LINK_DIR" 2>/dev/null || true
+_SL_HAS_REAL_SYMLINKS=0
+if [[ -L "$LINK_DIR" ]]; then
+    _SL_HAS_REAL_SYMLINKS=1
+fi
+
+if [[ "$_SL_HAS_REAL_SYMLINKS" -eq 1 ]]; then
+    check "sl_canon_path resolves a symlink to its real target" \
+        "$(sl_canon_path "$REAL_DIR")" "$(sl_canon_path "$LINK_DIR")"
+else
+    echo "SKIP: sl_canon_path resolves a symlink to its real target (this platform/user could not create a real symlink via 'ln -s' -- verified via [[ -L \"$LINK_DIR\" ]] being false after the attempt, not assumed; Windows commonly requires Developer Mode or elevation, and Git Bash's ln may silently copy instead of linking)"
+fi
 
 check "sl_canon_path normalizes .. components without requiring existence" \
     "$(sl_canon_path "${TMP}/a")" "$(sl_canon_path "${TMP}/a/b/..")"
@@ -47,8 +67,12 @@ check "sl_canon_path does not crash on a nonexistent path" \
 
 check "sl_same_path: identical literal strings" "yes" \
     "$(sl_same_path "$REAL_DIR" "$REAL_DIR" && echo yes || echo no)"
-check "sl_same_path: real dir vs. symlink to it" "yes" \
-    "$(sl_same_path "$REAL_DIR" "$LINK_DIR" && echo yes || echo no)"
+if [[ "$_SL_HAS_REAL_SYMLINKS" -eq 1 ]]; then
+    check "sl_same_path: real dir vs. symlink to it" "yes" \
+        "$(sl_same_path "$REAL_DIR" "$LINK_DIR" && echo yes || echo no)"
+else
+    echo "SKIP: sl_same_path: real dir vs. symlink to it (no real symlink support on this platform/user -- see reason above)"
+fi
 check "sl_same_path: two genuinely different existing dirs" "no" \
     "$(mkdir -p "${TMP}/other" && sl_same_path "$REAL_DIR" "${TMP}/other" && echo yes || echo no)"
 check "sl_same_path: two genuinely different NONEXISTENT paths" "no" \
@@ -57,9 +81,12 @@ check "sl_same_path: same nonexistent path spelled two ways (trailing slash)" "y
     "$(sl_same_path "${TMP}/futuredir" "${TMP}/futuredir/" && echo yes || echo no)"
 
 # --- sl_check_same_path (check-shaped wrapper) ----------------------------
+# Deliberately NOT symlink-based (trailing-slash spelling of the same real
+# directory instead), so this self-test of the wrapper itself always runs,
+# even on a platform/user with no symlink privilege.
 
 _before=$FAILURES
-sl_check_same_path "same-path wrapper: equal case" "$REAL_DIR" "$LINK_DIR"
+sl_check_same_path "same-path wrapper: equal case" "$REAL_DIR" "${REAL_DIR}/"
 check "sl_check_same_path did not increment FAILURES on a real match" "$_before" "$FAILURES"
 
 # The mismatch case deliberately drives sl_check_same_path's FAIL branch to
