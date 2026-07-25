@@ -88,5 +88,69 @@ else
     FAILURES=$((FAILURES+1))
 fi
 
+# --- sl_iso_to_epoch: direct unit coverage -------------------------------
+# Fix round 1 (reviewer finding): the reviewer replaced sl_iso_to_epoch's
+# body with `echo 0; return 0` and tests/test-turn-counter.sh still passed —
+# proving nothing exercised this function directly. Epoch 0 makes every
+# timestamp look infinitely stale, which is silent and directional (the
+# curator would archive skills it should keep). These assertions exist to
+# make that mutation fail loudly. See "mutation testing" note in
+# task-8-report.md for the before/after proof.
+#
+# Expected epochs below are computed independently of sl_iso_to_epoch (via
+# `date -u -d '2024-06-15T12:34:56Z' +%s` and cross-checked with Python's
+# datetime.timestamp()) and hardcoded, so a bug in the function under test
+# cannot also corrupt the expected value.
+
+OUT=$(bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; sl_iso_to_epoch '2024-06-15T12:34:56Z'")
+check "sl_iso_to_epoch: Z suffix" "1718454896" "$OUT"
+
+OUT=$(bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; sl_iso_to_epoch '2024-06-15T12:34:56+00:00'")
+check "sl_iso_to_epoch: explicit +00:00 offset" "1718454896" "$OUT"
+
+OUT=$(bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; sl_iso_to_epoch '2024-06-15T18:04:56+05:30'")
+check "sl_iso_to_epoch: non-UTC +05:30 offset" "1718454896" "$OUT"
+
+OUT=$(bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; sl_iso_to_epoch '2024-06-15T12:34:56.500Z'")
+check "sl_iso_to_epoch: fractional seconds" "1718454896" "$OUT"
+
+# Timezone independence: the input always carries explicit UTC/offset info,
+# so the interpreter's local TZ must never leak into the result. TZ is
+# pinned explicitly (not just inherited from the CI runner's default) so a
+# future regression that drops -u or assumes local time fails HERE instead
+# of only in whichever TZ a given CI runner happens to use.
+OUT=$(TZ="America/New_York" bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; sl_iso_to_epoch '2024-06-15T12:34:56Z'")
+check "sl_iso_to_epoch: TZ=America/New_York does not shift the result" "1718454896" "$OUT"
+
+OUT=$(TZ="Asia/Kolkata" bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; sl_iso_to_epoch '2024-06-15T12:34:56Z'")
+check "sl_iso_to_epoch: TZ=Asia/Kolkata does not shift the result" "1718454896" "$OUT"
+
+OUT=$(bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; sl_iso_to_epoch ''")
+check "sl_iso_to_epoch: empty input returns the documented sentinel" "0" "$OUT"
+
+OUT=$(bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; sl_iso_to_epoch 'not-a-real-timestamp'")
+check "sl_iso_to_epoch: garbage input returns the documented sentinel" "0" "$OUT"
+
+# The sentinel must be reached deliberately for empty/garbage input, not by
+# every input silently collapsing to it. A timestamp one second after the
+# Unix epoch must NOT come back as the same "0" as the failure sentinel.
+OUT=$(bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; sl_iso_to_epoch '1970-01-01T00:00:01Z'")
+check "sl_iso_to_epoch: real epoch-adjacent timestamp is distinguishable from the sentinel" "1" "$OUT"
+
+# Round-trip against the repo's own writer format (date -u
+# +%Y-%m-%dT%H:%M:%SZ — what session-review.sh, curator-run.sh, and
+# turn-counter.sh all use to persist timestamps) so producer and consumer
+# stay pinned together instead of drifting apart independently.
+WRITTEN=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+BEFORE_EPOCH=$(date -u +%s)
+OUT=$(bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; sl_iso_to_epoch '$WRITTEN'")
+AFTER_EPOCH=$(date -u +%s)
+if [[ "$OUT" =~ ^[0-9]+$ && "$OUT" -ge "$BEFORE_EPOCH" && "$OUT" -le "$AFTER_EPOCH" ]]; then
+    echo "PASS: sl_iso_to_epoch round-trips the repo's own writer format ($WRITTEN -> $OUT)"
+else
+    echo "FAIL: sl_iso_to_epoch round-trip mismatch: wrote '$WRITTEN', expected an epoch in [$BEFORE_EPOCH, $AFTER_EPOCH], got '$OUT'"
+    FAILURES=$((FAILURES+1))
+fi
+
 if [[ "$FAILURES" -gt 0 ]]; then exit 1; fi
 echo "All config tests passed."

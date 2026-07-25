@@ -13,14 +13,28 @@
 #     matches "almost nothing" is caught too, not just "nothing".
 #   - Every suite runs to completion regardless of earlier failures; nothing
 #     stops at the first red suite, and nothing is masked.
-#   - A suite that is missing, unreadable, or exits non-zero (including
-#     dying before printing anything, or failing at import time before any
-#     assertion runs) is recorded as a FAILURE, named individually — never a
-#     silent skip.
+#   - A suite that is missing, unreadable, hangs past its per-suite timeout,
+#     or exits non-zero (including dying before printing anything, or
+#     failing at import time before any assertion runs) is recorded as a
+#     FAILURE, named individually — never a silent skip.
 #   - The exit code is authoritative: 0 only if suites were actually
 #     discovered in a plausible number AND every one of them passed.
+#
+# Exit code note for callers: CI invokes this script directly and checks its
+# exit code. If you instead pipe its output (e.g. `bash tests/run-all.sh |
+# tee log`), the pipeline's exit status becomes tee's, not this script's,
+# unless the calling shell has `set -o pipefail`. Piping without pipefail
+# can silently hide a failed run.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+# Enable job control even though this script is non-interactive. This gives
+# each backgrounded suite its own process group (pgid == its pid), which is
+# what lets the timeout-cleanup below reach children the suite itself
+# spawned and left running (e.g. a stray `sleep 300 &`) — killing just the
+# suite's own pid would leave those orphaned, which is exactly what a review
+# round found: a hung suite outlived an external kill.
+set -m
 
 # Minimum number of suites we expect to discover. Guards against a glob that
 # matches nothing, or matches only a handful of stragglers, being mistaken
@@ -28,6 +42,34 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # deliberately removed; a silent drop below this without updating it is
 # exactly the failure mode this floor exists to catch.
 MIN_SUITES="${RUN_ALL_MIN_SUITES:-15}"
+
+# Per-suite wall-clock limit. The slowest suite measured locally is ~3.1s
+# (test-copilot-session-review.sh); test-install-paths.sh (which runs a
+# real install.sh) is the likeliest to be slower on other machines/CI
+# runners. 120s leaves generous headroom over both while still catching a
+# genuinely hung suite (e.g. an accidental `sleep 300`) long before it can
+# burn the whole CI job's time budget. Override via RUN_ALL_SUITE_TIMEOUT.
+SUITE_TIMEOUT="${RUN_ALL_SUITE_TIMEOUT:-120}"
+
+# Feature-detect a timeout wrapper rather than assuming one. Stock macOS has
+# no `timeout` at all (GNU-only), so a bare `timeout` call would break the
+# macos-latest CI job this project depends on. Prefer GNU `timeout`, then
+# Homebrew coreutils' `gtimeout`, and if neither exists, run every suite
+# UNWRAPPED — but say so loudly, every run, so a macOS box (or any box)
+# missing both cannot silently lose hang protection without it showing up
+# in the log.
+TIMEOUT_BIN=""
+if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_BIN="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+    TIMEOUT_BIN="gtimeout"
+else
+    echo "WARNING: neither 'timeout' nor 'gtimeout' is available on this system." >&2
+    echo "WARNING: per-suite timeout protection is DISABLED for this run — a hung" >&2
+    echo "WARNING: suite will hang this entire run with no automatic recovery." >&2
+    echo "WARNING: Install GNU coreutils (e.g. 'brew install coreutils' on macOS)" >&2
+    echo "WARNING: to restore it." >&2
+fi
 
 shopt -s nullglob
 SH_SUITES=(tests/test-*.sh)
@@ -39,8 +81,41 @@ TOTAL_DISCOVERED=$(( ${#SH_SUITES[@]} + ${#PY_SUITES[@]} ))
 FAILED=()
 RAN=0
 
+# run_with_timeout <cmd...>
+# Runs cmd as a backgrounded job (so it gets its own process group under
+# `set -m`), wrapped in the detected timeout binary when one exists, waits
+# for it, then always makes a best-effort sweep of that process group so no
+# child the suite spawned outlives the suite itself — whether or not a
+# timeout actually fired. Sets the global TIMED_OUT to "true"/"false" so
+# callers can distinguish "timed out" from "exited non-zero on its own"
+# without relying on bash 4.3+ negative array indexing (stock macOS ships
+# bash 3.2, which lacks it).
+TIMED_OUT="false"
+run_with_timeout() {
+    local pid rc
+    TIMED_OUT="false"
+    if [[ -n "$TIMEOUT_BIN" ]]; then
+        "$TIMEOUT_BIN" --kill-after=5 "$SUITE_TIMEOUT" "$@" &
+    else
+        "$@" &
+    fi
+    pid=$!
+    wait "$pid"
+    rc=$?
+    # Best-effort cleanup of the whole process group: TERM, brief grace
+    # period, then KILL. Silent no-op if the group is already gone (the
+    # overwhelmingly common, non-hung case).
+    kill -TERM -- "-${pid}" >/dev/null 2>&1
+    sleep 0.2
+    kill -KILL -- "-${pid}" >/dev/null 2>&1
+    if [[ "$rc" -eq 124 || "$rc" -eq 137 ]]; then
+        TIMED_OUT="true"
+    fi
+    return "$rc"
+}
+
 run_sh() {
-    local t="$1"
+    local t="$1" rc
     RAN=$((RAN + 1))
     echo "=== $t ==="
     if [[ ! -f "$t" ]]; then
@@ -53,16 +128,19 @@ run_sh() {
         FAILED+=("$t [unreadable]")
         return
     fi
-    bash "$t"
-    local rc=$?
-    if [[ "$rc" -ne 0 ]]; then
+    run_with_timeout bash "$t"
+    rc=$?
+    if [[ "$TIMED_OUT" == "true" ]]; then
+        echo "FAIL: $t (exit $rc — timed out after ${SUITE_TIMEOUT}s and was killed)"
+        FAILED+=("$t [timeout ${SUITE_TIMEOUT}s]")
+    elif [[ "$rc" -ne 0 ]]; then
         echo "FAIL: $t (exit $rc)"
         FAILED+=("$t [exit $rc]")
     fi
 }
 
 run_py() {
-    local t="$1"
+    local t="$1" rc
     RAN=$((RAN + 1))
     echo "=== $t ==="
     if [[ ! -f "$t" ]]; then
@@ -80,9 +158,12 @@ run_py() {
         FAILED+=("$t [no python3]")
         return
     fi
-    python3 "$t"
-    local rc=$?
-    if [[ "$rc" -ne 0 ]]; then
+    run_with_timeout python3 "$t"
+    rc=$?
+    if [[ "$TIMED_OUT" == "true" ]]; then
+        echo "FAIL: $t (exit $rc — timed out after ${SUITE_TIMEOUT}s and was killed)"
+        FAILED+=("$t [timeout ${SUITE_TIMEOUT}s]")
+    elif [[ "$rc" -ne 0 ]]; then
         echo "FAIL: $t (exit $rc)"
         FAILED+=("$t [exit $rc]")
     fi
