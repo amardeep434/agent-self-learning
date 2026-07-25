@@ -26,7 +26,7 @@ cat > "${DEST}/UPSTREAM.md" <<EOF
 # Vendored from ${REPO} (MIT License)
 - Path: ${RULES_PATH}
 - Commit: ${COMMIT_SHA}
-- Synced: $(date -Iseconds)
+- Synced: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 - Files: ${COUNT}
 - Re-sync: bash scripts/sync-coach-rules.sh
 EOF

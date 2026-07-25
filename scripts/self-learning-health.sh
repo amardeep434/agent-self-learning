@@ -168,7 +168,8 @@ fi
 # Check for stale lock
 LOCK_DIR="${SL_STATE_DIR}/counter.lock"
 if [[ -d "$LOCK_DIR" ]]; then
-    LOCK_AGE=$(( $(date +%s) - $(stat -c %Y "$LOCK_DIR" 2>/dev/null || echo 0) ))
+    LOCK_MTIME=$(stat -c %Y "$LOCK_DIR" 2>/dev/null || stat -f %m "$LOCK_DIR" 2>/dev/null || echo 0)
+    LOCK_AGE=$(( $(date +%s) - LOCK_MTIME ))
     if [[ "$LOCK_AGE" -gt 30 ]]; then
         warn "Stale lock directory found (${LOCK_AGE}s old). Removing."
         rmdir "$LOCK_DIR" 2>/dev/null || rm -rf "$LOCK_DIR"

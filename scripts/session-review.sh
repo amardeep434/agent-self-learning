@@ -50,7 +50,7 @@ if (( TOTAL_TURNS < MIN_TURNS_FOR_REVIEW )); then
     exit 0
 fi
 
-NOW=$(date -Iseconds)
+NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 # --- Build the review prompt ---
 

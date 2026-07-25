@@ -91,3 +91,33 @@ export SL_HOME SL_STATE_DIR SL_SKILLS_DIR SL_MEMORY_DIR SL_LOG_DIR SL_SEARCH_DB 
        SL_REVIEW_MIN_TURNS SL_REVIEW_MAX_TURNS SL_COPILOT_REVIEW_MODEL \
        SL_SKILLOPT_ENABLED SL_SKILLOPT_REPO SL_SKILLOPT_RUN_CONFIRMED \
        SL_REVIEW_ENABLED
+
+# ---------------------------------------------------------------------------
+# sl_iso_to_epoch <iso8601-timestamp>
+# Portable replacement for `date -d "$ts" +%s`, which is GNU-only and not
+# available on macOS/BSD date. Timestamps in this project are always written
+# with `date -u +%Y-%m-%dT%H:%M:%SZ` (see session-review.sh, curator-run.sh,
+# turn-counter.sh), so all three strategies below parse that exact format.
+# Tries GNU date, then BSD date, then falls back to python3 (stdlib only,
+# already a hard dependency of this project). Prints "0" and returns success
+# if the timestamp is empty or unparsable by every strategy, matching the
+# previous `|| echo 0` fallback behavior at call sites.
+# ---------------------------------------------------------------------------
+sl_iso_to_epoch() {
+    local ts="$1" epoch
+    if [[ -z "$ts" ]]; then
+        echo 0
+        return 0
+    fi
+    epoch=$(date -u -d "$ts" +%s 2>/dev/null) && [[ -n "$epoch" ]] && { echo "$epoch"; return 0; }
+    epoch=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$ts" +%s 2>/dev/null) && [[ -n "$epoch" ]] && { echo "$epoch"; return 0; }
+    epoch=$(python3 -c '
+import datetime, sys
+try:
+    dt = datetime.datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+    print(int(dt.timestamp()))
+except Exception:
+    print(0)
+' "$ts" 2>/dev/null) && [[ -n "$epoch" ]] && { echo "$epoch"; return 0; }
+    echo 0
+}

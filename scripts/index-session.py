@@ -13,6 +13,8 @@ Arguments:
     project_path  - Relative project path (used for grouping)
 """
 
+from __future__ import annotations
+
 import json
 import sqlite3
 import sys

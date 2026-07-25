@@ -42,7 +42,7 @@ mkdir -p "$ARCHIVE_DIR" "$BACKUP_DIR" "$LOG_DIR" "$STATE_DIR"
 LAST_SESSION_FILE="${STATE_DIR}/last-session-end"
 if [[ -f "$LAST_SESSION_FILE" ]]; then
     LAST_SESSION_TS=$(cat "$LAST_SESSION_FILE")
-    LAST_SESSION_EPOCH=$(date -d "$LAST_SESSION_TS" +%s 2>/dev/null || echo 0)
+    LAST_SESSION_EPOCH=$(sl_iso_to_epoch "$LAST_SESSION_TS")
     NOW_EPOCH=$(date +%s)
     IDLE_SECONDS=$((NOW_EPOCH - LAST_SESSION_EPOCH))
     IDLE_HOURS=$((IDLE_SECONDS / 3600))
@@ -58,7 +58,7 @@ fi
 LAST_RUN_FILE="${STATE_DIR}/curator-last-run"
 if [[ -f "$LAST_RUN_FILE" ]]; then
     LAST_RUN_TS=$(cat "$LAST_RUN_FILE")
-    LAST_RUN_EPOCH=$(date -d "$LAST_RUN_TS" +%s 2>/dev/null || echo 0)
+    LAST_RUN_EPOCH=$(sl_iso_to_epoch "$LAST_RUN_TS")
     NOW_EPOCH=$(date +%s)
     DAYS_SINCE=$(( (NOW_EPOCH - LAST_RUN_EPOCH) / 86400 ))
 
@@ -68,7 +68,7 @@ if [[ -f "$LAST_RUN_FILE" ]]; then
     fi
 fi
 
-echo "[CURATOR] Starting curator run at $(date -Iseconds)"
+echo "[CURATOR] Starting curator run at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # --- Pre-run backup ---
 # Always back up before any destructive operations.
@@ -86,7 +86,7 @@ fi
 cat > "$REPORT_FILE" << EOF
 # Curator Report: $(date +%Y-%m-%d)
 
-**Run started:** $(date -Iseconds)
+**Run started:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
 **Skills directory:** $SKILLS_DIR
 **Backup:** $BACKUP_FILE
 **LLM consolidation:** $LLM_PASS
@@ -195,12 +195,12 @@ cat >> "$REPORT_FILE" << EOF
 
 ## Summary
 
-**Run completed:** $(date -Iseconds)
+**Run completed:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
 **Transitions applied:** $TRANSITION_COUNT
 **Backup size:** $BACKUP_SIZE
 EOF
 
 # Update last-run timestamp
-date -Iseconds > "$LAST_RUN_FILE"
+date -u +%Y-%m-%dT%H:%M:%SZ > "$LAST_RUN_FILE"
 
 echo "[CURATOR] Run complete. Report: $REPORT_FILE"

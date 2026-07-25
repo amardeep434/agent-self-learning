@@ -1,0 +1,78 @@
+name: CI
+
+"on":
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.9", "3.13"]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # actions/setup-python on Windows only provides `python.exe`, never a
+      # `python3` on PATH (this is a known upstream gap, not a project bug).
+      # Every script in this repo shells out to `python3` by convention
+      # (config.sh, install.sh, curator-run.sh, ...), so without this shim
+      # every Windows job would fail with "python3: command not found"
+      # before a single test suite ran. Shimming here keeps that convention
+      # intact everywhere else instead of scattering python/python3
+      # fallbacks across scripts/.
+      - name: Ensure python3 resolves (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          set -euo pipefail
+          PY_PATH="$(command -v python)"
+          PY_DIR="$(dirname "$PY_PATH")"
+          if [[ ! -e "${PY_DIR}/python3.exe" ]]; then
+            cp "$PY_PATH" "${PY_DIR}/python3.exe"
+          fi
+          command -v python3
+          python3 --version
+
+      # jq is preinstalled on ubuntu-latest and windows-latest, but not
+      # guaranteed on macos-latest images; install explicitly rather than
+      # assume. `brew install` exits 0 (with a warning) if already present,
+      # so this is safe either way.
+      - name: Install jq (macOS)
+        if: runner.os == 'macOS'
+        run: brew install jq
+
+      # sqlite3 (the CLI, not Python's bundled sqlite3 module) ships with
+      # ubuntu-latest and macos-latest but not windows-latest. Several test
+      # suites and scripts/self-learning-health.sh, scripts/index-session.sh
+      # shell out to the sqlite3 binary directly, so install it explicitly
+      # rather than let those suites fail with a confusing "command not
+      # found" deep inside a subshell.
+      - name: Install sqlite3 (Windows)
+        if: runner.os == 'Windows'
+        run: choco install sqlite -y --no-progress
+
+      - name: Verify required tools are on PATH
+        run: |
+          set -euo pipefail
+          for tool in python3 jq sqlite3 bash; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              echo "::error::required tool '$tool' is not resolvable on PATH — failing loudly instead of letting a downstream suite silently degrade" >&2
+              exit 1
+            fi
+          done
+
+      - name: Run tests
+        run: bash tests/run-all.sh
