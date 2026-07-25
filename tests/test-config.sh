@@ -4,6 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FAILURES=0
 check() { if [[ "$2" == "$3" ]]; then echo "PASS: $1"; else echo "FAIL: $1 (expected '$2', got '$3')"; FAILURES=$((FAILURES+1)); fi; }
+# shellcheck source=tests/lib/path-compare.sh
+source "${SCRIPT_DIR}/tests/lib/path-compare.sh"
 
 # Defaults (point SL_CONFIG_FILE at the repo config)
 OUT=$(env -i HOME="$HOME" PATH="$PATH" SL_CONFIG_FILE="${SCRIPT_DIR}/config/self-learning.conf" \
@@ -15,10 +17,18 @@ OUT=$(env -i HOME="$HOME" PATH="$PATH" SL_CONFIG_FILE="${SCRIPT_DIR}/config/self
     bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; echo \"\$SL_COACH_RULES_ENABLED\"")
 check "env override wins" "true" "$OUT"
 
-# Missing config file is non-fatal, defaults apply
+# Missing config file is non-fatal, defaults apply.
+#
+# Fix round E: compared with sl_check_same_path (canonicalized), not plain
+# string equality -- $HOME crossing into the python3.exe subprocess
+# config.sh shells out to is subject to the same MSYS auto-conversion as
+# any other env value (see tests/lib/path-compare.sh), so on Git Bash the
+# resolved $OUT can be a differently-spelled but identical directory to the
+# bash-literal "$HOME/.local/share/agent-learning" this test used to compare
+# against verbatim.
 OUT=$(env -i HOME="$HOME" PATH="$PATH" SL_CONFIG_FILE="/nonexistent/x.conf" \
     bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; echo \"\$SL_HOME\"")
-check "missing file falls back to defaults" "$HOME/.local/share/agent-learning" "$OUT"
+sl_check_same_path "missing file falls back to defaults" "$HOME/.local/share/agent-learning" "$OUT"
 
 # Neutral defaults: no ~/.claude anywhere
 OUT=$(env -i HOME="$HOME" PATH="$PATH" SL_CONFIG_FILE="/nonexistent/x.conf" \
@@ -29,30 +39,21 @@ case "$OUT" in
     *) echo "FAIL: unexpected SL_HOME ($OUT)"; FAILURES=$((FAILURES+1)) ;;
 esac
 
-# Explicit override wins over platform default
+# Explicit override wins over platform default.
 #
-# Fix round D, blocker (b): on Git Bash / MSYS2, /tmp is itself remapped to
-# %TEMP% by the MSYS runtime, so 'AGENT_LEARNING_HOME=/tmp/al' and the path
-# python.exe resolves for it can be the SAME directory on disk while being
-# spelled completely differently as strings ('/tmp/al/memory' vs.
-# 'C:/Users/RUNNER~1/AppData/Local/Temp/al/memory', or -- after paths.py's
+# Fix round D, blocker (b) / fix round E: on Git Bash / MSYS2, /tmp is
+# itself remapped to %TEMP% by the MSYS runtime, so 'AGENT_LEARNING_HOME=/tmp/al'
+# and the path python.exe resolves for it can be the SAME directory on disk
+# while being spelled completely differently as strings ('/tmp/al/memory'
+# vs. 'C:/Users/RUNNER~1/AppData/Local/Temp/al/memory', or -- after paths.py's
 # MSYS-form fix -- '/c/Users/.../Temp/al/memory'). A plain string `==`
 # assertion is therefore not portable even once paths.py is doing the right
-# thing; comparing with `-ef` (same underlying file/inode) is. `-ef` requires
-# both sides to already exist, so both are created first. This still catches
-# a real regression: if SL_MEMORY_DIR resolved to any OTHER directory, `-ef`
-# against the expected one would correctly fail.
-_sl_expected_memory_dir="/tmp/al/memory"
-mkdir -p "$_sl_expected_memory_dir"
+# thing. sl_check_same_path (tests/lib/path-compare.sh) handles this the
+# same way every other suite now does, instead of a one-off inline `-ef`
+# block (which is what round D shipped here, the thing round E generalizes).
 OUT=$(env -i HOME="$HOME" PATH="$PATH" AGENT_LEARNING_HOME="/tmp/al" SL_CONFIG_FILE="/nonexistent/x.conf" \
     bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; echo \"\$SL_MEMORY_DIR\"")
-mkdir -p "$OUT" 2>/dev/null || true
-if [[ -d "$_sl_expected_memory_dir" && -d "$OUT" && "$_sl_expected_memory_dir" -ef "$OUT" ]]; then
-    echo "PASS: AGENT_LEARNING_HOME drives SL_MEMORY_DIR (${OUT} -ef ${_sl_expected_memory_dir})"
-else
-    echo "FAIL: AGENT_LEARNING_HOME drives SL_MEMORY_DIR (expected an equivalent directory to '${_sl_expected_memory_dir}', got '${OUT}')"
-    FAILURES=$((FAILURES+1))
-fi
+sl_check_same_path "AGENT_LEARNING_HOME drives SL_MEMORY_DIR" "/tmp/al/memory" "$OUT"
 
 # New review flag defaults on
 OUT=$(env -i HOME="$HOME" PATH="$PATH" SL_CONFIG_FILE="/nonexistent/x.conf" \
@@ -114,14 +115,18 @@ check "pre-set SL_CONFIG_FILE overrides paths.py default" "/nonexistent/x.conf" 
 # siblings, every time. Identical behavior on POSIX and Git Bash. `command
 # -v python3` still correctly reports "not found" for the no-python3 tests
 # below, since no forwarder is ever created for python3.
-_sl_link_or_copy() {
-    local src="$1" dst="$2"
-    printf '#!/bin/sh\nexec "%s" "$@"\n' "$src" > "$dst"
-    chmod +x "$dst"
-}
+#
+# CONFIRMED by fix round E: CI run 30155575042 shows this fix worked --
+# `tests/test-config.sh` no longer exits 127 on windows-latest; it now
+# fails (or passes) on an ordinary assertion. The forwarder-script writer
+# now lives once in tests/lib/path-compare.sh as sl_forwarder, used here and
+# by every other suite with the same restricted-PATH need (fix round D
+# applied this fix only in this file; round E generalizes it, since
+# test-doctor-no-python.sh and test-health-no-python.sh turned out to still
+# have the pre-fix `cp`-based version).
 _sl_no_python_dir=$(mktemp -d)
-_sl_link_or_copy "$(command -v dirname)" "$_sl_no_python_dir/dirname"
-_sl_link_or_copy "$(command -v bash)" "$_sl_no_python_dir/bash"
+sl_forwarder "$(command -v dirname)" "$_sl_no_python_dir/dirname"
+sl_forwarder "$(command -v bash)" "$_sl_no_python_dir/bash"
 OUT=$(env -i HOME="$HOME" PATH="$_sl_no_python_dir" \
     bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; echo \"\$SL_HOME|\$SL_STATE_DIR|\$SL_SKILLS_DIR|\$SL_MEMORY_DIR|\$SL_LOG_DIR|\$SL_SEARCH_DB\"")
 rm -rf "$_sl_no_python_dir"
@@ -249,8 +254,8 @@ rm -rf "$_sl_fake_date_dir"
 # ${HOME}/.local/share/agent-learning -- which itself silently ignores a
 # caller's AGENT_LEARNING_HOME/XDG_DATA_HOME when python3 is unavailable.
 _sl_no_python_dir2=$(mktemp -d)
-_sl_link_or_copy "$(command -v dirname)" "$_sl_no_python_dir2/dirname"
-_sl_link_or_copy "$(command -v bash)" "$_sl_no_python_dir2/bash"
+sl_forwarder "$(command -v dirname)" "$_sl_no_python_dir2/dirname"
+sl_forwarder "$(command -v bash)" "$_sl_no_python_dir2/bash"
 OUT=$(env -i HOME="$HOME" PATH="$_sl_no_python_dir2" AGENT_LEARNING_HOME="/tmp/al-nopy" \
     bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; echo \"\$SL_HOME|\$SL_MEMORY_DIR\"")
 check "I6: no python3, AGENT_LEARNING_HOME still drives SL_HOME" "/tmp/al-nopy|/tmp/al-nopy/memory" "$OUT"
@@ -285,9 +290,17 @@ rm -f "$_sl_env_beats_file_conf"
 # installs coach rules (${DEST_DIR}/coach-rules, DEST_DIR being paths.py's
 # "scripts" key), not the pre-Task-7b .../scripts/self-learning/coach-rules
 # path that no longer exists on a real install.
+#
+# Fix round E: this HOME is a bare literal ("/tmp/sl-coach-rules-home") that
+# never gets mkdir'd -- it doesn't need to exist for config.sh to resolve a
+# string from it, but it DOES cross into the python3.exe subprocess
+# config.sh shells out to (as the HOME env var), which is exactly the
+# boundary MSYS auto-converts on Git Bash. sl_check_same_path's
+# canonicalization fallback (tests/lib/path-compare.sh) handles a
+# nonexistent path exactly like an existing one for this purpose.
 OUT=$(env -i HOME="/tmp/sl-coach-rules-home" PATH="$PATH" SL_CONFIG_FILE="/nonexistent/x.conf" \
     bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; echo \"\$SL_COACH_RULES_DIR\"")
-check "I5: SL_COACH_RULES_DIR matches install.sh's actual coach-rules destination" \
+sl_check_same_path "I5: SL_COACH_RULES_DIR matches install.sh's actual coach-rules destination" \
     "/tmp/sl-coach-rules-home/.local/share/agent-learning/scripts/coach-rules" "$OUT"
 
 # --- M13: sl_check_hook_fresh() used an unanchored `grep -qF` for the

@@ -115,6 +115,12 @@ fi
 SL_HOME="" SL_STATE="" SL_SKILLS="" SL_MEMORY="" SL_LOGS="" \
 SL_SESSIONS_DB="" SL_CONFIG_FILE="" SL_SCRIPTS=""
 while IFS='=' read -r _sl_key _sl_val; do
+    # Fix round E, defence in depth: see scripts/lib/config.sh's identical
+    # strip for the full rationale -- paths.py's stdout is now forced to
+    # LF-only, making this a no-op in practice, but `read` never strips a
+    # \r that isn't the record terminator itself, so this stays as a cheap
+    # second layer against a stray one corrupting every resolved path.
+    _sl_val="${_sl_val%$'\r'}"
     case "$_sl_key" in
         home)        SL_HOME="$_sl_val" ;;
         state)       SL_STATE="$_sl_val" ;;

@@ -33,6 +33,14 @@ _sl_pp_home="" _sl_pp_state="" _sl_pp_skills="" _sl_pp_memory="" _sl_pp_logs=""
 _sl_pp_sessions_db="" _sl_pp_config_file="" _sl_pp_scripts=""
 if [[ -f "$_sl_paths_py" ]]; then
     while IFS='=' read -r _k _v; do
+        # Fix round E, defence in depth: paths.py's own stdout now forces LF
+        # line endings (see its _main docstring) so this trailing-\r strip
+        # should be a no-op in practice -- kept anyway as a second, cheap
+        # layer, since `read` only ever strips the record-terminating \n,
+        # never a \r immediately before it, and a stray \r silently
+        # corrupts every path built from it (a directory named "logs\r" is
+        # not "logs").
+        _v="${_v%$'\r'}"
         case "$_k" in
             home)        _sl_pp_home="$_v" ;;
             state)       _sl_pp_state="$_v" ;;

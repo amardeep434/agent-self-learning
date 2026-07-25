@@ -14,6 +14,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FAILURES=0
 check() { if [[ "$2" == "$3" ]]; then echo "PASS: $1"; else echo "FAIL: $1 (expected '$2', got '$3')"; FAILURES=$((FAILURES+1)); fi; }
+# shellcheck source=tests/lib/path-compare.sh
+source "${SCRIPT_DIR}/tests/lib/path-compare.sh"
 
 TMP_HOME="$(mktemp -d)"
 trap 'rm -rf "$TMP_HOME"' EXIT
@@ -28,10 +30,21 @@ EOF
 
 # Stub `claude` onto the no-python3 PATH so the harness section actually
 # runs (doctor.sh only reports hooks for a harness it detects as present).
+#
+# Fix round E: this used to `cp` each tool into the restricted directory --
+# on Git Bash/MSYS2, copying bash.exe (etc.) away from its msys-2.0.dll
+# siblings (which the Windows loader resolves relative to the executable's
+# own directory, not via PATH) breaks the copy, indistinguishable from
+# "tool truly absent". sl_forwarder (tests/lib/path-compare.sh) writes a
+# forwarder script instead -- see fix round D blocker (b) part 3, applied
+# there to test-config.sh but missed here, which is exactly the kind of
+# per-suite-copy drift this shared helper exists to prevent. `python3` is
+# deliberately never forwarded, since this suite's entire point is a PATH
+# python3 cannot be resolved from.
 _sl_no_python_dir="$(mktemp -d)"
 for _tool in mkdir cp chmod sed dirname basename date grep cat mv rm printf touch mktemp bash sqlite3 jq test true false expr tar du; do
     _tool_path="$(command -v "$_tool" 2>/dev/null || true)"
-    [[ -n "$_tool_path" ]] && cp "$_tool_path" "${_sl_no_python_dir}/${_tool}" 2>/dev/null || true
+    [[ -n "$_tool_path" ]] && sl_forwarder "$_tool_path" "${_sl_no_python_dir}/${_tool}"
 done
 cat > "${_sl_no_python_dir}/claude" <<'EOF'
 #!/usr/bin/env bash

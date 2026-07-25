@@ -13,6 +13,8 @@ FAILURES=0
 check() { if [[ "$2" == "$3" ]]; then echo "PASS: $1"; else echo "FAIL: $1 (expected '$2', got '$3')"; FAILURES=$((FAILURES+1)); fi; }
 contains() { case "$2" in *"$3"*) echo "PASS: $1";; *) echo "FAIL: $1 (output did not contain '$3')"; FAILURES=$((FAILURES+1));; esac; }
 not_contains() { case "$2" in *"$3"*) echo "FAIL: $1 (output unexpectedly contained '$3')"; FAILURES=$((FAILURES+1));; *) echo "PASS: $1";; esac; }
+# shellcheck source=tests/lib/path-compare.sh
+source "${SCRIPT_DIR}/tests/lib/path-compare.sh"
 
 # ---------------------------------------------------------------------------
 # 1. Basic resolved-path and writability reporting (baseline, healthy case)
@@ -22,7 +24,16 @@ OUT=$(env -i HOME="$TMP_HOME" PATH="$PATH" AGENT_LEARNING_HOME="${TMP_HOME}/stor
       SL_CONFIG_FILE="/nonexistent/x.conf" bash "${SCRIPT_DIR}/scripts/doctor.sh" 2>&1)
 RC=$?
 
-contains "doctor prints resolved memory path" "$OUT" "${TMP_HOME}/store/memory"
+# Fix round E: the memory path doctor.sh prints (SL_MEMORY_DIR, sourced from
+# config.sh, which shells out to paths.py) is resolved by a python3.exe
+# subprocess -- on Git Bash/MSYS2 that can be a differently-spelled but
+# identical directory to the bash-literal "${TMP_HOME}/store/memory" this
+# assertion used to compare against verbatim. sl_resolve_path calls the
+# EXACT SAME resolver under the identical env, so EXPECTED_MEMORY is
+# byte-identical to what doctor.sh will print, on any platform.
+EXPECTED_MEMORY="$(sl_resolve_path "${SCRIPT_DIR}/scripts/lib/paths.py" memory \
+    HOME="$TMP_HOME" AGENT_LEARNING_HOME="${TMP_HOME}/store" PATH="$PATH")"
+contains "doctor prints resolved memory path" "$OUT" "$EXPECTED_MEMORY"
 contains "doctor reports writability" "$OUT" "writable"
 contains "doctor shows override source" "$OUT" "AGENT_LEARNING_HOME"
 check "healthy run exits 0" "0" "$RC"
@@ -53,7 +64,12 @@ OUT=$(env -i HOME="$TMP_HOME" PATH="$PATH" AGENT_LEARNING_HOME="${TMP_HOME}/stor
 # is found, so asserting on that alone would be vacuous -- assert on the
 # found-marker plus the actual path together.
 contains "legacy store detected" "$OUT" "legacy ~/.claude store found"
-contains "legacy store path reported" "$OUT" "${TMP_HOME}/.claude"
+# Fix round E: doctor.sh's LEGACY_HOME comes from paths.legacy_home() via a
+# python3 subprocess, same MSYS-spelling concern as the memory-path fix
+# above -- sl_legacy_home runs the identical snippet doctor.sh runs, under
+# the identical env, so this is byte-identical to doctor.sh's own output.
+EXPECTED_LEGACY="$(sl_legacy_home "${SCRIPT_DIR}/scripts/lib" HOME="$TMP_HOME" PATH="$PATH")"
+contains "legacy store path reported" "$OUT" "$EXPECTED_LEGACY"
 
 # Never move or modify user data.
 check "legacy MEMORY.md untouched" "sentinel" "$(cat "${TMP_HOME}/.claude/memory/MEMORY.md")"
@@ -255,9 +271,19 @@ rm -rf "$TMP_HOME"
 
 # 6b. Fresh: hook command points exactly at the resolved scripts dir. Both
 # tools must agree it is healthy, with neither reporting STALE.
+#
+# Fix round E: RESOLVED_SCRIPTS used to be a bash-literal "${STORE}/scripts"
+# concatenation. sl_check_hook_fresh() (lib/config.sh) does a TEXTUAL grep
+# match between the hook command in this fixture and the scripts dir doctor.sh/
+# self-learning-health.sh independently resolve via python3 -- so on Git
+# Bash/MSYS2, a bash-literal fixture path would never textually match the
+# MSYS-spelled resolved path even though they name the same real directory,
+# making a genuinely fresh hook read STALE. Resolve it via the exact same
+# tool (paths.py get scripts) under the same env instead.
 TMP_HOME="$(mktemp -d)"
 STORE="${TMP_HOME}/store"
-RESOLVED_SCRIPTS="${STORE}/scripts"
+RESOLVED_SCRIPTS="$(sl_resolve_path "${SCRIPT_DIR}/scripts/lib/paths.py" scripts \
+    HOME="$TMP_HOME" AGENT_LEARNING_HOME="$STORE" PATH="$STUB_PATH")"
 mkdir -p "${TMP_HOME}/.claude"
 cat > "${TMP_HOME}/.claude/settings.json" <<JSON
 {"hooks":{"PostToolUse":[{"command":"bash ${RESOLVED_SCRIPTS}/turn-counter.sh"}],"Stop":[{"command":"bash ${RESOLVED_SCRIPTS}/session-review.sh"},{"command":"bash ${RESOLVED_SCRIPTS}/index-session.sh"}]}}

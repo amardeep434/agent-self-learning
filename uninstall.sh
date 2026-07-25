@@ -36,6 +36,9 @@ PATHS_PY="${SCRIPT_DIR}/scripts/lib/paths.py"
 SL_HOME="" SL_SCRIPTS="" SL_CONFIG_FILE="" SL_STATE="" SL_LOGS=""
 if command -v python3 >/dev/null 2>&1 && [[ -f "$PATHS_PY" ]]; then
     while IFS='=' read -r _sl_key _sl_val; do
+        # Fix round E, defence in depth: see scripts/lib/config.sh's identical
+        # strip for the full rationale.
+        _sl_val="${_sl_val%$'\r'}"
         case "$_sl_key" in
             home)        SL_HOME="$_sl_val" ;;
             scripts)     SL_SCRIPTS="$_sl_val" ;;

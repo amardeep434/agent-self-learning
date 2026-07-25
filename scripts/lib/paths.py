@@ -171,6 +171,33 @@ def _to_cli_string(p: PurePath, *, is_windows: bool | None = None, msystem: str 
 
 
 def _main(argv: list[str]) -> int:
+    # Fix round E: force LF-only line endings on stdout regardless of
+    # platform. On native Windows, Python's default text-mode sys.stdout
+    # performs universal-newline translation (writing "\n" actually emits
+    # "\r\n") even when the destination is a pipe rather than a console --
+    # this is Python's own io.TextIOWrapper behavior, unrelated to and not
+    # fixed by anything MSYS/Git-Bash does. Every bash consumer of this CLI
+    # (config.sh, install.sh, uninstall.sh) reads this output either via
+    # `while IFS='=' read -r k v; do ... done < <(python3 paths.py all)` or
+    # via `$(... paths.py get key)` command substitution. In BOTH cases bash
+    # strips only the trailing "\n" record terminator -- never a "\r"
+    # immediately preceding it -- so without this fix, every single resolved
+    # path value would carry an invisible trailing "\r" on Windows. That
+    # corrupts every downstream use: a directory named "...logs" is not the
+    # same directory as "...logs\r" (silently making every store subpath
+    # this project resolves through config.sh/install.sh's read loops
+    # unreachable/wrong on Windows, the exact silent-wrong-location class
+    # this project exists to eliminate); and where a resolved path is
+    # substituted into a JSON template (install.sh's copilot-hooks.json
+    # rendering), the embedded raw "\r" is an unescaped control character
+    # inside a JSON string -- invalid per RFC 8259 -- which breaks strict
+    # JSON parsers like jq downstream. `reconfigure` is Python 3.7+ (this
+    # project's floor is 3.9); guarded in case a caller ever replaces
+    # sys.stdout with something that does not support it.
+    try:
+        sys.stdout.reconfigure(newline="\n")
+    except (AttributeError, ValueError):
+        pass
     try:
         if len(argv) >= 2 and argv[0] == "get":
             resolved = resolve_all()

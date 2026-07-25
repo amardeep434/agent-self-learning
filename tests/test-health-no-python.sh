@@ -17,6 +17,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FAILURES=0
 check() { if [[ "$2" == "$3" ]]; then echo "PASS: $1"; else echo "FAIL: $1 (expected '$2', got '$3')"; FAILURES=$((FAILURES+1)); fi; }
+# shellcheck source=tests/lib/path-compare.sh
+source "${SCRIPT_DIR}/tests/lib/path-compare.sh"
 
 TMP_HOME="$(mktemp -d)"
 trap 'rm -rf "$TMP_HOME"' EXIT
@@ -33,12 +35,14 @@ cat > "${TMP_HOME}/.claude/settings.json" <<EOF
 EOF
 
 # Minimal PATH with every tool self-learning-health.sh needs EXCEPT python3,
-# built the same way as test-config.sh's no-python block (cp, not ln -s --
-# portable across platforms, no symlink privilege required).
+# built via sl_forwarder (tests/lib/path-compare.sh) -- forwarder scripts,
+# not `cp`, since a copied bash.exe/etc. loses its msys-2.0.dll siblings on
+# Git Bash/MSYS2 (see fix round D blocker (b) part 3; this file had the
+# pre-fix `cp`-based version until fix round E).
 _sl_no_python_dir="$(mktemp -d)"
 for _tool in mkdir cp chmod sed dirname basename date grep cat mv rm printf touch mktemp bash sqlite3 jq test true false expr; do
     _tool_path="$(command -v "$_tool" 2>/dev/null || true)"
-    [[ -n "$_tool_path" ]] && cp "$_tool_path" "${_sl_no_python_dir}/${_tool}" 2>/dev/null || true
+    [[ -n "$_tool_path" ]] && sl_forwarder "$_tool_path" "${_sl_no_python_dir}/${_tool}"
 done
 
 HEALTH_OUT="$(env -i HOME="$TMP_HOME" PATH="$_sl_no_python_dir" \

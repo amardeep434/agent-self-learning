@@ -20,6 +20,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FAILURES=0
 check() { if [[ "$2" == "$3" ]]; then echo "PASS: $1"; else echo "FAIL: $1 (expected '$2', got '$3')"; FAILURES=$((FAILURES+1)); fi; }
+# shellcheck source=tests/lib/path-compare.sh
+source "${SCRIPT_DIR}/tests/lib/path-compare.sh"
 
 TMP_HOME="$(mktemp -d)"
 trap 'rm -rf "$TMP_HOME"' EXIT
@@ -72,9 +74,13 @@ RESOLVED_DB="$(run_env python3 "${SCRIPT_DIR}/scripts/lib/paths.py" get sessions
 RESOLVED_LOGS="$(run_env python3 "${SCRIPT_DIR}/scripts/lib/paths.py" get logs)"
 RESOLVED_HOME="$(run_env python3 "${SCRIPT_DIR}/scripts/lib/paths.py" get home)"
 
-check "resolved state under store" "${STORE}/state" "$RESOLVED_STATE"
-check "resolved skills under store" "${STORE}/learned-skills" "$RESOLVED_SKILLS"
-check "resolved sessions db under store" "${STORE}/sessions/search.db" "$RESOLVED_DB"
+# Fix round E: compared with sl_check_same_path, not plain string equality
+# -- RESOLVED_STATE/SKILLS/DB above crossed a python3.exe subprocess
+# boundary (subject to MSYS auto-conversion on Git Bash) while
+# "${STORE}/..." never did.
+sl_check_same_path "resolved state under store" "${STORE}/state" "$RESOLVED_STATE"
+sl_check_same_path "resolved skills under store" "${STORE}/learned-skills" "$RESOLVED_SKILLS"
+sl_check_same_path "resolved sessions db under store" "${STORE}/sessions/search.db" "$RESOLVED_DB"
 
 # --- Seed a healthy install purely under STORE. Deliberately create NOTHING
 # under ${TMP_HOME}/.claude except the two legitimate Claude-Code-owned
@@ -145,7 +151,12 @@ check "missing settings.json never reported as FAIL" "0" \
 # which verifies the hook command points at the currently-resolved scripts
 # directory, not merely that the script's name appears somewhere in the
 # file. A placeholder path here would (correctly) read as STALE.
-RESOLVED_SCRIPTS="${STORE}/scripts"
+# Fix round E: RESOLVED_SCRIPTS used to be a bash-literal "${STORE}/scripts"
+# concatenation, compared textually (via sl_check_hook_fresh) against what
+# self-learning-health.sh independently resolves via python3 -- resolve it
+# through the same tool instead so the fixture cannot be spelled
+# differently from what the product will compute.
+RESOLVED_SCRIPTS="$(run_env python3 "${SCRIPT_DIR}/scripts/lib/paths.py" get scripts)"
 mkdir -p "${TMP_HOME}/.claude"
 cat > "${TMP_HOME}/.claude/settings.json" <<EOF
 {"hooks":{"PostToolUse":[{"hooks":[{"command":"bash ${RESOLVED_SCRIPTS}/turn-counter.sh"}]}],

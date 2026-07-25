@@ -189,6 +189,34 @@ class TestLegacyDetection(unittest.TestCase):
             self.assertIsNone(paths.legacy_home({"HOME": d}))
 
 
+class TestCliLineEndings(unittest.TestCase):
+    """Fix round E: Python's default text-mode stdout on native Windows
+    translates outgoing "\\n" to "\\r\\n" even for a pipe destination, which
+    would silently embed a stray \\r in every path this CLI emits (bash's
+    `read`/command-substitution strip only the trailing \\n record
+    terminator, never a \\r immediately before it). _main() now calls
+    sys.stdout.reconfigure(newline="\\n") to force LF-only output regardless
+    of platform. This assertion is a no-op strengthening on Linux/macOS
+    (which never had \\r\\n translation to begin with) -- it cannot prove the
+    Windows behavior from here, but pins the invariant "no \\r ever appears
+    in this CLI's raw output bytes" so a future regression that reintroduces
+    platform-default text-mode stdout is at least structurally guarded."""
+
+    def test_get_output_has_no_carriage_return_bytes(self):
+        env = dict(os.environ, AGENT_LEARNING_HOME="/tmp/x")
+        r = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "lib" / "paths.py"), "get", "memory"],
+            capture_output=True, env=env, check=True)
+        self.assertNotIn(b"\r", r.stdout)
+
+    def test_all_output_has_no_carriage_return_bytes(self):
+        env = dict(os.environ, AGENT_LEARNING_HOME="/tmp/x")
+        r = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "lib" / "paths.py"), "all"],
+            capture_output=True, env=env, check=True)
+        self.assertNotIn(b"\r", r.stdout)
+
+
 class TestCli(unittest.TestCase):
     def test_get_prints_single_path(self):
         env = dict(os.environ, AGENT_LEARNING_HOME="/tmp/x")

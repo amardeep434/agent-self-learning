@@ -10,6 +10,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FAILURES=0
 check() { if [[ "$2" == "$3" ]]; then echo "PASS: $1"; else echo "FAIL: $1 (expected '$2', got '$3')"; FAILURES=$((FAILURES+1)); fi; }
+# shellcheck source=tests/lib/path-compare.sh
+source "${SCRIPT_DIR}/tests/lib/path-compare.sh"
 
 TMP_HOME="$(mktemp -d)"
 trap 'rm -rf "$TMP_HOME"' EXIT
@@ -81,7 +83,10 @@ fi
 RESOLVED_SCRIPTS="$(env -i HOME="$TMP_HOME" PATH="$MINIMAL_PATH" AGENT_LEARNING_HOME="$STORE" \
     ${PYENV_ROOT:+PYENV_ROOT="$PYENV_ROOT"} \
     python3 "${SCRIPT_DIR}/scripts/lib/paths.py" get scripts)"
-check "resolved scripts dir is under the store" "${STORE}/scripts" "$RESOLVED_SCRIPTS"
+# Fix round E: compared with sl_check_same_path, not plain string equality
+# -- RESOLVED_SCRIPTS crossed a python3.exe subprocess boundary (subject to
+# MSYS auto-conversion on Git Bash) while "${STORE}/scripts" never did.
+sl_check_same_path "resolved scripts dir is under the store" "${STORE}/scripts" "$RESOLVED_SCRIPTS"
 
 for s in turn-counter.sh session-review.sh index-session.sh copilot-session-review.sh \
          self-learning-health.sh curator-run.sh; do
@@ -172,7 +177,7 @@ SL_COACH_RULES_DIR_RESOLVED="$(env -i HOME="$TMP_HOME" PATH="$MINIMAL_PATH" AGEN
     bash -c "source '${RESOLVED_SCRIPTS}/lib/config.sh'; echo \"\$SL_COACH_RULES_DIR\"")"
 check "SL_COACH_RULES_DIR resolves to a directory that exists after a real install" "yes" \
     "$([[ -d "$SL_COACH_RULES_DIR_RESOLVED" ]] && echo yes || echo no)"
-check "SL_COACH_RULES_DIR resolves under the installed scripts dir (matches install.sh's Step 3b destination)" \
+sl_check_same_path "SL_COACH_RULES_DIR resolves under the installed scripts dir (matches install.sh's Step 3b destination)" \
     "${RESOLVED_SCRIPTS}/coach-rules" "$SL_COACH_RULES_DIR_RESOLVED"
 
 # --- The Copilot hook config: rendered, resolved, and verifiably correct ---

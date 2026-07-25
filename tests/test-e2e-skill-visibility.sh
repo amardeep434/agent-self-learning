@@ -61,10 +61,30 @@ env -i HOME="$TMP_HOME" PATH="${FAKE_BIN}:${PATH}" \
     SL_CONFIG_FILE="/nonexistent/x.conf" \
     bash "${SCRIPT_DIR}/scripts/copilot-session-review.sh" </dev/null >/dev/null 2>&1 || true
 
-for _ in $(seq 1 50); do
-    [[ -f "${SKILLS_DIR}/e2e-copilot-skill/SKILL.md" ]] && break
+# Fix round E: this poll budget used to be 50*0.2s = 10s. copilot-session-review.sh
+# runs fully detached (nohup + disown), so the parent returns almost
+# immediately and the actual work (spawning the fake copilot, then
+# persist-proposal.py) happens asynchronously. Process-spawn overhead on
+# windows-latest GitHub Actions runners is well documented as substantially
+# higher than Linux/macOS (multiple bash.exe/python.exe launches through
+# this one pipeline); 10s is plausible to be too tight there even though
+# nothing is actually broken. This is a hypothesis, not confirmed without a
+# live Windows run -- widened to 30s and made loud on timeout (a full
+# directory listing) so a genuine hang is still visible rather than just
+# "the file wasn't there", which looked identical to the timing failure
+# from a bare CI log.
+_sl_e2e_seeded=0
+for _ in $(seq 1 150); do
+    if [[ -f "${SKILLS_DIR}/e2e-copilot-skill/SKILL.md" ]]; then
+        _sl_e2e_seeded=1
+        break
+    fi
     sleep 0.2
 done
+if [[ "$_sl_e2e_seeded" -eq 0 ]]; then
+    echo "--- timed out waiting for ${SKILLS_DIR}/e2e-copilot-skill/SKILL.md ---"
+    find "${TMP_HOME}/store" 2>&1 || echo "(store not even created)"
+fi
 
 check "pipeline wrote the skill as a directory" "yes" \
     "$([[ -f "${SKILLS_DIR}/e2e-copilot-skill/SKILL.md" ]] && echo yes || echo no)"
@@ -134,10 +154,19 @@ env -i HOME="$TMP_HOME2" PATH="${FAKE_BIN}:${PATH}" \
     SL_CONFIG_FILE="/nonexistent/x.conf" \
     bash "${SCRIPT_DIR}/scripts/copilot-session-review.sh" </dev/null >/dev/null 2>&1 || true
 
-for _ in $(seq 1 50); do
-    [[ -f "${TMP_HOME2}/store/logs/persist-failures.log" ]] && break
+# See the widened-timeout rationale above.
+_sl_e2e_logged=0
+for _ in $(seq 1 150); do
+    if [[ -f "${TMP_HOME2}/store/logs/persist-failures.log" ]]; then
+        _sl_e2e_logged=1
+        break
+    fi
     sleep 0.2
 done
+if [[ "$_sl_e2e_logged" -eq 0 ]]; then
+    echo "--- timed out waiting for ${TMP_HOME2}/store/logs/persist-failures.log ---"
+    find "${TMP_HOME2}/store" 2>&1 || echo "(store not even created)"
+fi
 
 check "dotted skill name: memory NOT persisted despite being valid" "no" \
     "$([[ -f "${TMP_HOME2}/store/memory/MEMORY.md" ]] && echo yes || echo no)"
