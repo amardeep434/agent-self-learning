@@ -511,11 +511,72 @@ def _write_all_path(planned: list[tuple[tuple[Path, ...], Path, str, str]]) -> t
     path-based function is still exactly that vulnerable, because closing it
     needs dir_fd-relative operations throughout, which Windows's `os` module
     does not provide (`os.mkdir(..., dir_fd=...)` etc. raise
-    NotImplementedError there; `os.supports_dir_fd` is empty). Unfixable on
-    this platform with the stdlib alone -- disclosed here, in the module
-    docstring, and via `doctor.sh`'s dir_fd probe, rather than silently
-    weaker. See
-    .superpowers/sdd/2026-07-25-harness-neutral-persistence/fix-p3-toctou-report.md.
+    NotImplementedError there; `os.supports_dir_fd` is empty).
+
+    "UNFIXABLE ON THIS PLATFORM" WAS WRONG -- CORRECTED 2026-07-26
+    -------------------------------------------------------------
+    This docstring used to end "Unfixable on this platform with the stdlib
+    alone". Researched properly, that is false, and the threat is realer
+    than the old wording implied. Recording the finding here so the next
+    person does not re-derive it:
+
+      * The premises hold. os.O_NOFOLLOW really is absent on Windows --
+        CPython documents it under "extensions ... not present if they are
+        not defined by the C library", Availability: Linux/macOS/Unix -- and
+        this repo's own CI probe on windows-latest prints
+        "O_NOFOLLOW: UNAVAILABLE" and "dir_fd (functional): UNAVAILABLE".
+
+      * The threat model DOES apply on Windows, more than the "symlinks need
+        elevation" folklore suggests. The same CI probe prints
+        "symlink creation: AVAILABLE" on windows-latest. And directory
+        JUNCTIONS -- reparse points that redirect just like a symlink -- have
+        never needed elevation at all, which is precisely why
+        _reject_if_symlink() above checks st_reparse_tag.
+
+      * A stdlib-only fix nevertheless exists, and it is not the obvious one.
+        Emulating dir_fd would mean NtCreateFile with an OBJECT_ATTRIBUTES
+        RootDirectory handle -- an ntdll native API, not documented Win32,
+        with UNICODE_STRING marshalling and NTSTATUS decoding. That is the
+        expensive path and it is NOT what is needed. Win32 offers a cheaper
+        primitive that closes the same window: hold an open HANDLE to the
+        directory across the whole check-stage-rename sequence, opened with
+        ctypes + CreateFileW using
+            FILE_FLAG_BACKUP_SEMANTICS        -- "You must set this flag to
+                                                 obtain a handle to a
+                                                 directory" (MSDN)
+            FILE_FLAG_OPEN_REPARSE_POINT      -- "Normal reparse point
+                                                 processing will not occur"
+                                                 (MSDN), so the handle is the
+                                                 directory itself, never
+                                                 whatever a junction points at
+            dwShareMode = FILE_SHARE_READ     -- omitting FILE_SHARE_DELETE
+                                                 and FILE_SHARE_WRITE
+        MSDN on dwShareMode: without FILE_SHARE_DELETE, "no process can open
+        the file or device if it requests delete access", and "delete access
+        allows both delete and RENAME operations". An attacker cannot swap a
+        directory for a junction without first deleting or renaming it, and
+        cannot convert it in place without opening it for write. So while the
+        handle is held, the swap this function is vulnerable to is blocked by
+        the kernel -- not detected after the fact, prevented. Verifying the
+        handle refers to the object that was checked is then
+        GetFileInformationByHandleEx / FILE_ID_INFO (VolumeSerialNumber +
+        128-bit FileId, documented as uniquely identifying a file on one
+        machine).
+
+    NOT IMPLEMENTED HERE, DELIBERATELY, AND THE REASON IS NOT TECHNICAL.
+    It would have to be probe-gated and fail-closed like DIR_FD_SUPPORTED, so
+    a wrong implementation degrades to exactly today's behaviour rather than
+    breaking POSIX -- the design is safe. But it is syscall-level code on the
+    write path that guards ~120 codified attacks, and it cannot be executed
+    on a POSIX development host; only Windows CI can exercise it. This branch
+    has been damaged repeatedly by confident claims nobody re-derived, and
+    landing unrunnable ctypes here would be another. It needs a round that
+    can watch a Windows CI run, not a round that can only reason about one.
+
+    Until then the window is disclosed here, in the module docstring, and via
+    `doctor.sh`'s dir_fd probe, rather than silently weaker. See
+    .superpowers/sdd/2026-07-25-harness-neutral-persistence/fix-p3-toctou-report.md
+    and residuals-research-report.md (Residual 1) for the full citations.
 
     Each entry's `dirs` chain (see `_plan`) is walked and mkdir'd/checked one
     level at a time: every directory is created (a no-op if it already
