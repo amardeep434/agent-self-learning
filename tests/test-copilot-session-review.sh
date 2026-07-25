@@ -61,5 +61,37 @@ unset SL_COACH_EXPORT_ENABLED SL_COACH_EXPORT_PATH
 sleep 0.3
 check "untrusted-data framing in prompt" "yes" "$(grep -q 'untrusted telemetry data' "$FAKE_COPILOT_LOG" && echo yes || echo no)"
 
+# 7) Copilot reviewer output is persisted, and no write tool is requested.
+TMP_HOME="$(mktemp -d)"
+FAKE_BIN="$(mktemp -d)"
+cat > "${FAKE_BIN}/copilot" <<'FAKE'
+#!/usr/bin/env bash
+for arg in "$@"; do
+    if [[ "$arg" == "write" ]]; then
+        echo "FAIL_MARKER: write tool was requested" >&2
+        exit 3
+    fi
+done
+printf '{"version": 1, "memory": [{"file": "MEMORY.md", "mode": "replace", "content": "copilot-persisted"}]}\n'
+FAKE
+chmod +x "${FAKE_BIN}/copilot"
+
+env -i HOME="$TMP_HOME" PATH="${FAKE_BIN}:${PATH}" \
+    AGENT_LEARNING_HOME="${TMP_HOME}/store" \
+    SL_CONFIG_FILE="/nonexistent/x.conf" \
+    bash "${SCRIPT_DIR}/scripts/copilot-session-review.sh" </dev/null >/dev/null 2>&1 || true
+
+for _ in $(seq 1 50); do
+    [[ -f "${TMP_HOME}/store/memory/MEMORY.md" ]] && break
+    sleep 0.2
+done
+
+if [[ -f "${TMP_HOME}/store/memory/MEMORY.md" ]]; then
+    check "copilot proposal persisted" "copilot-persisted" "$(cat "${TMP_HOME}/store/memory/MEMORY.md")"
+else
+    echo "FAIL: Copilot path did not persist"; FAILURES=$((FAILURES+1))
+fi
+rm -rf "$TMP_HOME" "$FAKE_BIN"
+
 if [[ "$FAILURES" -gt 0 ]]; then exit 1; fi
 echo "All copilot-session-review tests passed."

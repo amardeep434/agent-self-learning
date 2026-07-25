@@ -8,7 +8,8 @@
 
 set -euo pipefail
 
-LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/lib" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB_DIR="${SCRIPT_DIR}/lib"
 
 # Recursion guard: the spawned reviewer's own sessionEnd must not re-trigger.
 if [[ -n "${SL_REVIEW_ACTIVE:-}" ]]; then
@@ -38,8 +39,23 @@ ${SL_SKILLS_DIR}/ for existing skills.
 - Never save secrets, tokens, API keys, passwords, or personal data.
 - Skill names must match ^[a-z0-9][a-z0-9._-]*\$ (max 64 chars); descriptions
   max 60 chars, one sentence, ending with a period.
-- Only read and write files under ${SL_MEMORY_DIR} and ${SL_SKILLS_DIR}.
+- Only read files under ${SL_MEMORY_DIR} and ${SL_SKILLS_DIR}.
 - No network requests. No package installs.
+
+OUTPUT CONTRACT — follow exactly:
+Do NOT write, create, or edit any file. You have no permission to do so and
+any attempt will be discarded. Emit exactly one JSON object as your entire
+final message, in a fenced json block:
+
+\`\`\`json
+{"version": 1,
+ "memory": [{"file": "MEMORY.md", "mode": "replace", "content": "<full new contents>"}],
+ "skills": [{"name": "kebab-case-name", "content": "<full skill markdown>"}]}
+\`\`\`
+
+Rules: "file" must be MEMORY.md or USER.md. "mode" is "replace" or "append".
+"name" must match [A-Za-z0-9][A-Za-z0-9_-]{0,63}. Omit "memory" or "skills"
+entirely when there is nothing to record. Emit nothing after the block.
 RPEOF
 )"
 
@@ -58,26 +74,43 @@ if [[ -f "${SL_COACH_SIGNALS_FILE}" ]]; then
     fi
 fi
 
-REVIEW_LOG="${LOG_DIR}/$(date +%Y%m%d-%H%M%S)-copilot-session-review.log"
-
-MODEL_ARGS=()
+# No --allow-tool write: the reviewer proposes, this script persists. Copilot
+# CLI's path allow-list refused writes to the store, which made this loop a
+# silent no-op; removing the write tool removes the dependency entirely.
+COPILOT_ARGS=(-s --allow-tool read)
 if [[ -n "${SL_COPILOT_REVIEW_MODEL}" ]]; then
     if [[ "${SL_COPILOT_REVIEW_MODEL}" =~ ^[A-Za-z0-9._-]+$ ]]; then
-        MODEL_ARGS=(--model "${SL_COPILOT_REVIEW_MODEL}")
+        COPILOT_ARGS+=(--model "${SL_COPILOT_REVIEW_MODEL}")
     else
         echo "copilot-session-review: ignoring invalid SL_COPILOT_REVIEW_MODEL" >&2
     fi
 fi
 
+# Entire pipeline detached, for the same reason as the Claude Code path: a
+# review outlives the sessionEnd hook's timeout. Failures land in
+# persist-failures.log, which doctor surfaces -- that log replaces the exit
+# code as the visibility mechanism, and without it this is a silent no-op
+# again.
+#
+# Arguments are passed positionally into `bash -c`, never interpolated into
+# the script body: $REVIEW_PROMPT is model-generated text, and interpolating
+# it would be a shell-injection hole. COPILOT_ARGS is expanded last (after
+# "$@" shift) since it is the only variable-length piece.
 if command -v copilot &>/dev/null; then
-    # Flags precede -p "$REVIEW_PROMPT" so they land on the same physical
-    # output line even when the prompt itself contains embedded newlines.
-    SL_REVIEW_ACTIVE=1 nohup copilot -s \
-        --allow-tool write --allow-tool read \
-        "${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"}" \
-        -p "$REVIEW_PROMPT" \
-        > "$REVIEW_LOG" 2>&1 &
-    disown
+    mkdir -p "${SL_LOG_DIR}"
+    SL_REVIEW_ACTIVE=1 nohup bash -c '
+        set -o pipefail
+        prompt="$1"; logdir="$2"; writer="$3"; shift 3
+        copilot "$@" -p "$prompt" 2>>"$logdir/copilot-review-stderr.log" \
+            | python3 "$writer" >>"$logdir/persist.log" 2>&1
+        status=$?
+        if [[ $status -ne 0 ]]; then
+            printf "%s copilot-session-review: pipeline failed (status %s)\n" \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$status" >>"$logdir/persist-failures.log"
+        fi
+    ' _ "$REVIEW_PROMPT" "$SL_LOG_DIR" "${SCRIPT_DIR}/persist-proposal.py" \
+        "${COPILOT_ARGS[@]}" >/dev/null 2>&1 &
+    disown 2>/dev/null || true
 fi
 
 exit 0
