@@ -73,6 +73,35 @@ sl_wait_for_review_complete() {
     return 1
 }
 
+# sl_expect_no_review_spawned <log_dir> [max_iterations]
+#
+# The mirror image of sl_wait_for_review_complete, for the cases that assert
+# the pipeline was NOT launched (the recursion guard). Those cannot wait for
+# a marker that is never supposed to arrive, but they must not simply assert
+# "the log is still empty" a fixed 0.3s after the hook returned either: on a
+# slow runner that passes even if the guard is broken and the spawn is merely
+# late, i.e. it can only ever false-PASS. Watching for the marker for a
+# bounded window and requiring that it never appears turns "we didn't see it
+# yet" into "we looked for it for N*0.2s and it never came".
+#
+# Returns 0 when no marker appeared within the budget (the expected outcome),
+# 1 if one did.
+sl_expect_no_review_spawned() {
+    local log_dir="$1"
+    local max_iterations="${2:-10}"  # 10 * 0.2s = 2s
+    local marker
+    marker="$(sl_review_marker_path "$log_dir")"
+    local _i
+    for _i in $(seq 1 "$max_iterations"); do
+        if [[ -f "$marker" ]]; then
+            echo "--- a review pipeline DID run: ${marker} appeared ---"
+            return 1
+        fi
+        sleep 0.2
+    done
+    return 0
+}
+
 # sl_rm_rf_retry <path> [max_tries]
 #
 # Defense in depth alongside sl_wait_for_review_complete, not a replacement

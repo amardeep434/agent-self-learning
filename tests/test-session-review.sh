@@ -32,16 +32,38 @@ export PATH="$TMP/bin:$PATH" FAKE_CLAUDE_LOG="$TMP/claude-calls.log"
 # Counter above the min-turns gate
 echo '{"session_id":"s1","total_turns_this_session":9,"memory_turns":0,"skill_iterations":0}' > "$TMP/state/turn_counter.json"
 
+
+# fix-p7 (audit follow-up): every case below that drives a review for real
+# used to wait a bare fixed sleep before asserting on what the DETACHED
+# pipeline produced. An earlier round retrofitted the marker wait
+# (tests/lib/wait-for-review.sh) onto the cases that then tore the tree
+# down, and judged these "wide margin". Re-judged here and that call was
+# wrong: 0.3s does not cover `nohup bash -c` plus a bash shim on a loaded
+# windows-latest runner -- this repo's own fix round E documents Windows
+# process-spawn overhead as a real, measured cost, and a flaky
+# zero-tolerance assertion in tests/test-config.sh already turned this
+# branch's CI red once. The positive assertions could false-FAIL; worse,
+# the negative one ("spawns nothing") could false-PASS vacuously against a
+# log that was empty only because nothing had started yet. All of them are
+# now gated on the pipeline's own completion marker, which is unconditional
+# and the last statement it runs, so the retrofit is mechanical after all.
+
 # 1) Review spawns with recursion guard set
+sl_clear_review_marker "$SL_LOG_DIR"
 echo '{"session_id":"s1","hook_event_name":"Stop"}' | bash "${SCRIPT_DIR}/scripts/session-review.sh"
-sleep 0.3
+sl_wait_for_review_complete "$SL_LOG_DIR" || true
 check "claude was invoked" "yes" "$([[ -s "$FAKE_CLAUDE_LOG" ]] && echo yes || echo no)"
 check "guard env set for reviewer" "1" "$(grep -m1 '^GUARD:' "$FAKE_CLAUDE_LOG" | cut -d: -f2)"
 
 # 2) Recursion guard on entry: guarded call spawns nothing
 : > "$FAKE_CLAUDE_LOG"
+sl_clear_review_marker "$SL_LOG_DIR"
 echo '{"session_id":"s1","hook_event_name":"Stop"}' | SL_REVIEW_ACTIVE=1 bash "${SCRIPT_DIR}/scripts/session-review.sh"
-sleep 0.3
+# Negative assertion: watch for the marker for a bounded window and require
+# that it never arrives, rather than sampling an empty log once (which would
+# also "pass" against a guard that is broken but merely slow).
+check "no review pipeline was spawned at all" "yes" \
+    "$(sl_expect_no_review_spawned "$SL_LOG_DIR" && echo yes || echo no)"
 check "guarded entry spawns nothing" "no" "$([[ -s "$FAKE_CLAUDE_LOG" ]] && echo yes || echo no)"
 
 # 3) Coach signals appear in the prompt when signals exist.
@@ -54,9 +76,10 @@ echo '{"generated_at":"2099-01-01T00:00:00Z","signals":[{"id":"mega-sessions","s
 export SL_COACH_EXPORT_ENABLED=true SL_COACH_EXPORT_PATH="$TMP/export.json"
 echo '{"antiPatterns":{"totalOccurrences":1,"topPatterns":[{"id":"mega-sessions","name":"Mega Sessions","severity":"high","group":"session-hygiene","occurrences":1,"description":"d","suggestion":"Break large tasks into focused conversations."}]}}' > "$SL_COACH_EXPORT_PATH"
 : > "$FAKE_CLAUDE_LOG"
+sl_clear_review_marker "$SL_LOG_DIR"
 echo '{"session_id":"s1","hook_event_name":"Stop"}' | bash "${SCRIPT_DIR}/scripts/session-review.sh"
 unset SL_COACH_EXPORT_ENABLED SL_COACH_EXPORT_PATH
-sleep 0.3
+sl_wait_for_review_complete "$SL_LOG_DIR" || true
 check "coach signal id reaches prompt" "yes" "$(grep -q 'mega-sessions' "$FAKE_CLAUDE_LOG" && echo yes || echo no)"
 
 # 4) settings-hooks.json uses the valid nested schema
@@ -149,9 +172,10 @@ cat > "$TRANSCRIPT_FILE" <<'EOF'
 {"parentUuid":"u2","isSidechain":false,"type":"user","uuid":"u3","timestamp":"2026-07-25T12:00:03.000Z","sessionId":"s6","message":{"role":"user","content":"Continue from where you left off."},"isMeta":true}
 EOF
 : > "$FAKE_CLAUDE_LOG"
+sl_clear_review_marker "$SL_LOG_DIR"
 echo "{\"session_id\":\"s6\",\"hook_event_name\":\"Stop\",\"transcript_path\":\"${TRANSCRIPT_FILE}\"}" \
     | bash "${SCRIPT_DIR}/scripts/session-review.sh"
-sleep 0.3
+sl_wait_for_review_complete "$SL_LOG_DIR" || true
 check "transcript user turn reached the prompt" "yes" \
     "$(grep -q 'UNIQUE_MARKER_USER_TURN_CASE6' "$FAKE_CLAUDE_LOG" && echo yes || echo no)"
 check "transcript assistant text reached the prompt" "yes" \
@@ -169,8 +193,9 @@ echo '{"session_id":"s1","total_turns_this_session":9,"memory_turns":0,"skill_it
     > "$TMP/state/turn_counter.json"
 rm -f "${TMP}/logs/persist-failures.log"
 : > "$FAKE_CLAUDE_LOG"
+sl_clear_review_marker "$SL_LOG_DIR"
 echo '{"session_id":"s1","hook_event_name":"Stop"}' | bash "${SCRIPT_DIR}/scripts/session-review.sh"
-sleep 0.3
+sl_wait_for_review_complete "$SL_LOG_DIR" || true
 check "missing transcript_path logged to persist-failures.log" "yes" \
     "$([[ -f "${TMP}/logs/persist-failures.log" ]] && grep -q 'session-review: transcript unavailable' "${TMP}/logs/persist-failures.log" && echo yes || echo no)"
 

@@ -27,9 +27,23 @@ EOF
 chmod +x "$TMP/bin/copilot"
 export PATH="$TMP/bin:$PATH" FAKE_COPILOT_LOG="$TMP/copilot-calls.log"
 
+
+# fix-p7 (audit follow-up): the cases below drive the DETACHED review
+# pipeline for real and used to assert on its side effects after a bare
+# fixed sleep. Re-judged (see the matching note in
+# tests/test-session-review.sh): 0.3s is not a wide margin for `nohup bash
+# -c` plus a bash shim on a loaded windows-latest runner, and the
+# negative-shaped assertions here ("no --model in argv", "hostile model
+# string dropped", "spawns nothing") are worse than flaky -- they pass
+# vacuously against a log that is empty only because the spawn has not
+# happened yet, which is precisely the "green while testing nothing"
+# failure this project keeps finding. Each is now gated on the pipeline's
+# own unconditional completion marker.
+
 # 1) Spawns copilot with guard, -p, -s, and tool allowances
+sl_clear_review_marker "$SL_LOG_DIR"
 bash "${SCRIPT_DIR}/scripts/copilot-session-review.sh" </dev/null
-sleep 0.3
+sl_wait_for_review_complete "$SL_LOG_DIR" || true
 check "copilot invoked" "yes" "$([[ -s "$FAKE_COPILOT_LOG" ]] && echo yes || echo no)"
 check "guard env set" "1" "$(grep -m1 '^GUARD:' "$FAKE_COPILOT_LOG" | cut -d: -f2)"
 check "headless flags present" "yes" "$(grep -m1 '^ARGS:' "$FAKE_COPILOT_LOG" | grep -q -- '-p ' && echo yes || echo no)"
@@ -37,14 +51,20 @@ check "no model flag when unset" "no" "$(grep -m1 '^ARGS:' "$FAKE_COPILOT_LOG" |
 
 # 2) Model flag appears when configured
 : > "$FAKE_COPILOT_LOG"
+sl_clear_review_marker "$SL_LOG_DIR"
 SL_COPILOT_REVIEW_MODEL="cheap-model-x" bash "${SCRIPT_DIR}/scripts/copilot-session-review.sh" </dev/null
-sleep 0.3
+sl_wait_for_review_complete "$SL_LOG_DIR" || true
 check "model flag when set" "yes" "$(grep -m1 '^ARGS:' "$FAKE_COPILOT_LOG" | grep -q -- '--model cheap-model-x' && echo yes || echo no)"
 
 # 3) Recursion guard on entry
 : > "$FAKE_COPILOT_LOG"
+sl_clear_review_marker "$SL_LOG_DIR"
 SL_REVIEW_ACTIVE=1 bash "${SCRIPT_DIR}/scripts/copilot-session-review.sh" </dev/null
-sleep 0.3
+# Bounded watch for a marker that must never arrive -- see
+# sl_expect_no_review_spawned's header for why "the log is still empty"
+# alone is not evidence the guard worked.
+check "no review pipeline was spawned at all" "yes" \
+    "$(sl_expect_no_review_spawned "$SL_LOG_DIR" && echo yes || echo no)"
 check "guarded entry spawns nothing" "no" "$([[ -s "$FAKE_COPILOT_LOG" ]] && echo yes || echo no)"
 
 # 4) Hook template shape
@@ -53,8 +73,15 @@ check "sessionEnd command hook" "command" "$(jq -r '.hooks.sessionEnd[0].type' "
 
 # 5) Hostile model string is rejected (no --model in argv)
 : > "$FAKE_COPILOT_LOG"
+sl_clear_review_marker "$SL_LOG_DIR"
 SL_COPILOT_REVIEW_MODEL='x; rm -rf /' bash "${SCRIPT_DIR}/scripts/copilot-session-review.sh" </dev/null
-sleep 0.3
+# The wait matters MORE here than for a positive check: this assertion is
+# "no --model reached argv", which an empty (not-yet-written) log satisfies
+# for the wrong reason. Waiting for the pipeline to finish means the log
+# genuinely contains the argv that was used.
+sl_wait_for_review_complete "$SL_LOG_DIR" || true
+check "reviewer actually ran (so the argv assertion below is not vacuous)" "yes" \
+    "$([[ -s "$FAKE_COPILOT_LOG" ]] && echo yes || echo no)"
 check "hostile model string dropped" "no" "$(grep -m1 '^ARGS:' "$FAKE_COPILOT_LOG" | grep -q -- '--model' && echo yes || echo no)"
 
 # 6) Untrusted-data framing present in prompt when signals exist.
@@ -68,9 +95,10 @@ echo '{"generated_at":"2099-01-01T00:00:00Z","signals":[{"id":"x","severity":"lo
 export SL_COACH_EXPORT_ENABLED=true SL_COACH_EXPORT_PATH="$TMP/export6.json"
 echo '{"antiPatterns":{"totalOccurrences":1,"topPatterns":[{"id":"x","name":"X","severity":"low","group":"g","occurrences":1,"description":"d","suggestion":"s"}]}}' > "$SL_COACH_EXPORT_PATH"
 : > "$FAKE_COPILOT_LOG"
+sl_clear_review_marker "$SL_LOG_DIR"
 SL_COACH_SIGNALS_FILE="$TMP/state/coach-signals.json" bash "${SCRIPT_DIR}/scripts/copilot-session-review.sh" </dev/null
 unset SL_COACH_EXPORT_ENABLED SL_COACH_EXPORT_PATH
-sleep 0.3
+sl_wait_for_review_complete "$SL_LOG_DIR" || true
 check "untrusted-data framing in prompt" "yes" "$(grep -q 'untrusted telemetry data' "$FAKE_COPILOT_LOG" && echo yes || echo no)"
 
 # 7) Copilot reviewer output is persisted, and no write tool is requested.
