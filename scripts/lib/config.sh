@@ -13,6 +13,7 @@ for _v in SL_HOME SL_STATE_DIR SL_SKILLS_DIR SL_MEMORY_DIR SL_LOG_DIR SL_SEARCH_
           SL_COACH_RULES_ENABLED SL_COACH_EXPORT_ENABLED SL_COACH_EXPORT_PATH \
           SL_COACH_RULES_DIR SL_MEMORY_REVIEW_INTERVAL SL_SKILL_REVIEW_INTERVAL \
           SL_REVIEW_MIN_TURNS SL_REVIEW_MAX_TURNS SL_COPILOT_REVIEW_MODEL \
+          SL_COPILOT_MAX_AI_CREDITS \
           SL_SKILLOPT_ENABLED SL_SKILLOPT_REPO SL_SKILLOPT_RUN_CONFIRMED \
           SL_REVIEW_ENABLED; do
     if [[ -n "${!_v+x}" ]]; then
@@ -121,6 +122,28 @@ SL_SKILL_REVIEW_INTERVAL="${SL_SKILL_REVIEW_INTERVAL:-10}"
 SL_REVIEW_MIN_TURNS="${SL_REVIEW_MIN_TURNS:-5}"
 SL_REVIEW_MAX_TURNS="${SL_REVIEW_MAX_TURNS:-16}"
 SL_COPILOT_REVIEW_MODEL="${SL_COPILOT_REVIEW_MODEL:-}"
+
+# Cost ceiling for the Copilot reviewer. EMPTY BY DEFAULT -- opt-in, not
+# opt-out. Reasoning, since the asymmetry with the Claude path's
+# SL_REVIEW_MAX_TURNS is deliberate rather than an oversight:
+#
+#  * The knob is real. `copilot help limits` on 1.0.75 documents
+#    `--max-ai-credits <credits>`, "Minimum: 30 AI credits", and a
+#    prior round's claim that the flag does not exist was wrong.
+#  * But `copilot` errors on unknown options (verified: an unknown flag
+#    produces "error: unknown option"). Passing --max-ai-credits
+#    unconditionally would therefore hard-break the entire review on any
+#    Copilot CLI older than the release that added it -- and the review
+#    runs in a DETACHED pipeline, so the only symptom would be lines in
+#    persist-failures.log while learning quietly stopped. That is a worse
+#    failure than the one a default ceiling would prevent.
+#  * The cap is a soft cap on GitHub's side (usage is known only after a
+#    response returns), so it bounds runaway loops, not individual calls.
+#
+# Set it to bound a background loop on a machine whose CLI supports it;
+# 30 is the minimum the CLI accepts and anything lower is rejected by
+# `copilot` itself, so this validates the value before it reaches argv.
+SL_COPILOT_MAX_AI_CREDITS="${SL_COPILOT_MAX_AI_CREDITS:-}"
 SL_SKILLOPT_ENABLED="${SL_SKILLOPT_ENABLED:-false}"
 SL_SKILLOPT_REPO="${SL_SKILLOPT_REPO:-}"
 SL_SKILLOPT_RUN_CONFIRMED="${SL_SKILLOPT_RUN_CONFIRMED:-false}"
@@ -140,6 +163,7 @@ export SL_HOME SL_STATE_DIR SL_SKILLS_DIR SL_MEMORY_DIR SL_LOG_DIR SL_SEARCH_DB 
        SL_COACH_RULES_DIR SL_COACH_SIGNALS_FILE \
        SL_MEMORY_REVIEW_INTERVAL SL_SKILL_REVIEW_INTERVAL \
        SL_REVIEW_MIN_TURNS SL_REVIEW_MAX_TURNS SL_COPILOT_REVIEW_MODEL \
+       SL_COPILOT_MAX_AI_CREDITS \
        SL_SKILLOPT_ENABLED SL_SKILLOPT_REPO SL_SKILLOPT_RUN_CONFIRMED \
        SL_REVIEW_ENABLED
 

@@ -84,6 +84,51 @@ check "reviewer actually ran (so the argv assertion below is not vacuous)" "yes"
     "$([[ -s "$FAKE_COPILOT_LOG" ]] && echo yes || echo no)"
 check "hostile model string dropped" "no" "$(grep -m1 '^ARGS:' "$FAKE_COPILOT_LOG" | grep -q -- '--model' && echo yes || echo no)"
 
+# 5b) SL_COPILOT_MAX_AI_CREDITS -- the Copilot reviewer's cost ceiling.
+# Default-off by design (see the note in scripts/lib/config.sh), so all
+# three states are pinned: absent when unset, present when set to a legal
+# value, dropped when set to anything the CLI would reject. Same
+# marker-gated, argv-recording technique as case 5; the same
+# "not vacuous" guard applies to the two negative-shaped assertions.
+: > "$FAKE_COPILOT_LOG"
+sl_clear_review_marker "$SL_LOG_DIR"
+bash "${SCRIPT_DIR}/scripts/copilot-session-review.sh" </dev/null
+sl_wait_for_review_complete "$SL_LOG_DIR" || true
+check "reviewer ran (credits-unset case is not vacuous)" "yes" \
+    "$([[ -s "$FAKE_COPILOT_LOG" ]] && echo yes || echo no)"
+check "no credit ceiling in argv when SL_COPILOT_MAX_AI_CREDITS is unset" "no" \
+    "$(grep -m1 '^ARGS:' "$FAKE_COPILOT_LOG" | grep -q -- '--max-ai-credits' && echo yes || echo no)"
+
+: > "$FAKE_COPILOT_LOG"
+sl_clear_review_marker "$SL_LOG_DIR"
+SL_COPILOT_MAX_AI_CREDITS=30 bash "${SCRIPT_DIR}/scripts/copilot-session-review.sh" </dev/null
+sl_wait_for_review_complete "$SL_LOG_DIR" || true
+check "credit ceiling reaches argv when set" "yes" \
+    "$(grep -m1 '^ARGS:' "$FAKE_COPILOT_LOG" | grep -q -- '--max-ai-credits 30' && echo yes || echo no)"
+
+# Below the CLI's documented minimum of 30, and a non-numeric value: both
+# must be refused HERE, with a reason on stderr, rather than handed to a
+# binary that would exit non-zero inside a detached pipeline.
+: > "$FAKE_COPILOT_LOG"
+sl_clear_review_marker "$SL_LOG_DIR"
+CREDIT_ERR="$(SL_COPILOT_MAX_AI_CREDITS='5' bash "${SCRIPT_DIR}/scripts/copilot-session-review.sh" </dev/null 2>&1 >/dev/null)"
+sl_wait_for_review_complete "$SL_LOG_DIR" || true
+check "reviewer ran (below-minimum case is not vacuous)" "yes" \
+    "$([[ -s "$FAKE_COPILOT_LOG" ]] && echo yes || echo no)"
+check "below-minimum credit value dropped from argv" "no" \
+    "$(grep -m1 '^ARGS:' "$FAKE_COPILOT_LOG" | grep -q -- '--max-ai-credits' && echo yes || echo no)"
+check "below-minimum credit value reported on stderr" "yes" \
+    "$(printf '%s' "$CREDIT_ERR" | grep -q 'SL_COPILOT_MAX_AI_CREDITS' && echo yes || echo no)"
+
+: > "$FAKE_COPILOT_LOG"
+sl_clear_review_marker "$SL_LOG_DIR"
+SL_COPILOT_MAX_AI_CREDITS='30; rm -rf /' bash "${SCRIPT_DIR}/scripts/copilot-session-review.sh" </dev/null 2>/dev/null
+sl_wait_for_review_complete "$SL_LOG_DIR" || true
+check "reviewer ran (hostile-credits case is not vacuous)" "yes" \
+    "$([[ -s "$FAKE_COPILOT_LOG" ]] && echo yes || echo no)"
+check "hostile credit string dropped" "no" \
+    "$(grep -m1 '^ARGS:' "$FAKE_COPILOT_LOG" | grep -q -- '--max-ai-credits' && echo yes || echo no)"
+
 # 6) Untrusted-data framing present in prompt when signals exist.
 # The signal is planted as a Route B export fixture with SL_COACH_EXPORT_ENABLED=true
 # (same pattern as the session-review test): coach-signals.py, which this script

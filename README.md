@@ -352,11 +352,23 @@ by default. Environment variables with the same names override the file.
 | `SL_MEMORY_REVIEW_INTERVAL` | `10` | Turns between memory review signals |
 | `SL_SKILL_REVIEW_INTERVAL` | `10` | Tool calls between skill review signals |
 | `SL_REVIEW_MIN_TURNS` | `5` | Minimum session turns before a review runs |
-| `SL_REVIEW_MAX_TURNS` | `16` | Turn cap for the spawned reviewer |
+| `SL_REVIEW_MAX_TURNS` | `16` | Turn cap for the spawned Claude Code reviewer (`--max-turns`) |
 | `SL_COPILOT_REVIEW_MODEL` | (CLI default) | Model for Copilot reviews; use the cheapest available. Must match `^[A-Za-z0-9._-]+$` |
+| `SL_COPILOT_MAX_AI_CREDITS` | (empty — off) | Optional cost ceiling for Copilot reviews (`--max-ai-credits`). Integer, minimum 30; anything else is dropped with a reason on stderr. See note below |
 | `SL_SKILLOPT_ENABLED` | `false` | Route C: SkillOpt skill optimization (opt-in) |
 | `SL_SKILLOPT_REPO` | (empty) | path to a microsoft/SkillOpt checkout |
 | `SL_SKILLOPT_RUN_CONFIRMED` | `false` | safety gate; the expensive `run` verb refuses until set true after a dry-run cost review |
+
+### Bounding reviewer cost
+
+The two harnesses bound the background reviewer differently, and the asymmetry is deliberate.
+
+- **Claude Code** takes a hard turn cap: `--max-turns "$SL_REVIEW_MAX_TURNS"`, on by default at 16. It is also spawned with `--allowedTools Read,Glob,Grep --disallowedTools Write,Edit,NotebookEdit`, so the reviewer can read what it needs to review and cannot write anything — every write is `scripts/persist-proposal.py`'s.
+- **GitHub Copilot CLI** has no turn cap for headless `-p` runs (`--max-autopilot-continues` is interactive-only). It does have `--max-ai-credits`, documented under `copilot help limits`, minimum 30, and it is a *soft* cap: usage is known only after a response returns, so it bounds a runaway loop rather than any single call.
+
+`SL_COPILOT_MAX_AI_CREDITS` is **off by default** rather than defaulted to the minimum. `copilot` errors on unknown options, so passing the flag unconditionally would hard-break the whole review on any CLI older than the release that added it — and the review runs in a detached pipeline, so the only symptom would be lines in `persist-failures.log` while learning quietly stopped. Set it explicitly if your CLI supports it and you want the ceiling.
+
+To confirm the flags against your own installed binaries at any time (no model calls, no tokens): `bash tests/test-review-cli-flags.sh`.
 
 ## License
 

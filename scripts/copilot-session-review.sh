@@ -109,6 +109,30 @@ if [[ -n "${SL_COPILOT_REVIEW_MODEL}" ]]; then
     fi
 fi
 
+# Optional cost ceiling. Same shape as the model knob above -- validated
+# here, never interpolated blind -- because this value also reaches a
+# third-party binary's argv.
+#
+# Off unless explicitly set: see the long note in lib/config.sh for why the
+# default is empty rather than the documented minimum. Short version:
+# `copilot` errors on unknown options, so an unconditional --max-ai-credits
+# would hard-break the whole review on any CLI older than the release that
+# added the flag, and this pipeline is detached, so that break would show up
+# only as persist-failures.log lines while learning silently stopped.
+#
+# The <30 rejection is not us second-guessing the CLI: `copilot
+# --max-ai-credits 5` exits with "Use at least 30 AI credits", which in the
+# detached pipeline would be an unexplained non-zero. Refusing it here with
+# a named reason on stderr is the same "fail where a human can read it"
+# discipline the rest of this script follows.
+if [[ -n "${SL_COPILOT_MAX_AI_CREDITS}" ]]; then
+    if [[ "${SL_COPILOT_MAX_AI_CREDITS}" =~ ^[0-9]+$ ]] && (( SL_COPILOT_MAX_AI_CREDITS >= 30 )); then
+        COPILOT_ARGS+=(--max-ai-credits "${SL_COPILOT_MAX_AI_CREDITS}")
+    else
+        echo "copilot-session-review: ignoring SL_COPILOT_MAX_AI_CREDITS='${SL_COPILOT_MAX_AI_CREDITS}' (must be an integer >= 30, the minimum the CLI accepts)" >&2
+    fi
+fi
+
 # Entire pipeline detached, for the same reason as the Claude Code path: a
 # review outlives the sessionEnd hook's timeout. Failures land in
 # persist-failures.log, which doctor surfaces -- that log replaces the exit

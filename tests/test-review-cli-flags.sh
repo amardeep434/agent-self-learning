@@ -58,6 +58,26 @@ if command -v copilot >/dev/null 2>&1; then
         FAILURES=$((FAILURES+1))
     fi
 
+    # The cost ceiling the turn cap cannot provide. An earlier round
+    # enumerated this CLI's flags and concluded --max-ai-credits did not
+    # exist; re-derived here against 1.0.75, it does -- documented under
+    # `copilot help limits`, with a stated minimum of 30. That minimum is
+    # what scripts/copilot-session-review.sh validates against, so pin BOTH
+    # the flag and the number: if either moves upstream, the knob's
+    # validation is wrong and this must say so rather than silently drift.
+    check "copilot documents '--max-ai-credits' (help topic: limits)" "yes" \
+        "$(timeout 60 copilot help limits 2>&1 | grep -qF -- '--max-ai-credits' && echo yes || echo no)"
+    check "copilot's documented credit minimum is still 30" "yes" \
+        "$(timeout 60 copilot help limits 2>&1 | grep -qiE 'minimum: *30' && echo yes || echo no)"
+    # Control experiment, same shape as the Claude one below: prove the CLI
+    # rejects unknown options, so "accepted" means something.
+    COPILOT_UNKNOWN="$(timeout 60 copilot --sl-definitely-not-a-real-flag -p "" </dev/null 2>&1 || true)"
+    check "copilot control: unknown flags DO error" "yes" \
+        "$(printf '%s' "$COPILOT_UNKNOWN" | grep -qi "unknown option" && echo yes || echo no)"
+    COPILOT_CREDITS_ERR="$(timeout 60 copilot --max-ai-credits 30 -p "" </dev/null 2>&1 || true)"
+    check "copilot accepts --max-ai-credits 30" "yes" \
+        "$(printf '%s' "$COPILOT_CREDITS_ERR" | grep -qi "unknown option" && echo no || echo yes)"
+
     # And the script must not be passing anything the CLI does not accept.
     # Comment-stripped: the script CONTAINS the string "--allow-tool write"
     # in the comment explaining why it must never be passed. Grepping the
