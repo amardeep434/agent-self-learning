@@ -133,7 +133,18 @@ else
     SL_SCRIPTS_DIR=""
 fi
 
-if [[ -f "$SETTINGS_FILE" ]]; then
+# Deferred minor 10: when python3 is unavailable, SL_SCRIPTS_DIR silently
+# resolved to "" here, and sl_check_hook_fresh() (lib/config.sh) treats an
+# empty scripts_dir as "never fresh" -- so every hook was reported as
+# STALE regardless of whether it was actually fine. That is a wrong
+# diagnosis pinned on the hook config, when the real problem is a missing
+# dependency this check never named. Fail loudly and specifically instead:
+# one clear FAIL that says python3 is the blocker, and skip the per-hook
+# freshness checks entirely rather than emit misleading verdicts for them.
+if ! command -v python3 >/dev/null 2>&1; then
+    fail "cannot verify hook freshness -- python3 not found on PATH" \
+        "Install python3 so scripts/lib/paths.py (this project's sole path resolver) can run"
+elif [[ -f "$SETTINGS_FILE" ]]; then
     for pair in "turn-counter.sh:PostToolUse turn-counter" \
                 "session-review.sh:Stop session-review" \
                 "index-session.sh:Stop index-session"; do

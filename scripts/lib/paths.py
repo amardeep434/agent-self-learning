@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path
+from pathlib import Path, PurePath
 
 APP_DIR_NAME = "agent-learning"
 
@@ -51,7 +51,22 @@ def resolve_home(env: dict | None = None, platform: str | None = None) -> Path:
         if local:
             return Path(local) / APP_DIR_NAME
 
-    return Path(env.get("HOME", "")) / ".local" / "share" / APP_DIR_NAME
+    home = env.get("HOME")
+    if not home:
+        # Deferred minor 1 (upgraded to must-fix): falling through to
+        # Path("") here previously normalized to Path(".") -- i.e. CWD --
+        # so a bare shell with HOME unset would silently create the store
+        # inside whatever directory happened to be current. That is the
+        # exact silent-wrong-location class this module exists to prevent,
+        # so refuse to guess instead of ever returning a CWD-relative path.
+        extra = " or LOCALAPPDATA" if platform.startswith("win") else ""
+        raise RuntimeError(
+            "cannot resolve a home directory: $HOME is unset and no "
+            f"override (AGENT_LEARNING_HOME, XDG_DATA_HOME{extra}) is set. "
+            "Refusing to fall back to a path relative to the current "
+            "working directory."
+        )
+    return Path(home) / ".local" / "share" / APP_DIR_NAME
 
 
 def resolve_all(env: dict | None = None, platform: str | None = None) -> dict[str, Path]:
@@ -78,19 +93,53 @@ def legacy_home(env: dict | None = None) -> Path | None:
     return None
 
 
+def _to_cli_string(p: PurePath) -> str:
+    """Render a path for the CLI (i.e. for bash consumers) as forward-slash text.
+
+    The Python API (resolve_home/resolve_all) keeps returning real Path
+    objects for Python callers -- only this CLI boundary stringifies.
+
+    On native Windows, Path(...) is a WindowsPath, so plain str(p) yields
+    backslashes (e.g. 'C:\\Users\\x'). Every bash consumer of this CLI
+    (config.sh, install.sh, uninstall.sh) then treats those backslashes as
+    escape characters, corrupting the path -- this was C1, proven by CI:
+    `paths.py all` on windows-latest produced literal backslashes that broke
+    every downstream `[[ -f ]]`/`mkdir -p`/string comparison.
+
+    .as_posix() turns 'C:\\Users\\x' into 'C:/Users/x'. That is NOT the
+    cygdrive form Git Bash's own tools print ('/c/Users/x'), but MSYS/Git
+    Bash and native Windows tools both accept 'C:/Users/x' directly without
+    a cygpath translation step -- forward slashes are simply not special to
+    Win32 path parsing. .as_posix() alone is therefore sufficient here; a
+    cygpath round-trip is unnecessary complexity this module (which must
+    stay usable from both real Windows Python and any MSYS Python) should
+    not add. This is verified in tests/test-paths.py using a PureWindowsPath
+    so the assertion runs identically on every OS, since a real WindowsPath
+    cannot be constructed on Linux.
+    """
+    return p.as_posix()
+
+
 def _main(argv: list[str]) -> int:
-    if len(argv) >= 2 and argv[0] == "get":
-        resolved = resolve_all()
-        key = argv[1]
-        if key not in resolved:
-            print(f"unknown path key: {key}", file=sys.stderr)
-            return 2
-        print(resolved[key])
-        return 0
-    if argv and argv[0] == "all":
-        for key, value in resolve_all().items():
-            print(f"{key}={value}")
-        return 0
+    try:
+        if len(argv) >= 2 and argv[0] == "get":
+            resolved = resolve_all()
+            key = argv[1]
+            if key not in resolved:
+                print(f"unknown path key: {key}", file=sys.stderr)
+                return 2
+            print(_to_cli_string(resolved[key]))
+            return 0
+        if argv and argv[0] == "all":
+            for key, value in resolve_all().items():
+                print(f"{key}={_to_cli_string(value)}")
+            return 0
+    except RuntimeError as exc:
+        # resolve_home()'s loud failure (e.g. $HOME unset, no override) must
+        # reach the caller as a clear, non-zero-exit error -- never as a
+        # silently empty/CWD-relative path. See resolve_home() above.
+        print(f"paths.py: {exc}", file=sys.stderr)
+        return 3
     print("usage: paths.py get <key> | paths.py all", file=sys.stderr)
     return 2
 

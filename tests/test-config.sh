@@ -66,10 +66,23 @@ check "pre-set SL_CONFIG_FILE overrides paths.py default" "/nonexistent/x.conf" 
 # All six path variables get a working, vendor-neutral literal fallback when
 # python3/paths.py is entirely unavailable (e.g. not on PATH). A minimal PATH
 # is built containing only the external commands config.sh itself needs
-# (dirname) so python3 cannot be found, without relying on any GNU-only tool.
+# (dirname, bash -- `env` re-resolves argv[0] against the PATH it is itself
+# given, so bash must be reachable there too) so python3 cannot be found,
+# without relying on any GNU-only tool.
+#
+# `cp`, not `ln -s`: symlink creation can silently fail or require elevated
+# privileges on Windows (no admin / no Developer Mode), which would abort
+# this script under `set -e` with a confusing, environment-dependent error
+# far from the real assertion. `cp` needs no special privilege on any
+# platform and preserves the source basename (incl. a `.exe` suffix, so
+# Windows' implicit PATHEXT-style resolution still finds it).
+_sl_link_or_copy() {
+    local src="$1" dst="$2"
+    cp "$src" "$dst"
+}
 _sl_no_python_dir=$(mktemp -d)
-ln -s "$(command -v dirname)" "$_sl_no_python_dir/dirname"
-ln -s "$(command -v bash)" "$_sl_no_python_dir/bash"
+_sl_link_or_copy "$(command -v dirname)" "$_sl_no_python_dir/dirname"
+_sl_link_or_copy "$(command -v bash)" "$_sl_no_python_dir/bash"
 OUT=$(env -i HOME="$HOME" PATH="$_sl_no_python_dir" \
     bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; echo \"\$SL_HOME|\$SL_STATE_DIR|\$SL_SKILLS_DIR|\$SL_MEMORY_DIR|\$SL_LOG_DIR|\$SL_SEARCH_DB\"")
 rm -rf "$_sl_no_python_dir"
@@ -151,6 +164,92 @@ else
     echo "FAIL: sl_iso_to_epoch round-trip mismatch: wrote '$WRITTEN', expected an epoch in [$BEFORE_EPOCH, $AFTER_EPOCH], got '$OUT'"
     FAILURES=$((FAILURES+1))
 fi
+
+# --- I7: force BOTH the GNU and BSD `date` strategies to fail (a fake
+# `date` binary that always exits 1, ahead of the real one on PATH) so these
+# assertions exercise the python3 fallback specifically, regardless of which
+# `date` flavor the host machine actually has. This is what makes the fix
+# verifiable on Linux even though the bug it targets is macOS-only: Linux's
+# real GNU `date -d` is lenient enough to mask a python3-fallback
+# regression entirely (it never gets a chance to run), which is exactly how
+# this bug shipped in the first place.
+_sl_fake_date_dir=$(mktemp -d)
+cat > "$_sl_fake_date_dir/date" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod +x "$_sl_fake_date_dir/date"
+
+OUT=$(PATH="${_sl_fake_date_dir}:${PATH}" bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; sl_iso_to_epoch '2024-06-15T12:34:56+00:00'")
+check "I7 python3-fallback: explicit +00:00 offset" "1718454896" "$OUT"
+
+OUT=$(PATH="${_sl_fake_date_dir}:${PATH}" bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; sl_iso_to_epoch '2024-06-15T18:04:56+05:30'")
+check "I7 python3-fallback: non-UTC +05:30 offset" "1718454896" "$OUT"
+
+OUT=$(PATH="${_sl_fake_date_dir}:${PATH}" bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; sl_iso_to_epoch '2024-06-15T12:34:56.500Z'")
+check "I7 python3-fallback: fractional seconds" "1718454896" "$OUT"
+
+OUT=$(PATH="${_sl_fake_date_dir}:${PATH}" bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; sl_iso_to_epoch '2024-06-15T12:34:56Z'")
+check "I7 python3-fallback: Z suffix" "1718454896" "$OUT"
+
+# Deferred minor 7: a NEGATIVE non-UTC offset must not be silently flipped
+# to positive. "-05:30" means local = UTC + 5:30, so 07:04:56-05:30 is the
+# same UTC instant (12:34:56Z / 1718454896) as 18:04:56+05:30 above -- if
+# the sign were dropped or flipped, this would come back equal to the
+# WRONG one of those two, or to some other value entirely, never
+# 1718454896 by coincidence.
+OUT=$(PATH="${_sl_fake_date_dir}:${PATH}" bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; sl_iso_to_epoch '2024-06-15T07:04:56-05:30'")
+check "I7 python3-fallback (deferred minor 7): negative -05:30 offset is not flipped positive" "1718454896" "$OUT"
+
+rm -rf "$_sl_fake_date_dir"
+
+# --- I6: the python3-less fallback must honor the SAME override chain as
+# paths.py (AGENT_LEARNING_HOME > XDG_DATA_HOME/agent-learning > $HOME
+# default), not a bare ${HOME} literal that ignores overrides entirely.
+# Commit 384a319 fixed "never silently go empty" by hardcoding
+# ${HOME}/.local/share/agent-learning -- which itself silently ignores a
+# caller's AGENT_LEARNING_HOME/XDG_DATA_HOME when python3 is unavailable.
+_sl_no_python_dir2=$(mktemp -d)
+_sl_link_or_copy "$(command -v dirname)" "$_sl_no_python_dir2/dirname"
+_sl_link_or_copy "$(command -v bash)" "$_sl_no_python_dir2/bash"
+OUT=$(env -i HOME="$HOME" PATH="$_sl_no_python_dir2" AGENT_LEARNING_HOME="/tmp/al-nopy" \
+    bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; echo \"\$SL_HOME|\$SL_MEMORY_DIR\"")
+check "I6: no python3, AGENT_LEARNING_HOME still drives SL_HOME" "/tmp/al-nopy|/tmp/al-nopy/memory" "$OUT"
+
+OUT=$(env -i HOME="$HOME" PATH="$_sl_no_python_dir2" XDG_DATA_HOME="/tmp/xdg-nopy" \
+    bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; echo \"\$SL_HOME\"")
+check "I6: no python3, XDG_DATA_HOME still drives SL_HOME" "/tmp/xdg-nopy/agent-learning" "$OUT"
+rm -rf "$_sl_no_python_dir2"
+
+# --- Deferred minor 3: env must beat file for the five path variables that
+# were missing from _sl_env_snapshot (SL_STATE_DIR, SL_SKILLS_DIR,
+# SL_MEMORY_DIR, SL_LOG_DIR, SL_SEARCH_DB) -- previously a config file could
+# silently override a caller's pre-set environment variable for these.
+_sl_env_beats_file_conf=$(mktemp)
+cat > "$_sl_env_beats_file_conf" <<'EOF'
+SL_STATE_DIR=/from-file/state
+SL_SKILLS_DIR=/from-file/skills
+SL_MEMORY_DIR=/from-file/memory
+SL_LOG_DIR=/from-file/logs
+SL_SEARCH_DB=/from-file/search.db
+EOF
+OUT=$(env -i HOME="$HOME" PATH="$PATH" SL_CONFIG_FILE="$_sl_env_beats_file_conf" \
+    SL_STATE_DIR="/from-env/state" SL_SKILLS_DIR="/from-env/skills" \
+    SL_MEMORY_DIR="/from-env/memory" SL_LOG_DIR="/from-env/logs" \
+    SL_SEARCH_DB="/from-env/search.db" \
+    bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; echo \"\$SL_STATE_DIR|\$SL_SKILLS_DIR|\$SL_MEMORY_DIR|\$SL_LOG_DIR|\$SL_SEARCH_DB\"")
+check "deferred minor 3: env beats file for all five path vars" \
+    "/from-env/state|/from-env/skills|/from-env/memory|/from-env/logs|/from-env/search.db" "$OUT"
+rm -f "$_sl_env_beats_file_conf"
+
+# --- I5: SL_COACH_RULES_DIR default must match where install.sh actually
+# installs coach rules (${DEST_DIR}/coach-rules, DEST_DIR being paths.py's
+# "scripts" key), not the pre-Task-7b .../scripts/self-learning/coach-rules
+# path that no longer exists on a real install.
+OUT=$(env -i HOME="/tmp/sl-coach-rules-home" PATH="$PATH" SL_CONFIG_FILE="/nonexistent/x.conf" \
+    bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; echo \"\$SL_COACH_RULES_DIR\"")
+check "I5: SL_COACH_RULES_DIR matches install.sh's actual coach-rules destination" \
+    "/tmp/sl-coach-rules-home/.local/share/agent-learning/scripts/coach-rules" "$OUT"
 
 if [[ "$FAILURES" -gt 0 ]]; then exit 1; fi
 echo "All config tests passed."

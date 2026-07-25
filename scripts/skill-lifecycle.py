@@ -3,7 +3,7 @@
 skill-lifecycle.py
 Lifecycle state machine for learned skills.
 
-Walks ~/.claude/learned-skills/.usage.json and applies deterministic
+Walks $SL_SKILLS_DIR/.usage.json and applies deterministic
 state transitions based on activity timestamps:
 
     active  --(30 days inactive)--> stale
@@ -32,10 +32,47 @@ from pathlib import Path
 # Configuration (overridable via environment variables)
 # ---------------------------------------------------------------------------
 
-SKILLS_DIR = Path(os.environ.get(
-    "CLAUDE_LEARNED_SKILLS_DIR",
-    os.path.expanduser("~/.claude/learned-skills"),
-))
+
+def _default_skills_dir() -> Path:
+    """Resolve the skills directory.
+
+    C2 fix: this used to hardcode ~/.claude/learned-skills and read only the
+    Claude-branded CLAUDE_LEARNED_SKILLS_DIR, never the vendor-neutral
+    SL_SKILLS_DIR that curator-run.sh exports (via lib/config.sh) before
+    invoking this script with no arguments. Two failure modes resulted:
+    on a correct vendor-neutral install (no ~/.claude at all), this fell
+    back to the hardcoded literal, found nothing, printed "Nothing to do."
+    and exited 0 -- lifecycle transitions silently never ran. On an
+    *upgraded* machine where a legacy ~/.claude/learned-skills still exists
+    from before this project went vendor-neutral, it would run destructive
+    shutil.move/shutil.rmtree calls against that stale legacy directory
+    while curator-run.sh's own report describes the new one -- silently
+    wrong-location and destructive at the same time.
+
+    Resolution order, matching every other consumer in this project:
+      1. SL_SKILLS_DIR        -- vendor-neutral, set by lib/config.sh
+      2. CLAUDE_LEARNED_SKILLS_DIR -- deprecated alias, honored for one
+         release so a caller that sets only the legacy name keeps working
+      3. scripts/lib/paths.py's "skills" key -- the single resolver, so a
+         caller (e.g. this script invoked standalone with no environment at
+         all) never falls back to a hardcoded ~/.claude literal.
+    """
+    if os.environ.get("SL_SKILLS_DIR"):
+        return Path(os.environ["SL_SKILLS_DIR"])
+    if os.environ.get("CLAUDE_LEARNED_SKILLS_DIR"):
+        print(
+            "skill-lifecycle.py: CLAUDE_LEARNED_SKILLS_DIR is deprecated; "
+            "use SL_SKILLS_DIR",
+            file=sys.stderr,
+        )
+        return Path(os.environ["CLAUDE_LEARNED_SKILLS_DIR"])
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+    import paths  # noqa: E402  (import deferred to keep this a stdlib-only default path)
+
+    return paths.resolve_all()["skills"]
+
+
+SKILLS_DIR = _default_skills_dir()
 USAGE_FILE = SKILLS_DIR / ".usage.json"
 ARCHIVE_DIR = SKILLS_DIR / ".archive"
 STALE_DAYS = int(os.environ.get("CLAUDE_SKILL_STALE_DAYS", "30"))

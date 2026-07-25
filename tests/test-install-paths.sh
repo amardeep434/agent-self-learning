@@ -157,6 +157,23 @@ check "learned-skills dir under store" "yes" "$([[ -d "${STORE}/learned-skills" 
 check "logs dir under store" "yes" "$([[ -d "${STORE}/logs/reviews" ]] && echo yes || echo no)"
 check "sessions db under store" "yes" "$([[ -f "${STORE}/sessions/search.db" ]] && echo yes || echo no)"
 
+# --- I5 regression guard: SL_COACH_RULES_DIR (as lib/config.sh resolves it
+# for a real caller) must resolve to a directory that ACTUALLY EXISTS after
+# a real install, not just a scripts-array membership check. The prior
+# default (.../scripts/self-learning/coach-rules) passed every existing
+# assertion here while pointing at a directory install.sh never creates --
+# this is exactly the blind spot that let it slip through. Sourcing
+# lib/config.sh (as every real consumer does) is the only way to catch a
+# future re-drift between install.sh's actual destination and config.sh's
+# default, rather than re-deriving install.sh's path a second time here.
+SL_COACH_RULES_DIR_RESOLVED="$(env -i HOME="$TMP_HOME" PATH="$MINIMAL_PATH" AGENT_LEARNING_HOME="$STORE" \
+    ${PYENV_ROOT:+PYENV_ROOT="$PYENV_ROOT"} \
+    bash -c "source '${RESOLVED_SCRIPTS}/lib/config.sh'; echo \"\$SL_COACH_RULES_DIR\"")"
+check "SL_COACH_RULES_DIR resolves to a directory that exists after a real install" "yes" \
+    "$([[ -d "$SL_COACH_RULES_DIR_RESOLVED" ]] && echo yes || echo no)"
+check "SL_COACH_RULES_DIR resolves under the installed scripts dir (matches install.sh's Step 3b destination)" \
+    "${RESOLVED_SCRIPTS}/coach-rules" "$SL_COACH_RULES_DIR_RESOLVED"
+
 # --- The Copilot hook config: rendered, resolved, and verifiably correct ---
 COPILOT_HOOK="${TMP_HOME}/.copilot/hooks/self-learning.json"
 check "copilot hook config was written" "yes" "$([[ -f "$COPILOT_HOOK" ]] && echo yes || echo no)"
