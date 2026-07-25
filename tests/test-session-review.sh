@@ -55,6 +55,29 @@ sl_wait_for_review_complete "$SL_LOG_DIR" || true
 check "claude was invoked" "yes" "$([[ -s "$FAKE_CLAUDE_LOG" ]] && echo yes || echo no)"
 check "guard env set for reviewer" "1" "$(grep -m1 '^GUARD:' "$FAKE_CLAUDE_LOG" | cut -d: -f2)"
 
+# 1b) Global Constraint 5: the reviewer must not be GRANTED file-write tools.
+# The Copilot path has enforced this mechanically since Task 6 (its argv
+# assertion is in tests/test-review-cli-flags.sh); this path enforced it by
+# prompt text alone until the final closeout round, which is not the same
+# thing -- a poisoned transcript can argue with a prompt, it cannot argue
+# with a deny rule. These assert the real argv the hook builds, recorded by
+# the fake `claude` shim above.
+#
+# The deny assertion is the load-bearing one: --allowedTools only
+# auto-approves, whereas a deny rule wins over anything the host's
+# settings.json may have allowed globally.
+#
+# Grepped over the whole log, not over a single `^ARGS:` line: the review
+# prompt is multi-line, so `echo "ARGS:$*"` in the shim spans many lines and
+# the flags land well after the first one. An earlier draft of this check
+# used `grep -m1 '^ARGS:'` and failed against a correct implementation --
+# recorded here because that is precisely the false-negative shape this
+# suite exists to avoid.
+check "reviewer argv denies the file-write tools" "yes" \
+    "$(grep -q -- '--disallowedTools Write,Edit,NotebookEdit' "$FAKE_CLAUDE_LOG" && echo yes || echo no)"
+check "reviewer argv still permits the read tools it needs" "yes" \
+    "$(grep -q -- '--allowedTools Read,Glob,Grep' "$FAKE_CLAUDE_LOG" && echo yes || echo no)"
+
 # 2) Recursion guard on entry: guarded call spawns nothing
 : > "$FAKE_CLAUDE_LOG"
 sl_clear_review_marker "$SL_LOG_DIR"

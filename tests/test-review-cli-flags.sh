@@ -99,6 +99,23 @@ if command -v claude >/dev/null 2>&1; then
 
     check "session-review.sh passes a turn cap" "yes" \
         "$(grep -q -- '--max-turns' "$CLAUDE_SCRIPT" && echo yes || echo no)"
+
+    # Global Constraint 5, checked against the REAL binary the same way
+    # --max-turns is: both tool-restriction flags are documented in --help
+    # here, and the control experiment above already established that this
+    # CLI errors on unknown options -- so "documented and accepted" is a
+    # real capability claim, not an assumption that an unknown flag would
+    # be ignored.
+    for flag in "--allowedTools" "--disallowedTools"; do
+        check "claude --help documents '${flag}'" "yes" \
+            "$(printf '%s' "$CLAUDE_HELP" | grep -qF -- "$flag" && echo yes || echo no)"
+    done
+    if [[ "$CONTROL_OK" == "yes" ]]; then
+        RESTRICT_ERR="$(timeout 60 claude --allowedTools "Read,Glob,Grep" \
+            --disallowedTools "Write,Edit,NotebookEdit" -p "" </dev/null 2>&1 || true)"
+        check "claude accepts the tool-restriction argv session-review.sh builds" "yes" \
+            "$(printf '%s' "$RESTRICT_ERR" | grep -qi "unknown option" && echo no || echo yes)"
+    fi
 else
     echo "[capability probe] claude: NOT AVAILABLE -- the Claude Code flag checks did"
     echo "  NOT run. Reported, not silently passed."

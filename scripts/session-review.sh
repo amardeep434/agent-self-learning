@@ -175,9 +175,37 @@ if command -v claude &>/dev/null; then
     # scans for) rather than a JSON envelope wrapping the response, which
     # would nest the proposal inside another JSON structure and break
     # extraction. Both are passed positionally, same as everything else here.
+    #
+    # --allowedTools / --disallowedTools enforce the plan's Global Constraint
+    # 5 ("the reviewer agent must not be granted file-write tools") on this
+    # path, which until now was enforced by prompt text alone while the
+    # Copilot path enforced it mechanically with `--allow-tool read`. Both
+    # flags were verified against the installed CLI (2.1.220) rather than
+    # assumed: they are documented in `claude --help` and are accepted in
+    # argv, and the control experiment in tests/test-review-cli-flags.sh
+    # establishes that this CLI *does* error on unknown options, so
+    # acceptance is real rather than silent-ignore. Comma-separated single
+    # tokens (the help text allows comma or space separation) so a variadic
+    # option can never swallow the flag that follows it.
+    #
+    # Read/Glob/Grep are exactly what the prompt above tells the reviewer it
+    # may use, and it genuinely needs them: it reads MEMORY.md, USER.md and
+    # scans the skills directory. Removing read access would break the
+    # review, so the restriction is written as "these reads, no writes",
+    # not "no tools".
+    #
+    # The deny list is not redundant with the allow list. --allowedTools is
+    # an auto-approve list; a user's own settings.json `permissions.allow`
+    # can still grant Write/Edit to any session on the machine, and this
+    # reviewer inherits that settings file. Deny rules take precedence, so
+    # --disallowedTools is what actually makes the constraint hold
+    # independently of whatever the host has configured.
     SL_REVIEW_ACTIVE=1 nohup bash -c '
         set -o pipefail
-        "$1" -p "$2" --max-turns "$5" --output-format text 2>>"$3/review-stderr.log" \
+        "$1" -p "$2" --max-turns "$5" --output-format text \
+            --allowedTools "Read,Glob,Grep" \
+            --disallowedTools "Write,Edit,NotebookEdit" \
+            2>>"$3/review-stderr.log" \
             | python3 "$4" >>"$3/persist.log" 2>&1
         status=$?
         if [[ $status -ne 0 ]]; then
