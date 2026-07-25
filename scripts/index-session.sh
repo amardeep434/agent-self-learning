@@ -34,13 +34,38 @@ mkdir -p "$(dirname "$DB_PATH")"
 DB_EXISTED=0
 [[ -f "$DB_PATH" ]] && DB_EXISTED=1
 
-# Initialize database if needed
+# Initialize database if needed.
+#
+# fix-p6 (macOS CI): this used to be `sqlite3 "$DB_PATH" < "$SCHEMA_FILE"`
+# via the `sqlite3` CLI. macOS's bundled CLI is commonly built WITHOUT the
+# FTS5 extension ("no such module: fts5"), and its batch mode does not
+# reliably propagate a non-zero exit for a mid-script error -- so this
+# failed silently: `set -euo pipefail` never caught it, the FTS5 table
+# creation failed, and the base sessions/messages tables (which don't even
+# need FTS5) were collateral damage since the CLI never reached the
+# statements after the failing one. session_db.py replaces the CLI with
+# Python's own sqlite3 module (Connection.executescript() raises
+# immediately on a real error, no silent continue-past-failures) and
+# splits the schema: base tables always applied, FTS5 gated behind a
+# functional probe (never a platform-name guess) with a LIKE-based
+# fallback in session_db.py's search() when it's unavailable.
 if [[ "$DB_EXISTED" -eq 0 ]]; then
-    SCHEMA_FILE="${SCRIPT_DIR}/session-search-schema.sql"
-    if [[ -f "$SCHEMA_FILE" ]]; then
-        sqlite3 "$DB_PATH" < "$SCHEMA_FILE"
+    BASE_SCHEMA_FILE="${SCRIPT_DIR}/session-search-schema.sql"
+    FTS5_SCHEMA_FILE="${SCRIPT_DIR}/session-search-fts5.sql"
+    if [[ -f "$BASE_SCHEMA_FILE" ]]; then
+        if ! SCHEMA_RESULT=$(python3 "${SCRIPT_DIR}/lib/session_db.py" \
+                ensure-schema "$DB_PATH" "$BASE_SCHEMA_FILE" "$FTS5_SCHEMA_FILE" 2>&1); then
+            # A real failure (not merely FTS5 being unavailable -- that
+            # case returns 0, see session_db.py) -- loud and fatal, never
+            # silently continue with a half-initialized database.
+            echo "[index-session] FATAL: failed to initialize session search database ($DB_PATH): $SCHEMA_RESULT" >&2
+            exit 1
+        fi
+        if [[ "$SCHEMA_RESULT" == no-fts5:* ]]; then
+            echo "[index-session] WARNING: ${SCHEMA_RESULT#no-fts5:} -- full-text search degraded to substring (LIKE) matching: no ranking, no stemming, slower on a large history." >&2
+        fi
     else
-        echo "[index-session] Schema file not found: $SCHEMA_FILE" >&2
+        echo "[index-session] Schema file not found: $BASE_SCHEMA_FILE" >&2
         exit 0
     fi
 fi
@@ -75,22 +100,17 @@ if [[ -z "$LATEST_SESSION" ]]; then
     exit 0
 fi
 
-# Index each new/modified session
+# Index each new/modified session. The re-index (already-indexed ->
+# delete old rows -> insert fresh) decision used to live here, via two more
+# `sqlite3` CLI calls; index-session.py now does the equivalent DELETE
+# unconditionally (a no-op on a first-time session, necessary on a
+# re-index) with Python's sqlite3 module -- one less CLI dependency, one
+# less place for the same silent-failure class to recur.
 while IFS= read -r SESSION_FILE; do
-    SESSION_ID=$(basename "$SESSION_FILE" .jsonl)
     PROJECT_PATH=$(dirname "$SESSION_FILE" | sed "s|$SESSIONS_DIR/||")
 
-    # Skip if already indexed and file has not changed
-    INDEXED_AT=$(sqlite3 "$DB_PATH" \
-        "SELECT indexed_at FROM sessions WHERE session_id='$SESSION_ID'" 2>/dev/null)
-
-    if [[ -n "$INDEXED_AT" ]]; then
-        # Re-index: delete old data first
-        sqlite3 "$DB_PATH" "DELETE FROM messages WHERE session_id='$SESSION_ID'"
-        sqlite3 "$DB_PATH" "DELETE FROM sessions WHERE session_id='$SESSION_ID'"
-    fi
-
-    # Parse JSONL and insert via Python helper
+    # Parse JSONL and insert via Python helper (derives session_id itself
+    # from the filename stem)
     python3 "${SCRIPT_DIR}/index-session.py" \
         "$SESSION_FILE" "$DB_PATH" "$PROJECT_PATH"
 

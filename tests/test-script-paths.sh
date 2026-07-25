@@ -207,8 +207,9 @@ mkdir -p "${IDX_SCRIPTS}/lib"
 cp "${SCRIPT_DIR}/scripts/index-session.sh" "${SCRIPT_DIR}/scripts/index-session.py" "$IDX_SCRIPTS/"
 cp "${SCRIPT_DIR}/scripts/lib/config.sh" "${SCRIPT_DIR}/scripts/lib/paths.py" \
    "${SCRIPT_DIR}/scripts/lib/isotime.py" "${SCRIPT_DIR}/scripts/lib/list-transcripts.py" \
-   "${IDX_SCRIPTS}/lib/"
-cp "${SCRIPT_DIR}/schema/session-search-schema.sql" "$IDX_SCRIPTS/"
+   "${SCRIPT_DIR}/scripts/lib/session_db.py" "${IDX_SCRIPTS}/lib/"
+cp "${SCRIPT_DIR}/schema/session-search-schema.sql" \
+   "${SCRIPT_DIR}/schema/session-search-fts5.sql" "$IDX_SCRIPTS/"
 chmod +x "${IDX_SCRIPTS}/index-session.sh"
 
 mkdir -p "${TMP_HOME}/.claude/projects/demo-project"

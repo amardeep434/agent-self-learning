@@ -51,8 +51,8 @@ SESSION START
 |------------|-----------|---------|---------------|
 | bash | all scripts | 4.0+ | via Git for Windows (Git Bash) or WSL |
 | jq | hook payload + settings/JSON handling | 1.6+ | `winget install jqlang.jq` |
-| python3 | injector, coach signals, session indexing | 3.8+ (stdlib only) | `winget install Python.Python.3.12` |
-| sqlite3 | session search index | 3.35+ | bundled with Python or `winget install SQLite.SQLite` |
+| python3 | injector, coach signals, session indexing and search (including its bundled `sqlite3` module) | 3.8+ (stdlib only) | `winget install Python.Python.3.12` |
+| sqlite3 (CLI, optional) | manual DB inspection; `self-learning-health.sh`'s database check (degrades to a warning, not a failure, if absent) | any | bundled with Git for Windows or `winget install SQLite.SQLite` |
 | Claude Code | Claude adapter (optional) | current | — |
 | GitHub Copilot CLI | Copilot adapter (optional) | current, authenticated | PowerShell 7+ required for its hooks |
 | gh CLI | vendoring Coach rules, fork maintenance | 2.40+ | `winget install GitHub.cli` |
@@ -176,7 +176,7 @@ and removes `~/.copilot/hooks/self-learning.json`.
 | 2 | **Skill Library** | File-backed repository of reusable knowledge with usage telemetry, lifecycle states (active/stale/archived), and authoring standards. |
 | 3 | **Memory System** | Bounded MEMORY.md (agent notes) and USER.md (user profile) stores with frozen snapshot loading and threat scanning. |
 | 4 | **Curator** | Periodic maintenance daemon that consolidates narrow skills into class-level umbrellas and archives unused skills. |
-| 5 | **Session Search** | SQLite FTS5-indexed cross-session search with four query shapes: discover, scroll, read, browse. |
+| 5 | **Session Search** | SQLite-backed cross-session search with four query shapes: discover, scroll, read, browse. Uses FTS5 (ranked, stemmed) when the local SQLite build supports it, probed functionally at index time (`scripts/lib/session_db.py`) -- never assumed from platform name; falls back to a substring `LIKE` query, never a silently empty index, when it doesn't (e.g. macOS's bundled `sqlite3` CLI commonly lacks FTS5, though Python's own bundled SQLite -- what this project actually uses -- usually has it). |
 
 ## Agent compatibility
 
@@ -262,7 +262,8 @@ claude-self-learning/
     curator-review.md           # Curator consolidation prompt
     authoring-standards.md      # Skill authoring standards reference
   schema/
-    session-search-schema.sql   # SQLite FTS5 schema for session search
+    session-search-schema.sql   # Base sessions/messages schema, always applied
+    session-search-fts5.sql     # FTS5 index + sync triggers, applied only when probe_fts5() confirms support
   scripts/                      # Hook, review, curator, install/uninstall, and doctor scripts (bash + Python)
   tests/                        # 18 test suites (13 shell, 5 Python) run by tests/run-all.sh
   docs/

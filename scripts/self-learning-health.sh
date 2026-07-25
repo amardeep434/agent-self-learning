@@ -345,13 +345,27 @@ fi
 
 section "Dependencies"
 
-for cmd in jq sqlite3 python3; do
+for cmd in jq python3; do
     if command -v "$cmd" &>/dev/null; then
         pass "$cmd available ($(command -v "$cmd"))"
     else
         fail "$cmd not found" "Install $cmd (required for self-learning system)"
     fi
 done
+
+# sqlite3 (the CLI) is optional, not required: fix-p6 moved session-search
+# schema init and per-session writes off the CLI entirely and onto
+# python3's own bundled sqlite3 module (session_db.py), because macOS's
+# system `sqlite3` CLI commonly lacks the FTS5 extension while Python's
+# bundled SQLite usually has it. Only this health check's own DB-inspection
+# step below (Check: Session Search Database) still shells out to the CLI,
+# and it already degrades to a warning, not a failure, if absent -- this
+# dependency check must agree with that, not contradict it.
+if command -v sqlite3 &>/dev/null; then
+    pass "sqlite3 available ($(command -v sqlite3)) -- optional, used only for manual DB inspection here"
+else
+    warn "sqlite3 not found -- optional; session search itself uses python3's bundled sqlite3 module, not this CLI"
+fi
 
 # --- Summary ---
 

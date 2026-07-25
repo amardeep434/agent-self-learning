@@ -168,12 +168,211 @@ between transcript-file creation and DB creation in the *test's own fixture* tim
 on a fast APFS runner (the task's fourth candidate cause), which `os.path.getmtime()`
 does not paper over since it still reads real filesystem timestamps.
 
+## macOS FTS5 (follow-up: CI run 30165496986)
+
+Round two. Both Windows cells went green and Ubuntu stayed green after the fixes
+above; macOS was still red on `tests/test-index-session-first-run.sh`, but with a
+different failure than before:
+
+```
+PASS: DB was created on first run
+FAIL: pre-existing transcript is indexed on the very first run (expected '1', got '0')
+--- index-session.sh first-run output ---
+Runtime error near line 37: no such module: fts5
+```
+
+The `find`/`stat`/`sort` rewrite (the round-one fix above) was **not** the cause —
+it correctly listed the pre-existing transcript. The DB row never landed because
+schema initialization itself failed: macOS's bundled `/usr/bin/sqlite3` CLI is
+commonly built without the FTS5 extension, and the old
+`sqlite3 "$DB_PATH" < "$SCHEMA_FILE"` line hit `CREATE VIRTUAL TABLE messages_fts
+USING fts5(...)` (line 37) and errored.
+
+### Probe result: CLI vs. Python sqlite3 — verified, not assumed
+
+Ran a direct functional probe (`CREATE VIRTUAL TABLE ... USING fts5(x)`) against
+both the system `sqlite3` CLI and Python's bundled `sqlite3` module on this
+development machine, and separately against the CI-pinned Python 3.9.24
+interpreter:
+
+```
+CLI FTS5 probe:                    (silent — succeeded; this Linux box's CLI has FTS5)
+Python sqlite3 FTS5 (3.13):        AVAILABLE
+Python sqlite3 FTS5 (3.9.24):      AVAILABLE
+```
+
+This machine's CLI happens to have FTS5 too, so it doesn't reproduce the CLI/Python
+split macOS shows — the CI log is the actual evidence for that split (CLI: `no such
+module: fts5`; the same code path via Python succeeds once rewritten, see below).
+The reasoning for *why* Python's module is expected to have it even where the CLI
+doesn't, on macOS specifically: GitHub Actions' `macos-latest` (and `ubuntu-latest`,
+`windows-latest`) runners resolve `python3` through `actions/setup-python`, which
+installs a relocatable, from-source Python build (the `actions/python-versions` /
+`python-build-standalone` artifacts) that compiles its own bundled SQLite with FTS5
+enabled — independent of whatever the OS's own `/usr/bin/sqlite3` CLI ships with.
+Apple's system CLI is a separate, Apple-built binary with its own compile flags.
+This is why the CLI and Python diverged in the CI log: two different SQLite builds
+from two different vendors, not two views of the same one.
+
+### Was `index-session.sh` masking a failed schema behind exit 0? Yes — checked, not assumed
+
+Reproduced directly: piping a multi-statement script containing a bad
+`CREATE VIRTUAL TABLE ... USING nosuchmodule5(...)` into `sqlite3 file <
+script.sql` on this machine's sqlite3 (3.53) DOES propagate exit 1 and does NOT
+process statements after the error. But the CI log shows the opposite behavior
+happened on macOS: `set -euo pipefail` never fired (execution continued to
+`echo "  Initialized: ..."`/the subsequent listing step), and the base
+`sessions`/`messages` tables were never created either (queries against them
+during the test failed rather than returning 0 rows). Both facts are only
+explainable if macOS's older bundled `sqlite3` CLI batch-processes past a
+mid-script error without setting a non-zero exit status by default (`.bail` is
+off by default in the CLI, and this behavior is version-dependent) — i.e. the
+exact "component reports success while doing nothing" pattern. **Yes, it was
+masking a failure**, on a build/version of the CLI I don't have local access to
+reproduce byte-for-byte, but the CI log's shape (WARNING/table-missing evidence,
+no non-zero-exit abort) is only consistent with that explanation.
+
+### Approach and why
+
+Verified Python's `sqlite3` module has FTS5 here (goal 1 confirmed on this
+machine, reasoned about for macOS CI above) → stopped shelling out to the
+`sqlite3` CLI for schema management and per-session writes entirely, rather than
+patching the CLI invocation to check its own exit code more carefully. Added
+`scripts/lib/session_db.py`:
+
+- `probe_fts5()` — a functional probe (create a scratch FTS5 table in a throwaway
+  `:memory:` database), matching this repo's existing capability-detection
+  discipline (`os.supports_dir_fd`, the `[capability probe]` lines added in the
+  Windows fix above). Not a version or platform check.
+- `ensure_schema()` — applies `schema/session-search-schema.sql` (split out as the
+  BASE schema: `sessions`/`messages` tables + plain indexes, always applied,
+  needs no FTS5) via `Connection.executescript()`, which raises immediately on a
+  real SQL error — no CLI batch-mode continue-past-failures. Then probes FTS5 and,
+  only if available, applies the new `schema/session-search-fts5.sql` (the
+  `messages_fts` virtual table + sync triggers, split out from the old combined
+  file). A genuine base-schema failure propagates as a raised exception;
+  FTS5-unavailable is a distinct, non-error return value.
+- `search()` — FTS5 `MATCH` (ranked, stemmed) when `messages_fts` exists; a plain
+  `content LIKE '%...%'` query (escaped for literal `%`/`_`) against the same
+  `messages` table when it doesn't. Never a silently empty index.
+
+`index-session.sh` now calls `session_db.py ensure-schema` instead of the CLI, and
+treats its result two ways: a non-zero exit (a REAL failure) is `FATAL`, logged,
+and aborts with exit 1; a `no-fts5:<reason>` result (FTS5 genuinely unavailable) is
+logged as a `WARNING` naming the degradation and continues normally, exit 0 — this
+is a handled, intentional degradation, not a bug. `install.sh`'s equivalent schema-
+init step (Step 5, same CLI-masking bug, same fix) and `scripts/index-session.py`
+(folded the shell wrapper's separate `sqlite3` CLI "already indexed → DELETE"
+check into a single unconditional `DELETE FROM messages WHERE session_id = ?`
+before insert, via the same Python connection already used for the insert) were
+updated the same way. Net effect: `sqlite3` (the CLI) is no longer a runtime
+dependency of the index/search path at all — only `self-learning-health.sh`'s
+manual DB-inspection diagnostic still shells out to it, and it already degraded to
+a `warn`, not a `fail`, when absent (fixed the adjacent "Dependencies" check in the
+same file, which *did* hard-`fail` on a missing `sqlite3` — now also a `warn`,
+consistent with the CLI genuinely being optional). `README.md`'s requirements
+table, file-layout listing, and Session Search feature description were updated to
+match this reality.
+
+Explicitly avoided per the coordinator's constraint: did not install `sqlite3`
+with FTS5 in CI. Not a platform-name branch anywhere in this fix — `probe_fts5()`
+is called on every platform, and its result (not `sys.platform`) decides which
+schema gets applied.
+
+### Tests
+
+- `tests/test-session-db.py` (new, 8 unit tests): `ensure_schema()`/`probe_fts5()`/
+  `search()` exercised directly, with `probe_fts5` monkeypatched to `False` to hit
+  the degraded path deterministically — not dependent on this machine (which has
+  real FTS5) happening to lack it. Covers: base tables created regardless of FTS5
+  availability, FTS5 tables created when available, a missing FTS5 schema file
+  degrading rather than raising, a **genuine** base-schema failure raising
+  (`sqlite3.Error`) rather than being swallowed, FTS5 `MATCH` search, LIKE-fallback
+  search, and LIKE-fallback `%`/`_` escaping correctness.
+- `tests/test-index-session-fts5-fallback.sh` (new, shell integration): simulates
+  FTS5 unavailable *inside Python's own sqlite3 module* (worse than the real macOS
+  gap, where only the CLI lacked it) via a `sitecustomize.py` on `PYTHONPATH` that
+  makes any `CREATE VIRTUAL TABLE ... USING fts5(...)` raise the real
+  `sqlite3.OperationalError` SQLite itself raises — a functional-probe simulation,
+  not a platform branch, with a sanity check that `probe_fts5()` genuinely observes
+  `UNAVAILABLE` through the shim before trusting anything downstream. Runs the
+  real `index-session.sh` end to end and asserts: exit 0 (handled degradation), a
+  WARNING naming FTS5 and the LIKE fallback, `sessions`/`messages` tables present,
+  `messages_fts` correctly absent (not half-created), the row actually indexed, and
+  — the "verify search still works end-to-end" ask — `session_db.py search` finds
+  the indexed content via the LIKE path. A second scenario in the same file uses a
+  deliberately invalid base schema (not an FTS5 problem) with zero session files
+  present, isolating the schema-init check itself, and asserts `index-session.sh`
+  exits 1 with a `FATAL` message — the true silent-success reproduction, since with
+  no files to index the script's only other exit path is the normal "nothing to do"
+  `exit 0`.
+- `tests/test-index-session-first-run.sh`: added an end-to-end `session_db.py
+  search` assertion after the existing row-exists check, so this test now catches
+  "a row landed but search is broken" (the actual macOS symptom), not only "a row
+  is missing" (the round-one symptom).
+- `tests/test-script-paths.sh`'s own sandboxed `index-session.sh` copy needed the
+  same fixture update (`session_db.py`, `session-search-fts5.sql`) as the
+  dedicated index-session tests.
+- Manually verified via a real sandboxed `install.sh` run (`env -i` + temp `HOME` +
+  explicit `AGENT_LEARNING_HOME`, never the real `$HOME`): schema initializes,
+  `messages_fts` and its FTS trigger-backing tables exist, and
+  `self-learning-health.sh`'s Dependencies section now reports `sqlite3` as an
+  optional PASS rather than a required one.
+
+### Mutation testing
+
+- **`ensure_schema()`'s FTS5 detection** — patched `if not probe_fts5():` to
+  `if False:` (never detect unavailability): 2 explicit assertion failures + 1
+  error in `tests/test-session-db.py` (`Ran 8 tests ... FAILED (failures=2,
+  errors=1)`). Restored → 8/8 pass.
+- **`index-session.sh`'s exit-code handling** — replaced the `if !
+  SCHEMA_RESULT=$(...); then FATAL; exit 1; fi` guard with `SCHEMA_RESULT=$(...)
+  || true` (silently swallow any real failure, reproducing the suspected old CLI
+  behavior in the new code). Reproduced true silent success directly: with a
+  deliberately broken base schema and zero session files to index, the mutated
+  script exited **0 with no output at all** — the exact "component reports success
+  while doing nothing" pattern this branch exists to eliminate. The new dedicated
+  regression check in `tests/test-index-session-fts5-fallback.sh` failed as
+  expected (`FAIL: a genuinely broken base schema is FATAL ... expected '1', got
+  '0'`; `FAIL: the FATAL message names the real cause`). Restored → all 12 checks
+  in that file pass again, and the real (non-mutated) script correctly exits 1
+  with `[index-session] FATAL: failed to initialize session search database
+  (...): ensure-schema failed: near "THIS": syntax error` against the same broken
+  schema.
+- **`search()`'s FTS5 query** — caught during development, not left for mutation
+  testing to find: aliasing `messages_fts` (`FROM messages_fts f ... WHERE f
+  MATCH ?`) raised `no such column: f` on this machine's SQLite build; fixed by
+  querying the virtual table's own name directly (`FROM messages_fts ... WHERE
+  messages_fts MATCH ?`), verified against a real end-to-end index-then-search run
+  before it was in the test suite.
+
+### What only CI can confirm
+
+Confirmed here: Python's `sqlite3` module has FTS5 on this development machine
+and on the CI-pinned 3.9.24 interpreter; the degraded (LIKE) path works end to end
+when FTS5 is genuinely absent (simulated, not just asserted); a genuine schema
+failure is now loud. **Not confirmed here, because I have no macOS access**: that
+`actions/setup-python`'s macOS Python build actually has FTS5 the way I've reasoned
+it does — this is a well-documented property of those relocatable builds, not a
+guess pulled from nowhere, but it is still an inference about a build I have not
+personally inspected. If macOS CI is still red after this fix, the next thing to
+check is whether that inference was wrong (Python's own bundled SQLite on that
+specific macOS runner also lacks FTS5) — in which case `ensure_schema()` already
+degrades correctly rather than crashing (it was built and tested for exactly that
+case, see the FTS5-unavailable simulation above), so a red run at that point would
+mean the WARNING should be visible in the log rather than any test failing. If the
+suite is still failing outright rather than degrading, that would point to
+something in `session_db.py` itself I haven't accounted for on that platform.
+
 ## Suite count / interpreter results
 
-- `bash tests/run-all.sh`: **35/35 suites passed** (34 baseline + 1 new,
-  `tests/test-list-transcripts.py`), both under system Python 3.13 and with Python 3.9
+- `bash tests/run-all.sh`: **37/37 suites passed** (34 baseline + 1 from the
+  Windows/macOS round-one fix [`tests/test-list-transcripts.py`] + 2 from this
+  FTS5 follow-up [`tests/test-session-db.py`, `tests/test-index-session-fts5-fallback.sh`]),
+  both under system Python 3.13 and with Python 3.9
   (`~/.pyenv/versions/3.9.24/bin/python3.9`) shimmed first on `PATH`.
 - All Python suites also run directly under the 3.9 interpreter individually: all
-  pass, including the new `tests/test-list-transcripts.py` (8/8) and
-  `tests/test-adversarial-sweep.py` (95 attacks executed, 1 loudly skipped for an
-  unrelated, pre-existing capability reason — case-sensitive filesystem here).
+  pass, including `tests/test-session-db.py` (8/8), `tests/test-list-transcripts.py`
+  (8/8), and `tests/test-adversarial-sweep.py` (95 attacks executed, 1 loudly
+  skipped for an unrelated, pre-existing capability reason — case-sensitive
+  filesystem here).

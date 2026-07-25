@@ -24,8 +24,9 @@ mkdir -p "${IDX_SCRIPTS}/lib"
 cp "${SCRIPT_DIR}/scripts/index-session.sh" "${SCRIPT_DIR}/scripts/index-session.py" "$IDX_SCRIPTS/"
 cp "${SCRIPT_DIR}/scripts/lib/config.sh" "${SCRIPT_DIR}/scripts/lib/paths.py" \
    "${SCRIPT_DIR}/scripts/lib/isotime.py" "${SCRIPT_DIR}/scripts/lib/list-transcripts.py" \
-   "${IDX_SCRIPTS}/lib/"
-cp "${SCRIPT_DIR}/schema/session-search-schema.sql" "$IDX_SCRIPTS/"
+   "${SCRIPT_DIR}/scripts/lib/session_db.py" "${IDX_SCRIPTS}/lib/"
+cp "${SCRIPT_DIR}/schema/session-search-schema.sql" \
+   "${SCRIPT_DIR}/schema/session-search-fts5.sql" "$IDX_SCRIPTS/"
 chmod +x "${IDX_SCRIPTS}/index-session.sh"
 
 STORE="${TMP_HOME}/store"
@@ -53,6 +54,20 @@ check "DB was created on first run" "yes" "$([[ -f "$DB_PATH" ]] && echo yes || 
 INDEXED_COUNT="$(env -i HOME="$TMP_HOME" PATH="$PATH" \
     sqlite3 "$DB_PATH" "SELECT count(*) FROM sessions WHERE session_id='sess-preexisting'" 2>/dev/null || echo ERROR)"
 check "pre-existing transcript is indexed on the very first run" "1" "$INDEXED_COUNT"
+
+# fix-p6: verify SEARCH actually works end to end, not just that a row
+# landed in the table -- the macOS CI failure this branch caught was
+# exactly "a row inserted" while search itself (FTS5 schema creation) had
+# silently failed. On whatever SQLite build this test happens to run
+# under -- real FTS5 or the LIKE fallback -- the content must be findable.
+SEARCH_OUT="$(env -i HOME="$TMP_HOME" PATH="$PATH" \
+    python3 "${IDX_SCRIPTS}/lib/session_db.py" search "$DB_PATH" predates)"
+if [[ "$SEARCH_OUT" == *"sess-preexisting"* ]]; then
+    echo "PASS: search finds the pre-existing transcript's content end to end"
+else
+    echo "FAIL: search finds the pre-existing transcript's content end to end (got: '$SEARCH_OUT')"
+    FAILURES=$((FAILURES+1))
+fi
 
 if [[ "$FAILURES" -gt 0 ]]; then
     echo "--- index-session.sh first-run output ---"

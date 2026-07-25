@@ -11,7 +11,13 @@
 #   bash install.sh --uninstall  # Remove installed files (delegates to uninstall.sh)
 #
 # Prerequisites:
-#   - jq, sqlite3, python3 must be installed
+#   - jq, python3 must be installed
+#   - sqlite3 (the CLI) is optional: fix-p6 moved session-search schema
+#     init off the CLI and onto python3's own bundled sqlite3 module (which
+#     macOS's system CLI often lacks FTS5 support for, unlike Python's), so
+#     nothing in this script shells out to the `sqlite3` binary anymore.
+#     Only self-learning-health.sh's diagnostic DB check still uses it,
+#     already gracefully degrading (a warning, not a failure) if absent.
 #
 # Install locations are resolved by scripts/lib/paths.py (vendor-neutral;
 # never inside ~/.claude by default). Claude Code and GitHub Copilot CLI are
@@ -83,7 +89,7 @@ echo "=== agent-self-learning Installer ==="
 echo ""
 
 MISSING_DEPS=()
-for cmd in jq sqlite3 python3; do
+for cmd in jq python3; do
     if ! command -v "$cmd" &>/dev/null; then
         MISSING_DEPS+=("$cmd")
     fi
@@ -342,20 +348,38 @@ echo "Step 5: Initializing session search database..."
 
 SCHEMA_SRC="${SCRIPT_DIR}/schema/session-search-schema.sql"
 SCHEMA_DST="${DEST_DIR}/session-search-schema.sql"
+FTS5_SCHEMA_SRC="${SCRIPT_DIR}/schema/session-search-fts5.sql"
+FTS5_SCHEMA_DST="${DEST_DIR}/session-search-fts5.sql"
 DB_PATH="$SL_SESSIONS_DB"
 
 if [[ -f "$SCHEMA_SRC" ]]; then
     do_copy "$SCHEMA_SRC" "$SCHEMA_DST"
+    [[ -f "$FTS5_SCHEMA_SRC" ]] && do_copy "$FTS5_SCHEMA_SRC" "$FTS5_SCHEMA_DST"
 
     if [[ "$DRY_RUN" != "true" ]]; then
         if [[ ! -f "$DB_PATH" ]]; then
-            sqlite3 "$DB_PATH" < "$SCHEMA_DST"
+            # fix-p6 (macOS CI): this used to be `sqlite3 "$DB_PATH" <
+            # "$SCHEMA_DST"` via the `sqlite3` CLI, which failed silently
+            # on macOS -- its bundled CLI commonly lacks FTS5, and its
+            # batch mode does not reliably surface a non-zero exit for a
+            # mid-script error. session_db.py applies the same schema via
+            # Python's own sqlite3 module (raises immediately on a real
+            # failure) and gates the FTS5-only part behind a functional
+            # probe -- see scripts/lib/session_db.py's module docstring.
+            if ! SCHEMA_RESULT=$(python3 "${DEST_DIR}/lib/session_db.py" \
+                    ensure-schema "$DB_PATH" "$SCHEMA_DST" "$FTS5_SCHEMA_DST" 2>&1); then
+                echo "  FATAL: failed to initialize session search database ($DB_PATH): $SCHEMA_RESULT" >&2
+                exit 1
+            fi
+            if [[ "$SCHEMA_RESULT" == no-fts5:* ]]; then
+                echo "  WARNING: ${SCHEMA_RESULT#no-fts5:} -- full-text search degraded to substring (LIKE) matching."
+            fi
             echo "  Initialized: $DB_PATH"
         else
             echo "  Database already exists: $DB_PATH (skipping)"
         fi
     else
-        echo "[DRY RUN] sqlite3 $DB_PATH < $SCHEMA_DST"
+        echo "[DRY RUN] python3 ${DEST_DIR}/lib/session_db.py ensure-schema $DB_PATH $SCHEMA_DST $FTS5_SCHEMA_DST"
     fi
 else
     echo "  No schema/session-search-schema.sql found"

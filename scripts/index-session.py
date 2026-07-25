@@ -151,6 +151,17 @@ def index_session(jsonl_path: str, db_path: str, project_path: str) -> None:
     now = now_iso()
 
     try:
+        # fix-p6: this used to be the shell wrapper's job (index-session.sh
+        # SELECTed indexed_at via the `sqlite3` CLI, then issued two more
+        # CLI DELETEs if a row already existed) -- folded in here so the
+        # whole index path uses only Python's sqlite3 module, no `sqlite3`
+        # CLI dependency at runtime. Unconditional and idempotent: a no-op
+        # DELETE when session_id has never been indexed, and necessary (not
+        # just belt-and-suspenders) when it HAS -- INSERT OR REPLACE alone
+        # would leave stale trailing rows behind if a re-indexed session
+        # now has FEWER messages than it did last time.
+        conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+
         conn.execute(
             """INSERT OR REPLACE INTO sessions
                (session_id, project_path, title, started_at, last_active,
