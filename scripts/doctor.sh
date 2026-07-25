@@ -66,25 +66,23 @@ _sl_test_writable() {
     return 0
 }
 
-# Report whether a hook config file exists and, if so, whether it actually
-# references the currently-resolved scripts directory. A hook config
-# pointing at a stale path is precisely the class of bug fixed elsewhere in
-# this plan; doctor exists in part to catch a recurrence of it.
-_sl_check_hook_freshness() {
-    local file="$1" needle="$2"
-    if [[ ! -f "$file" ]]; then
-        echo "not installed"
-        return
-    fi
-    if [[ -z "$needle" ]]; then
-        echo "installed (could not verify target path -- python3/paths.py unavailable)"
-        return
-    fi
-    if grep -qF -- "$needle" "$file" 2>/dev/null; then
-        echo "installed, points at resolved scripts dir"
-    else
-        echo "installed, STALE -- does not reference ${needle}"
-    fi
+# Report every expected <script>: hook in a config file, using the SAME
+# sl_check_hook_fresh() helper (scripts/lib/config.sh) that
+# self-learning-health.sh uses, so the two tools cannot disagree about the
+# same file by construction. $1 = hook config file, $2.. = script basenames
+# expected to be registered in it.
+_sl_report_hooks() {
+    local file="$1"; shift
+    local script_name state
+    for script_name in "$@"; do
+        state="$(sl_check_hook_fresh "$file" "$script_name" "$SL_SCRIPTS_DIR")"
+        case "$state" in
+            absent)  echo "    ${script_name}: not installed" ;;
+            missing) echo "    ${script_name}: MISSING -- not registered in ${file}" ;;
+            stale)   echo "    ${script_name}: STALE -- registered but does not point at ${SL_SCRIPTS_DIR}/${script_name}" ;;
+            fresh)   echo "    ${script_name}: registered, points at resolved scripts dir" ;;
+        esac
+    done
 }
 
 echo "agent-self-learning doctor"
@@ -135,8 +133,8 @@ echo "harnesses detected:"
 if command -v claude >/dev/null 2>&1; then
     echo "  claude   present (Claude Code)"
     CLAUDE_SETTINGS="${HOME}/.claude/settings.json"
-    HOOK_STATE="$(_sl_check_hook_freshness "$CLAUDE_SETTINGS" "$SL_SCRIPTS_DIR")"
-    echo "    hooks (~/.claude/settings.json): ${HOOK_STATE}"
+    echo "    hooks (~/.claude/settings.json):"
+    _sl_report_hooks "$CLAUDE_SETTINGS" turn-counter.sh session-review.sh index-session.sh
 else
     echo "  claude   absent (normal on a Copilot-only or VS-Code-only machine)"
 fi
@@ -144,8 +142,8 @@ fi
 if command -v copilot >/dev/null 2>&1; then
     echo "  copilot  present (Copilot CLI)"
     COPILOT_HOOKS="${HOME}/.copilot/hooks/self-learning.json"
-    HOOK_STATE="$(_sl_check_hook_freshness "$COPILOT_HOOKS" "$SL_SCRIPTS_DIR")"
-    echo "    hooks (~/.copilot/hooks/self-learning.json): ${HOOK_STATE}"
+    echo "    hooks (~/.copilot/hooks/self-learning.json):"
+    _sl_report_hooks "$COPILOT_HOOKS" copilot-session-review.sh
 else
     echo "  copilot  absent (normal on a Claude-Code-only or VS-Code-only machine)"
 fi

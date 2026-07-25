@@ -90,6 +90,47 @@ done
 check "lib/config.sh installed" "yes" "$([[ -f "${RESOLVED_SCRIPTS}/lib/config.sh" ]] && echo yes || echo no)"
 check "lib/paths.py installed" "yes" "$([[ -f "${RESOLVED_SCRIPTS}/lib/paths.py" ]] && echo yes || echo no)"
 
+# --- Structural guard: install.sh's SCRIPTS array must never silently omit
+# a script again. This has happened twice: Task 7b omitted
+# lib/proposal_schema.py (an import persist-proposal.py needs, breaking the
+# whole persistence path on a real install with no test catching it), and
+# Task 9 omitted doctor.sh itself -- the tool whose entire purpose is
+# surfacing silent failures was, itself, silently unreachable on any real
+# install. Both were caught by a human reading code, not a test. This makes
+# it structural: every scripts/*.sh and scripts/*.py must either appear in
+# install.sh's SCRIPTS array or be explicitly exempted below with a reason,
+# so a new script forces a conscious decision instead of a silent omission.
+# No associative arrays here (bash 3.2 on stock macOS lacks them) --
+# "name|reason" pairs in a plain indexed array instead.
+INSTALL_SCRIPTS_ARRAY="$(sed -n '/^SCRIPTS=(/,/^)/p' "${SCRIPT_DIR}/install.sh" | grep -oE '"[^"]+"' | tr -d '"' || true)"
+
+INSTALL_EXEMPTIONS=(
+    "sync-coach-rules.sh|maintainer-only vendoring tool; requires the gh CLI and writes into the repo checkout's vendor/coach-rules/, run from source, never from an installed store"
+)
+
+install_exempt_reason() {
+    local name="$1" entry
+    for entry in "${INSTALL_EXEMPTIONS[@]}"; do
+        case "$entry" in
+            "${name}|"*) printf '%s' "${entry#*|}"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+for f in "${SCRIPT_DIR}"/scripts/*.sh "${SCRIPT_DIR}"/scripts/*.py; do
+    [[ -f "$f" ]] || continue
+    name="$(basename "$f")"
+    if printf '%s\n' "$INSTALL_SCRIPTS_ARRAY" | grep -qxF "$name"; then
+        echo "PASS: $name is installed by install.sh"
+    elif reason="$(install_exempt_reason "$name")"; then
+        echo "PASS: $name is explicitly exempted from install ($reason)"
+    else
+        echo "FAIL: $name is neither installed by install.sh's SCRIPTS array nor exempted in this test"
+        FAILURES=$((FAILURES+1))
+    fi
+done
+
 # --- Hardcoded expected-file list: the writer and everything it needs to
 # import must be installed, or the review pipeline burns a paid model call
 # and persists nothing while exiting 0 at the hook level — the exact defect

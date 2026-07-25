@@ -118,30 +118,42 @@ done
 
 section "Hook Registration (Claude Code)"
 
+# Freshness (not just registration) is checked via sl_check_hook_fresh(),
+# shared with scripts/doctor.sh in lib/config.sh, so the two diagnostic
+# tools can never disagree about the same hook config file by construction.
+# A prior version of this check here substring-matched only the script name
+# anywhere in the file and reported [PASS] even when the registered command
+# pointed at a stale, no-longer-resolved scripts path -- exactly the Task 7c
+# bug class, and worse for being the tool that actually ships in every
+# install while doctor.sh (which caught it) did not yet.
 SETTINGS_FILE="${HOME}/.claude/settings.json"
+if command -v python3 >/dev/null 2>&1; then
+    SL_SCRIPTS_DIR="$(python3 "${SCRIPT_DIR}/lib/paths.py" get scripts 2>/dev/null || true)"
+else
+    SL_SCRIPTS_DIR=""
+fi
+
 if [[ -f "$SETTINGS_FILE" ]]; then
-    # Check for PostToolUse hook (turn counter)
-    if grep -q "turn-counter" "$SETTINGS_FILE" 2>/dev/null; then
-        pass "PostToolUse turn-counter hook registered"
-    else
-        fail "PostToolUse turn-counter hook not found in settings.json" \
-            "Add PostToolUse hook for turn-counter.sh to ~/.claude/settings.json"
-    fi
-
-    # Check for Stop hooks (session-review, index-session)
-    if grep -q "session-review" "$SETTINGS_FILE" 2>/dev/null; then
-        pass "Stop session-review hook registered"
-    else
-        fail "Stop session-review hook not found in settings.json" \
-            "Add Stop hook for session-review.sh to ~/.claude/settings.json"
-    fi
-
-    if grep -q "index-session" "$SETTINGS_FILE" 2>/dev/null; then
-        pass "Stop index-session hook registered"
-    else
-        fail "Stop index-session hook not found in settings.json" \
-            "Add Stop hook for index-session.sh to ~/.claude/settings.json"
-    fi
+    for pair in "turn-counter.sh:PostToolUse turn-counter" \
+                "session-review.sh:Stop session-review" \
+                "index-session.sh:Stop index-session"; do
+        script_name="${pair%%:*}"
+        label="${pair#*:}"
+        state="$(sl_check_hook_fresh "$SETTINGS_FILE" "$script_name" "$SL_SCRIPTS_DIR")"
+        case "$state" in
+            fresh)
+                pass "$label hook registered and points at the resolved scripts dir"
+                ;;
+            stale)
+                fail "$label hook registered but STALE -- does not point at ${SL_SCRIPTS_DIR}/${script_name}" \
+                    "Re-render the hook command in ~/.claude/settings.json (e.g. re-run install.sh) so it points at ${SL_SCRIPTS_DIR}/${script_name}"
+                ;;
+            missing)
+                fail "$label hook not found in settings.json" \
+                    "Add $label hook for ${script_name} to ~/.claude/settings.json"
+                ;;
+        esac
+    done
 else
     warn "settings.json not found (normal on a Copilot-only install -- Claude Code hooks live here, Copilot hooks are registered separately under ~/.copilot/hooks/)"
 fi

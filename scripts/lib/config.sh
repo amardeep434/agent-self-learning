@@ -103,6 +103,40 @@ export SL_HOME SL_STATE_DIR SL_SKILLS_DIR SL_MEMORY_DIR SL_LOG_DIR SL_SEARCH_DB 
 # if the timestamp is empty or unparsable by every strategy, matching the
 # previous `|| echo 0` fallback behavior at call sites.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# sl_check_hook_fresh <hook-config-file> <script-basename> <resolved-scripts-dir>
+#
+# Shared by scripts/doctor.sh and scripts/self-learning-health.sh so the two
+# diagnostic tools can never disagree about the same hook config by
+# construction. A prior version of this check (self-learning-health.sh)
+# substring-matched only the script *name* anywhere in the file, so a hook
+# config left pointing at a stale, no-longer-resolved scripts directory
+# still read as registered and healthy -- precisely the Task 7c bug class,
+# just invisible to the one tool that ships in a real install.
+#
+# Prints exactly one of:
+#   absent  - the hook config file itself does not exist
+#   missing - the file exists but never mentions <script-basename> at all
+#   stale   - it mentions <script-basename>, but not under <resolved-scripts-dir>
+#   fresh   - it mentions <script-basename> under <resolved-scripts-dir>
+# ---------------------------------------------------------------------------
+sl_check_hook_fresh() {
+    local file="$1" script_name="$2" scripts_dir="$3"
+    if [[ ! -f "$file" ]]; then
+        echo "absent"
+        return 0
+    fi
+    if ! grep -q -- "$script_name" "$file" 2>/dev/null; then
+        echo "missing"
+        return 0
+    fi
+    if [[ -n "$scripts_dir" ]] && grep -qF -- "${scripts_dir%/}/${script_name}" "$file" 2>/dev/null; then
+        echo "fresh"
+    else
+        echo "stale"
+    fi
+}
+
 sl_iso_to_epoch() {
     local ts="$1" epoch
     if [[ -z "$ts" ]]; then

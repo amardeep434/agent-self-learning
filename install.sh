@@ -197,6 +197,7 @@ SCRIPTS=(
     "coach-signals.py"
     "skillopt-run.sh"
     "persist-proposal.py"
+    "doctor.sh"
 )
 
 DEST_DIR="$SL_SCRIPTS"
@@ -406,6 +407,10 @@ echo "  0 3 * * 0 bash ${SL_SCRIPTS}/curator-run.sh >> ${SL_LOGS}/curator/cron.l
 echo ""
 echo "Verify installation:"
 echo "  bash ${SL_SCRIPTS}/self-learning-health.sh"
+echo ""
+echo "Diagnose state at any time (resolved paths, writability, detected"
+echo "harnesses, legacy store, and any silent persistence failures):"
+echo "  bash ${SL_SCRIPTS}/doctor.sh"
 echo ""
 if [[ -d "${HOME}/.copilot" ]]; then
     echo "GitHub Copilot CLI: hooks were installed to ~/.copilot/hooks/self-learning.json"

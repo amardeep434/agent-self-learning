@@ -138,11 +138,19 @@ check "missing settings.json never reported as FAIL" "0" \
 # Now the flip side: WITH ~/.claude/settings.json present (Claude Code IS
 # installed), the check must still correctly detect registered hooks there —
 # proving this is a real, working check and not merely disabled.
+#
+# The hook commands below MUST point at the actual resolved scripts dir
+# (${STORE}/scripts), not a placeholder path: self-learning-health.sh now
+# shares sl_check_hook_fresh() with scripts/doctor.sh (Task 9 fix round 1),
+# which verifies the hook command points at the currently-resolved scripts
+# directory, not merely that the script's name appears somewhere in the
+# file. A placeholder path here would (correctly) read as STALE.
+RESOLVED_SCRIPTS="${STORE}/scripts"
 mkdir -p "${TMP_HOME}/.claude"
-cat > "${TMP_HOME}/.claude/settings.json" <<'EOF'
-{"hooks":{"PostToolUse":[{"hooks":[{"command":"bash .../turn-counter.sh"}]}],
-"Stop":[{"hooks":[{"command":"bash .../session-review.sh"}]},
-        {"hooks":[{"command":"bash .../index-session.sh"}]}]}}
+cat > "${TMP_HOME}/.claude/settings.json" <<EOF
+{"hooks":{"PostToolUse":[{"hooks":[{"command":"bash ${RESOLVED_SCRIPTS}/turn-counter.sh"}]}],
+"Stop":[{"hooks":[{"command":"bash ${RESOLVED_SCRIPTS}/session-review.sh"}]},
+        {"hooks":[{"command":"bash ${RESOLVED_SCRIPTS}/index-session.sh"}]}]}}
 EOF
 HEALTH_OUT2="$(run_env bash "${SCRIPT_DIR}/scripts/self-learning-health.sh" 2>&1)" || true
 check "with settings.json present, turn-counter hook detected" "yes" \

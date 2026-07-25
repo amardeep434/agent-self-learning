@@ -115,11 +115,23 @@ rm -rf "$TMP_HOME"
 
 # 4c. Populated log: count, bounded tail, recency, unmissable marker, and
 #     (this is the content-vs-exit-code check) exit code 1.
+#
+# Fixture note: 8 lines with 8 GENUINELY DISTINCT dates (2020-01-01 through
+# 2020-01-07, then "now"). An earlier version of this fixture used
+# `$((i % 9 + 1))` over `i in 1..7`, which never actually produced
+# "2020-01-01" -- so the "old entry excluded from the tail" assertion below
+# passed regardless of what doctor.sh did with the log (proven by mutating
+# doctor's `tail -n 5` to `head -n 5` -- printing the OLDEST five entries,
+# i.e. surfacing six-month-old failures while hiding this morning's -- and
+# watching all assertions still pass). Distinct dates make both directions
+# of the assertion meaningful: an entry that a correct tail would exclude
+# must be genuinely absent, and one it would include must be genuinely
+# present.
 TMP_HOME="$(mktemp -d)"
 mkdir -p "${TMP_HOME}/store/logs"
 LOG="${TMP_HOME}/store/logs/persist-failures.log"
 for i in 1 2 3 4 5 6 7; do
-    printf '2020-01-0%dT00:00:00Z session-review: pipeline failed (status 1)\n' "$((i % 9 + 1))" >> "$LOG"
+    printf '2020-01-0%dT00:00:00Z session-review: pipeline failed (status 1)\n' "$i" >> "$LOG"
 done
 NOW_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 printf '%s session-review: pipeline failed (status 1)\n' "$NOW_TS" >> "$LOG"
@@ -134,11 +146,19 @@ contains "populated log: visually unmissable marker" "$OUT" "!!!"
 contains "populated log: bounded tail present" "$OUT" "bounded tail, last 5 of 8"
 check "populated log flips exit code to 1 (content-driven, not just text)" "1" "$RC"
 
-# The tail must actually be bounded: an old (2020) entry must not appear in
-# the printed tail once 8 entries exist and only the last 5 are shown.
+# A correct `tail -n 5` over these 8 lines prints 2020-01-04 through
+# 2020-01-07 plus "now" -- excluding 2020-01-01 through 2020-01-03. Assert
+# BOTH directions: an entry the tail must include is genuinely present, and
+# one it must exclude is genuinely absent. Either alone survived the
+# tail->head mutation before (see fixture note above); together they do not.
+contains "populated log: bounded tail includes a recent-but-not-newest entry" "$OUT" "2020-01-06"
 case "$OUT" in
-    *"2020-01-01"*) echo "FAIL: doctor printed an entry that should have been outside the bounded tail"; FAILURES=$((FAILURES+1)) ;;
-    *) echo "PASS: bounded tail excludes older entries" ;;
+    *"2020-01-01"*) echo "FAIL: doctor printed an entry that should have been outside the bounded tail (tail vs head regression)"; FAILURES=$((FAILURES+1)) ;;
+    *) echo "PASS: bounded tail excludes the oldest entry" ;;
+esac
+case "$OUT" in
+    *"2020-01-02"*) echo "FAIL: doctor printed an entry that should have been outside the bounded tail (tail vs head regression)"; FAILURES=$((FAILURES+1)) ;;
+    *) echo "PASS: bounded tail excludes the second-oldest entry" ;;
 esac
 
 rm -rf "$TMP_HOME"
@@ -166,21 +186,85 @@ check "claude-absent run still exits healthy" "0" "$RC"
 rm -rf "$TMP_HOME" "$FAKE_BIN"
 
 # ---------------------------------------------------------------------------
-# 6. Stale Claude Code hook config is flagged.
+# 6. Stale/fresh Claude Code hook config is flagged -- and doctor.sh and
+#    self-learning-health.sh must reach the SAME verdict on the same file,
+#    since they share sl_check_hook_fresh() from scripts/lib/config.sh.
+#
+#    Stub `claude` (and `copilot`, for good measure) onto PATH so this runs
+#    unconditionally instead of silently skipping on any CI runner that
+#    happens not to have the real binary installed -- a check that only
+#    sometimes runs is this project's signature failure mode one level
+#    removed. Content of the stubs is irrelevant: both scripts only ever
+#    call `command -v claude` / `command -v copilot` to test presence, never
+#    execute them.
 # ---------------------------------------------------------------------------
+STUB_BIN="$(mktemp -d)"
+for _bin in claude copilot; do
+    cat > "${STUB_BIN}/${_bin}" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "${STUB_BIN}/${_bin}"
+done
+STUB_PATH="${STUB_BIN}:${PATH}"
+
+run_doctor() {
+    env -i HOME="$1" PATH="$STUB_PATH" AGENT_LEARNING_HOME="$2" \
+        SL_CONFIG_FILE="/nonexistent/x.conf" bash "${SCRIPT_DIR}/scripts/doctor.sh" 2>&1
+}
+# Deliberately NOT run with --quiet: that suppresses pass() lines, which
+# would make the "fresh hook reported as registered" assertion below
+# vacuous (nothing to match against).
+run_health() {
+    env -i HOME="$1" PATH="$STUB_PATH" AGENT_LEARNING_HOME="$2" \
+        SL_CONFIG_FILE="/nonexistent/x.conf" bash "${SCRIPT_DIR}/scripts/self-learning-health.sh" 2>&1
+}
+
+# 6a. Stale: hook command points at a path that is not the resolved scripts dir.
 TMP_HOME="$(mktemp -d)"
+STORE="${TMP_HOME}/store"
 mkdir -p "${TMP_HOME}/.claude"
 cat > "${TMP_HOME}/.claude/settings.json" <<'JSON'
-{"hooks":{"PostToolUse":[{"command":"bash /some/very/stale/path/turn-counter.sh"}]}}
+{"hooks":{"PostToolUse":[{"command":"bash /some/very/stale/path/turn-counter.sh"}]},"Stop":[{"command":"bash /some/very/stale/path/session-review.sh"},{"command":"bash /some/very/stale/path/index-session.sh"}]}
 JSON
-OUT=$(env -i HOME="$TMP_HOME" PATH="$PATH" AGENT_LEARNING_HOME="${TMP_HOME}/store" \
-      SL_CONFIG_FILE="/nonexistent/x.conf" bash "${SCRIPT_DIR}/scripts/doctor.sh" 2>&1)
-if printf '%s' "$OUT" | grep -q "claude   present"; then
-    contains "stale hook path is flagged" "$OUT" "STALE"
+
+DOCTOR_OUT="$(run_doctor "$TMP_HOME" "$STORE")"
+HEALTH_OUT="$(run_health "$TMP_HOME" "$STORE")"
+
+contains "doctor: stale hook path is flagged" "$DOCTOR_OUT" "STALE"
+contains "self-learning-health: stale hook path is flagged" "$HEALTH_OUT" "STALE"
+
+# The actual contradiction the review round found: health.sh reporting
+# [PASS] for a hook it never verified the path of. Assert it no longer does
+# so for the specific hook under test.
+if printf '%s' "$HEALTH_OUT" | grep -q "turn-counter hook registered and points"; then
+    echo "FAIL: self-learning-health.sh reported turn-counter hook as fresh/registered despite a stale path"
+    FAILURES=$((FAILURES+1))
 else
-    echo "SKIP: stale-hook test (no 'claude' binary on PATH on this machine)"
+    echo "PASS: self-learning-health.sh does not falsely report the stale turn-counter hook as fresh"
 fi
+
 rm -rf "$TMP_HOME"
+
+# 6b. Fresh: hook command points exactly at the resolved scripts dir. Both
+# tools must agree it is healthy, with neither reporting STALE.
+TMP_HOME="$(mktemp -d)"
+STORE="${TMP_HOME}/store"
+RESOLVED_SCRIPTS="${STORE}/scripts"
+mkdir -p "${TMP_HOME}/.claude"
+cat > "${TMP_HOME}/.claude/settings.json" <<JSON
+{"hooks":{"PostToolUse":[{"command":"bash ${RESOLVED_SCRIPTS}/turn-counter.sh"}],"Stop":[{"command":"bash ${RESOLVED_SCRIPTS}/session-review.sh"},{"command":"bash ${RESOLVED_SCRIPTS}/index-session.sh"}]}}
+JSON
+
+DOCTOR_OUT="$(run_doctor "$TMP_HOME" "$STORE")"
+HEALTH_OUT="$(run_health "$TMP_HOME" "$STORE")"
+
+not_contains "doctor: fresh hook path is not flagged STALE" "$DOCTOR_OUT" "STALE"
+not_contains "self-learning-health: fresh hook path is not flagged STALE" "$HEALTH_OUT" "STALE"
+contains "doctor: fresh hook path reported as registered/resolved" "$DOCTOR_OUT" "points at resolved scripts dir"
+contains "self-learning-health: fresh hook path reported as registered/resolved" "$HEALTH_OUT" "registered and points at the resolved scripts dir"
+
+rm -rf "$TMP_HOME" "$STUB_BIN"
 
 # ---------------------------------------------------------------------------
 # Summary
