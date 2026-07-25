@@ -41,7 +41,27 @@ class TestResolveHome(unittest.TestCase):
         env = self._env(HOME="/home/u")
         self.assertEqual(
             set(paths.resolve_all(env, platform="linux")),
-            {"home", "state", "skills", "memory", "logs", "sessions_db", "config_file"})
+            {"home", "state", "skills", "memory", "logs", "sessions_db", "config_file", "scripts"})
+
+    def test_scripts_key_explicit_override(self):
+        env = self._env(AGENT_LEARNING_HOME="/tmp/explicit")
+        self.assertEqual(paths.resolve_all(env, platform="linux")["scripts"],
+                         Path("/tmp/explicit/scripts"))
+
+    def test_scripts_key_xdg(self):
+        env = self._env(XDG_DATA_HOME="/tmp/xdg", HOME="/home/u")
+        self.assertEqual(paths.resolve_all(env, platform="linux")["scripts"],
+                         Path("/tmp/xdg/agent-learning/scripts"))
+
+    def test_scripts_key_windows_localappdata(self):
+        env = self._env(LOCALAPPDATA="C:\\Users\\u\\AppData\\Local", HOME="C:\\Users\\u")
+        self.assertEqual(paths.resolve_all(env, platform="win32")["scripts"],
+                         Path("C:\\Users\\u\\AppData\\Local") / "agent-learning" / "scripts")
+
+    def test_scripts_key_linux_default(self):
+        env = self._env(HOME="/home/u")
+        self.assertEqual(paths.resolve_all(env, platform="linux")["scripts"],
+                         Path("/home/u/.local/share/agent-learning/scripts"))
 
 
 class TestLegacyDetection(unittest.TestCase):

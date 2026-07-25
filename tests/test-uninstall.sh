@@ -41,5 +41,38 @@ check "memory removed on full uninstall" "no" "$([[ -f "$HOME/.claude/memory/MEM
 check "skills removed on full uninstall" "no" "$([[ -d "$HOME/.claude/learned-skills" ]] && echo yes || echo no)"
 check "search db removed on full uninstall" "no" "$([[ -f "$HOME/.claude/sessions/search.db" ]] && echo yes || echo no)"
 
+# 3) Both legacy (~/.claude) and resolved (vendor-neutral store) locations are
+# cleaned in a single run — a user may have installed before and after the
+# harness-neutral-persistence change (design decision 5).
+export AGENT_LEARNING_HOME="${HOME}/store"
+mkdir -p "${HOME}/.claude/scripts/self-learning" "${HOME}/.claude/state/self-learning" \
+         "${HOME}/.claude/logs/reviews" "${HOME}/.claude/logs/curator" \
+         "${HOME}/.claude/memory" "${HOME}/.claude/learned-skills/s1" "${HOME}/.claude/sessions" \
+         "${AGENT_LEARNING_HOME}/scripts" "${AGENT_LEARNING_HOME}/state" \
+         "${AGENT_LEARNING_HOME}/logs/reviews" "${AGENT_LEARNING_HOME}/logs/curator" \
+         "${AGENT_LEARNING_HOME}/memory" "${AGENT_LEARNING_HOME}/learned-skills/s1" \
+         "${AGENT_LEARNING_HOME}/sessions" "${HOME}/.copilot/hooks"
+touch "${HOME}/.claude/scripts/self-learning/turn-counter.sh" \
+      "${HOME}/.claude/self-learning.conf" \
+      "${HOME}/.copilot/hooks/self-learning.json" \
+      "${HOME}/.claude/memory/MEMORY.md" \
+      "${HOME}/.claude/learned-skills/s1/SKILL.md" \
+      "${HOME}/.claude/sessions/search.db" \
+      "${AGENT_LEARNING_HOME}/scripts/turn-counter.sh" \
+      "${AGENT_LEARNING_HOME}/self-learning.conf" \
+      "${AGENT_LEARNING_HOME}/memory/MEMORY.md" \
+      "${AGENT_LEARNING_HOME}/learned-skills/s1/SKILL.md" \
+      "${AGENT_LEARNING_HOME}/sessions/search.db"
+
+bash "${SCRIPT_DIR}/uninstall.sh" --yes
+check "legacy scripts removed" "no" "$([[ -d "$HOME/.claude/scripts/self-learning" ]] && echo yes || echo no)"
+check "legacy memory removed" "no" "$([[ -f "$HOME/.claude/memory/MEMORY.md" ]] && echo yes || echo no)"
+check "resolved scripts removed" "no" "$([[ -d "${AGENT_LEARNING_HOME}/scripts" ]] && echo yes || echo no)"
+check "resolved state removed" "no" "$([[ -d "${AGENT_LEARNING_HOME}/state" ]] && echo yes || echo no)"
+check "resolved memory removed" "no" "$([[ -f "${AGENT_LEARNING_HOME}/memory/MEMORY.md" ]] && echo yes || echo no)"
+check "resolved skills removed" "no" "$([[ -d "${AGENT_LEARNING_HOME}/learned-skills" ]] && echo yes || echo no)"
+check "resolved search db removed" "no" "$([[ -f "${AGENT_LEARNING_HOME}/sessions/search.db" ]] && echo yes || echo no)"
+unset AGENT_LEARNING_HOME
+
 if [[ "$FAILURES" -gt 0 ]]; then exit 1; fi
 echo "All uninstall tests passed."

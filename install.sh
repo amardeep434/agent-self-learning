@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# One-command installer for the Claude Code self-learning system.
+# One-command installer for the agent-self-learning system.
 #
 # Creates directories, copies scripts, initializes the SQLite database,
-# and prints instructions for registering hooks in settings.json.
+# and prints instructions for registering hooks with each harness.
 #
 # Usage:
 #   bash install.sh              # Install everything
@@ -12,7 +12,10 @@
 #
 # Prerequisites:
 #   - jq, sqlite3, python3 must be installed
-#   - ~/.claude/ directory must exist (created by Claude Code)
+#
+# Install locations are resolved by scripts/lib/paths.py (vendor-neutral;
+# never inside ~/.claude by default). Claude Code and GitHub Copilot CLI are
+# adapters on top of that shared store, never a dependency of it.
 
 set -euo pipefail
 
@@ -76,13 +79,8 @@ do_chmod() {
 
 # --- Preflight checks ---
 
-echo "=== Claude Code Self-Learning System Installer ==="
+echo "=== agent-self-learning Installer ==="
 echo ""
-
-if [[ ! -d "${HOME}/.claude" ]]; then
-    echo "Error: ~/.claude/ does not exist. Install Claude Code first." >&2
-    exit 1
-fi
 
 MISSING_DEPS=()
 for cmd in jq sqlite3 python3; do
@@ -102,21 +100,75 @@ if [[ "$DRY_RUN" == "true" ]]; then
     echo ""
 fi
 
+# --- Resolve every install path exactly once, through paths.py ---
+#
+# Global constraint: paths are computed in exactly one place
+# (scripts/lib/paths.py). Bash obtains paths by calling it, once, here — never
+# by recomputing them or calling paths.py in a loop.
+
+PATHS_PY="${SCRIPT_DIR}/scripts/lib/paths.py"
+if [[ ! -f "$PATHS_PY" ]]; then
+    echo "Error: ${PATHS_PY} not found" >&2
+    exit 1
+fi
+
+SL_HOME="" SL_STATE="" SL_SKILLS="" SL_MEMORY="" SL_LOGS="" \
+SL_SESSIONS_DB="" SL_CONFIG_FILE="" SL_SCRIPTS=""
+while IFS='=' read -r _sl_key _sl_val; do
+    case "$_sl_key" in
+        home)        SL_HOME="$_sl_val" ;;
+        state)       SL_STATE="$_sl_val" ;;
+        skills)      SL_SKILLS="$_sl_val" ;;
+        memory)      SL_MEMORY="$_sl_val" ;;
+        logs)        SL_LOGS="$_sl_val" ;;
+        sessions_db) SL_SESSIONS_DB="$_sl_val" ;;
+        config_file) SL_CONFIG_FILE="$_sl_val" ;;
+        scripts)     SL_SCRIPTS="$_sl_val" ;;
+    esac
+done < <(python3 "$PATHS_PY" all)
+
+if [[ -z "$SL_HOME" || -z "$SL_SCRIPTS" ]]; then
+    echo "Error: could not resolve install paths via ${PATHS_PY}" >&2
+    exit 1
+fi
+
+echo "Install target (resolved by paths.py): ${SL_HOME}"
+echo ""
+
+# Legacy-install detection (design decision 4): preserve-and-notify, never
+# migrate. This only reads ~/.claude to decide whether to print a note; it
+# never writes to or moves anything under it.
+LEGACY_HOME="$(python3 -c "
+import sys
+sys.path.insert(0, '${SCRIPT_DIR}/scripts/lib')
+import paths
+found = paths.legacy_home()
+print(found or '')
+" 2>/dev/null || true)"
+
+if [[ -n "$LEGACY_HOME" ]]; then
+    echo "NOTE: a legacy install was found at ${LEGACY_HOME}."
+    echo "      It is left untouched and will keep working as-is."
+    echo "      This install writes to the vendor-neutral store above instead;"
+    echo "      the two are independent until you migrate deliberately."
+    echo ""
+fi
+
 # --- Step 1: Create directories ---
 
 echo "Step 1: Creating directories..."
 
 DIRS=(
-    "${HOME}/.claude/state/self-learning"
-    "${HOME}/.claude/learned-skills"
-    "${HOME}/.claude/learned-skills/.archive"
-    "${HOME}/.claude/sessions"
-    "${HOME}/.claude/logs/reviews"
-    "${HOME}/.claude/logs/curator"
-    "${HOME}/.claude/backups/curator"
-    "${HOME}/.claude/scripts/self-learning"
-    "${HOME}/.claude/scripts/self-learning/prompts"
-    "${HOME}/.claude/memory"
+    "$SL_STATE"
+    "$SL_SKILLS"
+    "${SL_SKILLS}/.archive"
+    "$(dirname "$SL_SESSIONS_DB")"
+    "${SL_LOGS}/reviews"
+    "${SL_LOGS}/curator"
+    "${SL_HOME}/backups/curator"
+    "$SL_SCRIPTS"
+    "${SL_SCRIPTS}/prompts"
+    "$SL_MEMORY"
 )
 
 for dir in "${DIRS[@]}"; do
@@ -146,7 +198,7 @@ SCRIPTS=(
     "skillopt-run.sh"
 )
 
-DEST_DIR="${HOME}/.claude/scripts/self-learning"
+DEST_DIR="$SL_SCRIPTS"
 
 for script in "${SCRIPTS[@]}"; do
     src="${SCRIPT_DIR}/scripts/${script}"
@@ -166,6 +218,9 @@ for lib in "${SCRIPT_DIR}/scripts/lib/"*.sh; do
         do_copy "$lib" "${DEST_DIR}/lib/$(basename "$lib")"
     fi
 done
+if [[ -f "${SCRIPT_DIR}/scripts/lib/paths.py" ]]; then
+    do_copy "${SCRIPT_DIR}/scripts/lib/paths.py" "${DEST_DIR}/lib/paths.py"
+fi
 
 echo ""
 
@@ -223,7 +278,7 @@ echo ""
 echo "Step 4: Copying configuration..."
 
 CONFIG_SRC="${SCRIPT_DIR}/config/self-learning.conf"
-CONFIG_DST="${HOME}/.claude/self-learning.conf"
+CONFIG_DST="$SL_CONFIG_FILE"
 
 if [[ -f "$CONFIG_SRC" ]]; then
     if [[ -f "$CONFIG_DST" ]]; then
@@ -239,11 +294,15 @@ echo ""
 echo "Step 4b: Copilot CLI adapter (optional)..."
 if [[ -d "${HOME}/.copilot" ]]; then
     do_mkdir "${HOME}/.copilot/hooks"
+    COPILOT_HOOK_SRC="${SCRIPT_DIR}/config/copilot-hooks.json"
     COPILOT_HOOK_DST="${HOME}/.copilot/hooks/self-learning.json"
     if [[ -f "$COPILOT_HOOK_DST" ]]; then
         echo "  Already exists: $COPILOT_HOOK_DST (skipping)"
+    elif [[ "$DRY_RUN" == "true" ]]; then
+        echo "[DRY RUN] render ${COPILOT_HOOK_SRC} -> ${COPILOT_HOOK_DST} (__SL_SCRIPTS_DIR__ -> ${SL_SCRIPTS})"
     else
-        do_copy "${SCRIPT_DIR}/config/copilot-hooks.json" "$COPILOT_HOOK_DST"
+        sed "s|__SL_SCRIPTS_DIR__|${SL_SCRIPTS}|g" "$COPILOT_HOOK_SRC" > "$COPILOT_HOOK_DST"
+        echo "  Rendered: copilot-hooks.json -> $COPILOT_HOOK_DST"
     fi
 else
     echo "  ~/.copilot not found — Copilot CLI not installed; skipping (re-run install.sh after installing it)"
@@ -257,7 +316,7 @@ echo "Step 5: Initializing session search database..."
 
 SCHEMA_SRC="${SCRIPT_DIR}/schema/session-search-schema.sql"
 SCHEMA_DST="${DEST_DIR}/session-search-schema.sql"
-DB_PATH="${HOME}/.claude/sessions/search.db"
+DB_PATH="$SL_SESSIONS_DB"
 
 if [[ -f "$SCHEMA_SRC" ]]; then
     do_copy "$SCHEMA_SRC" "$SCHEMA_DST"
@@ -283,7 +342,7 @@ echo ""
 
 echo "Step 6: Initializing learned skills tracker..."
 
-USAGE_FILE="${HOME}/.claude/learned-skills/.usage.json"
+USAGE_FILE="${SL_SKILLS}/.usage.json"
 if [[ ! -f "$USAGE_FILE" ]]; then
     if [[ "$DRY_RUN" != "true" ]]; then
         echo '{}' > "$USAGE_FILE"
@@ -303,7 +362,8 @@ echo "========================================"
 echo "  Installation complete!"
 echo "========================================"
 echo ""
-echo "NEXT STEP: Register hooks in ~/.claude/settings.json"
+echo "NEXT STEP (Claude Code only): Register hooks in ~/.claude/settings.json"
+echo "This is Claude Code's own config directory (not this project's store)."
 echo ""
 echo "Add the following to your settings.json (merge with existing hooks):"
 echo ""
@@ -312,19 +372,19 @@ echo '  "hooks": {'
 echo '    "PostToolUse": ['
 echo '      {'
 echo '        "matcher": "",'
-echo '        "command": "bash ~/.claude/scripts/self-learning/turn-counter.sh",'
+echo "        \"command\": \"bash ${SL_SCRIPTS}/turn-counter.sh\","
 echo '        "timeout": 3000'
 echo '      }'
 echo '    ],'
 echo '    "Stop": ['
 echo '      {'
 echo '        "matcher": "",'
-echo '        "command": "bash ~/.claude/scripts/self-learning/session-review.sh",'
+echo "        \"command\": \"bash ${SL_SCRIPTS}/session-review.sh\","
 echo '        "timeout": 10000'
 echo '      },'
 echo '      {'
 echo '        "matcher": "",'
-echo '        "command": "bash ~/.claude/scripts/self-learning/index-session.sh",'
+echo "        \"command\": \"bash ${SL_SCRIPTS}/index-session.sh\","
 echo '        "timeout": 15000'
 echo '      }'
 echo '    ]'
@@ -332,8 +392,12 @@ echo '  }'
 echo '}'
 echo ""
 echo "Optional: Add weekly curator cron job:"
-echo "  0 3 * * 0 bash ~/.claude/scripts/self-learning/curator-run.sh >> ~/.claude/logs/curator/cron.log 2>&1"
+echo "  0 3 * * 0 bash ${SL_SCRIPTS}/curator-run.sh >> ${SL_LOGS}/curator/cron.log 2>&1"
 echo ""
 echo "Verify installation:"
-echo "  bash ~/.claude/scripts/self-learning/self-learning-health.sh"
+echo "  bash ${SL_SCRIPTS}/self-learning-health.sh"
 echo ""
+if [[ -d "${HOME}/.copilot" ]]; then
+    echo "GitHub Copilot CLI: hooks were installed to ~/.copilot/hooks/self-learning.json"
+    echo ""
+fi

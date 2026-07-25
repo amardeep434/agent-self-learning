@@ -85,6 +85,13 @@ else
     echo "PASS: copilot path does not invoke claude"
 fi
 
+# The shipped Copilot hook config template must never hardcode ~/.claude — it
+# is rendered at install time with the resolved, vendor-neutral scripts path.
+# This closes the vacuity documented above: this file previously only
+# exercised the script directly and never inspected what install.sh ships.
+_hook_template_claude_count="$(grep -c '\.claude' "${SCRIPT_DIR}/config/copilot-hooks.json" || true)"
+check "shipped copilot-hooks.json template contains no ~/.claude" "0" "$_hook_template_claude_count"
+
 rm -rf "$TMP_HOME" "$FAKE_BIN"
 [[ "$FAILURES" -gt 0 ]] && exit 1
 echo "All claude-absent tests passed."

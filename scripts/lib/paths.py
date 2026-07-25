@@ -30,6 +30,7 @@ _SUBPATHS = {
     "logs": ("logs",),
     "sessions_db": ("sessions", "search.db"),
     "config_file": ("self-learning.conf",),
+    "scripts": ("scripts",),
 }
 
 
