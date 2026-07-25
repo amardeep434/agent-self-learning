@@ -14,9 +14,12 @@
 > write-path security tests (symlink/hardlink/`O_NOFOLLOW`) and 3 shell assertions skip there,
 > each printed with its reason and gated on a probe that verifies the limitation rather than
 > assuming it from the platform name.
-> **Live Copilot CLI check: DONE (2026-07-25), with one residual.** Run against a real
-> `copilot` 1.0.73 with a real (paid) model call, real `$HOME` for auth, and
-> `AGENT_LEARNING_HOME` pointed at a throwaway store. Two parts:
+> **Live Copilot CLI check: DONE (2026-07-25), with one residual.** Run against whatever
+> `copilot` was installed that day (1.0.73 at that moment; it auto-updates, and 1.0.75 has
+> since been observed installed -- this project targets "current, authenticated `copilot`
+> on PATH," never a pinned version, so read any specific number here as a point-in-time
+> observation from that run, not a requirement) with a real (paid) model call, real `$HOME`
+> for auth, and `AGENT_LEARNING_HOME` pointed at a throwaway store. Two parts:
 > (1) `scripts/copilot-session-review.sh` invoked for real end-to-end — the detached pipeline
 > completed and `persist-proposal.py` accepted a valid, well-formed **empty** proposal
 > (`{"written": [], "skipped": [], "bytes": 0}`). Correct: headless `copilot -p` has no session

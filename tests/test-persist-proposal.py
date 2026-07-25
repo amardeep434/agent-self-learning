@@ -449,6 +449,25 @@ class TestInternalGuardsUnreachableThroughSchema(unittest.TestCase):
                 else:
                     self.mod.os.O_NOFOLLOW = original
 
+    def test_read_existing_rejects_invalid_utf8_as_persist_error(self):
+        """Item 3 (deferred minor): _read_existing's own UnicodeDecodeError
+        guard had no dedicated test -- it was only exercised incidentally via
+        a broader `except ValueError` elsewhere in the module, so a
+        regression here (e.g. the guard being deleted, or narrowed to catch
+        something other than UnicodeDecodeError) could pass the existing
+        suite while a real invalid-UTF-8 existing file went back to raising
+        a raw UnicodeDecodeError instead of the documented PersistError.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "MEMORY.md"
+            # 0xFF is not valid anywhere in UTF-8 (not a valid lead byte, not
+            # a valid continuation byte), so this is guaranteed to fail
+            # decoding regardless of what otherwise-valid bytes surround it.
+            target.write_bytes(b"some text \xff more text")
+            with self.assertRaises(self.mod.PersistError) as ctx:
+                self.mod._read_existing(target)
+            self.assertIn("not valid UTF-8", str(ctx.exception))
+
 
 class TestDirFdWritePath(unittest.TestCase):
     """fix-p3-toctou: exercises _write_all_fd directly (rather than only

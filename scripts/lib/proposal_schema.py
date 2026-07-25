@@ -26,6 +26,14 @@ ALLOWED_MODES = frozenset({"replace", "append"})
 SKILL_NAME_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 
 _FENCE = "```"
+# Deferred minor (Item 3): bounds how many fenced code-block candidates
+# extract_proposal() will scan looking for a valid proposal JSON payload.
+# Fail-closed by construction: raising or lowering this number can only
+# change whether a VALID proposal is found (a legitimate one buried past the
+# 10th fence in reviewer chatter would be missed), never let an INVALID or
+# adversarial payload be accepted -- every candidate this loop yields still
+# goes through the same validate_proposal() checks as candidate #1. There is
+# no value of this constant that turns a rejection into an acceptance.
 _MAX_FENCE_CANDIDATES = 10
 
 _WINDOWS_RESERVED = frozenset(

@@ -2,7 +2,14 @@
 # tests/test-session-review.sh
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+TMP=$(mktemp -d)
+# Item 3 (deferred minor): this file allocates additional temp dirs further
+# down (TMP_HOME/FAKE_BIN, TMP6) that used to be cleaned only via an explicit
+# `rm -rf` on the success path -- an early `exit 1` leaked them. One EXIT
+# trap covering every temp dir this script ever creates, referencing the
+# later variables via ${VAR:-} so it's safe to register before they're set
+# (the trap body is expanded when EXIT fires, not when trap is registered).
+trap 'rm -rf "$TMP" "${TMP_HOME:-}" "${FAKE_BIN:-}" "${TMP6:-}"' EXIT
 export SL_HOME="$TMP" SL_STATE_DIR="$TMP/state" SL_LOG_DIR="$TMP/logs" SL_CONFIG_FILE="/nonexistent"
 export SL_COACH_SIGNALS_FILE="$TMP/state/coach-signals.json"
 mkdir -p "$TMP/state" "$TMP/bin"
@@ -101,7 +108,6 @@ if [[ -f "${TMP_HOME}/store/memory/MEMORY.md" ]]; then
 else
     echo "FAIL: MEMORY.md was not written by the writer"; FAILURES=$((FAILURES+1))
 fi
-rm -rf "$TMP_HOME" "$FAKE_BIN"
 
 # I8: the prompt used to state a dot-inclusive skill-name charset
 # (^[a-z0-9][a-z0-9._-]*$) that contradicted proposal_schema.py's actual
@@ -146,7 +152,6 @@ check "isMeta turn did NOT reach the prompt" "no" \
     "$(grep -q 'Continue from where you left off' "$FAKE_CLAUDE_LOG" && echo yes || echo no)"
 check "transcript section framed as untrusted data" "yes" \
     "$(grep -q 'untrusted conversation data' "$FAKE_CLAUDE_LOG" && echo yes || echo no)"
-rm -rf "$TMP6"
 
 # 7) Missing transcript_path is logged visibly to persist-failures.log,
 # never a silent empty review.

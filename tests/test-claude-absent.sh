@@ -10,6 +10,11 @@ check() { if [[ "$2" == "$3" ]]; then echo "PASS: $1"; else echo "FAIL: $1 (expe
 
 TMP_HOME="$(mktemp -d)"
 FAKE_BIN="$(mktemp -d)"
+# Item 3 (deferred minor): the prior single `rm -rf` at the bottom of this
+# file only ran on the success path -- an early `exit 1` (e.g. from `set -e`
+# tripping on an unexpected command failure) leaked both temp dirs. A trap
+# runs on every exit path, not just the fall-through one.
+trap 'rm -rf "$TMP_HOME" "$FAKE_BIN"' EXIT
 
 # A PATH containing copilot and the system basics, but deliberately no `claude`.
 cat > "${FAKE_BIN}/copilot" <<'FAKE'
@@ -92,6 +97,5 @@ fi
 _hook_template_claude_count="$(grep -c '\.claude' "${SCRIPT_DIR}/config/copilot-hooks.json" || true)"
 check "shipped copilot-hooks.json template contains no ~/.claude" "0" "$_hook_template_claude_count"
 
-rm -rf "$TMP_HOME" "$FAKE_BIN"
 [[ "$FAILURES" -gt 0 ]] && exit 1
 echo "All claude-absent tests passed."

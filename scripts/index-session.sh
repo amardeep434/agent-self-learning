@@ -21,8 +21,21 @@ SESSIONS_DIR="${HOME}/.claude/projects"
 
 mkdir -p "$(dirname "$DB_PATH")"
 
+# Deferred minor (Item 3): DB_EXISTED must be captured BEFORE the
+# initialize-if-needed block below creates the file, and used to decide the
+# find strategy just after. A first run against a fresh store creates
+# DB_PATH with "now" as its mtime; every transcript that already existed
+# under SESSIONS_DIR (e.g. a machine migrating an existing ~/.claude/projects
+# history onto a fresh AGENT_LEARNING_HOME store) therefore predates the DB
+# and is NEVER newer than it -- "-newer $DB_PATH" would silently skip every
+# one of them forever, on the very first run, with no error and no log line.
+# That is the exact "exits 0 while doing nothing" pattern this project
+# exists to eliminate.
+DB_EXISTED=0
+[[ -f "$DB_PATH" ]] && DB_EXISTED=1
+
 # Initialize database if needed
-if [[ ! -f "$DB_PATH" ]]; then
+if [[ "$DB_EXISTED" -eq 0 ]]; then
     SCHEMA_FILE="${SCRIPT_DIR}/session-search-schema.sql"
     if [[ -f "$SCHEMA_FILE" ]]; then
         sqlite3 "$DB_PATH" < "$SCHEMA_FILE"
@@ -32,9 +45,31 @@ if [[ ! -f "$DB_PATH" ]]; then
     fi
 fi
 
-# Find the most recently modified JSONL file (the session that just ended)
-LATEST_SESSION=$(find "$SESSIONS_DIR" -name "*.jsonl" -newer "$DB_PATH" \
-    -type f 2>/dev/null | head -20)
+# On a first run (DB just created above), there is no meaningful "newer than
+# the DB" comparison -- index whatever transcripts already exist, bounded to
+# the most recent 20 by find's own mtime-sort so a large pre-existing history
+# cannot make a Stop hook run unboundedly long. On every subsequent run, keep
+# the original -newer filter: only the session(s) modified since the last
+# index pass.
+if [[ "$DB_EXISTED" -eq 0 ]]; then
+    # GNU `stat -c %Y`, falling back to BSD/macOS `stat -f %m` -- the same
+    # two-way fallback self-learning-health.sh already uses for a lock-file
+    # mtime, so no third mtime-reading convention is introduced here.
+    # Deliberately not `date -r <file>`: GNU date -r reads a file's mtime,
+    # but BSD/macOS date -r treats its argument as a Unix epoch INTEGER, not
+    # a filename -- silently sorting by a garbage value on macOS rather than
+    # failing loudly, exactly the kind of measured-on-one-platform mistake
+    # this project's cross-platform rules exist to prevent.
+    LATEST_SESSION=$(find "$SESSIONS_DIR" -name "*.jsonl" -type f 2>/dev/null \
+        | while IFS= read -r _f; do
+              _mtime=$(stat -c %Y "$_f" 2>/dev/null || stat -f %m "$_f" 2>/dev/null || echo 0)
+              printf '%s\t%s\n' "$_mtime" "$_f"
+          done \
+        | sort -rn | cut -f2- | head -20)
+else
+    LATEST_SESSION=$(find "$SESSIONS_DIR" -name "*.jsonl" -newer "$DB_PATH" \
+        -type f 2>/dev/null | head -20)
+fi
 
 if [[ -z "$LATEST_SESSION" ]]; then
     exit 0

@@ -2,7 +2,14 @@
 # tests/test-copilot-session-review.sh
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+TMP=$(mktemp -d)
+# Item 3 (deferred minor): this file allocates additional temp dirs further
+# down (TMP_HOME/FAKE_BIN, TMP8/FAKE_BIN8, TMP9) previously cleaned only via
+# an explicit `rm -rf` on the success path -- an early `exit 1` leaked them.
+# One EXIT trap covering every temp dir this script ever creates, via
+# ${VAR:-} so it's safe to register before the later variables are set (the
+# trap body is expanded when EXIT fires, not when trap is registered).
+trap 'rm -rf "$TMP" "${TMP_HOME:-}" "${FAKE_BIN:-}" "${TMP8:-}" "${FAKE_BIN8:-}" "${TMP9:-}"' EXIT
 export SL_HOME="$TMP" SL_STATE_DIR="$TMP/state" SL_LOG_DIR="$TMP/logs" SL_CONFIG_FILE="/nonexistent"
 mkdir -p "$TMP/state" "$TMP/bin"
 FAILURES=0
@@ -91,7 +98,6 @@ if [[ -f "${TMP_HOME}/store/memory/MEMORY.md" ]]; then
 else
     echo "FAIL: Copilot path did not persist"; FAILURES=$((FAILURES+1))
 fi
-rm -rf "$TMP_HOME" "$FAKE_BIN"
 
 # I8: same self-contradiction fixed in session-review.sh's prompt.
 check "prompt states the real schema regex" "yes" \
@@ -147,7 +153,6 @@ check "transcript assistant turn reached the prompt" "yes" \
     "$(grep -q 'UNIQUE_MARKER_ASSISTANT_TURN_CASE8' "$FAKE_COPILOT_PROMPT_FILE" 2>/dev/null && echo yes || echo no)"
 check "transcript section framed as untrusted data" "yes" \
     "$(grep -q 'untrusted conversation data' "$FAKE_COPILOT_PROMPT_FILE" 2>/dev/null && echo yes || echo no)"
-rm -rf "$TMP8" "$FAKE_BIN8"
 unset FAKE_COPILOT_PROMPT_FILE
 
 # 9) Missing transcript is logged visibly to persist-failures.log, never a
@@ -160,7 +165,6 @@ echo '{"sessionId":"session-with-no-transcript-on-disk","reason":"complete"}' \
 FAILURE_LOG="${TMP9}/store/logs/persist-failures.log"
 check "missing transcript logged to persist-failures.log" "yes" \
     "$([[ -f "$FAILURE_LOG" ]] && grep -q 'transcript unavailable' "$FAILURE_LOG" && echo yes || echo no)"
-rm -rf "$TMP9"
 
 if [[ "$FAILURES" -gt 0 ]]; then exit 1; fi
 echo "All copilot-session-review tests passed."
