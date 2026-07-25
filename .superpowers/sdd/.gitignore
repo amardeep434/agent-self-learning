@@ -1,0 +1,10 @@
+# Review-package diffs are derived data: each is byte-identical to
+#   git diff <base>..<head>
+# for the SHAs in its filename (verified 2026-07-25 by regenerating one and
+# comparing). They are regenerable from git history and would add ~800K of
+# duplication, so they stay untracked.
+#
+# The markdown IS tracked. The briefs, per-task reports, fix-round reports and
+# progress.md are the reasoning record behind every ruling on this branch, and
+# they exist nowhere else -- a `git clean -fdx` used to destroy all of it.
+*.diff
