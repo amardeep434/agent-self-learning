@@ -35,9 +35,9 @@
 
 ---
 
-## 3. Status: 5 of 10 tasks complete
+## 3. Status: 6 of 10 tasks implemented (Task 6 review in progress)
 
-Branch HEAD at handoff: **`1085b6a`**. Commits (oldest first):
+Branch HEAD: **`f0fdebc`** (docs) — last code commit **`a934cb3`** (Task 6). Commits (oldest first):
 
 ```
 646e967 docs(plan): harness-neutral persistence implementation plan
@@ -53,6 +53,9 @@ b3f758a docs(plan): background review pipeline, positional prompt, persist failu
 3157475 fix(security): close 4 Important + 2 Minor gaps in writer             [Task 4 fix 1]
 050a106 fix(review): reviewer proposes on stdout, script persists (Claude)    [Task 5]
 1085b6a fix(review): restore --max-turns/--output-format                      [Task 5 fix 1]
+88476ca docs: resumable handoff
+a934cb3 fix(review): Copilot reviewer proposes on stdout; drop --allow-tool write  [Task 6]
+f0fdebc docs(handoff): operating detail appendix
 ```
 
 | # | Task | State |
@@ -62,7 +65,7 @@ b3f758a docs(plan): background review pipeline, positional prompt, persist failu
 | 3 | Proposal schema (`scripts/lib/proposal_schema.py`) | ✅ complete (2 fix rounds) |
 | 4 | Secure writer (`scripts/persist-proposal.py`) | ✅ complete (1 fix round) |
 | 5 | Invert Claude Code reviewer (`scripts/session-review.sh`) | ✅ complete (1 fix round) |
-| 6 | Invert Copilot reviewer (`scripts/copilot-session-review.sh`) | 🔄 **IN FLIGHT** — see §4 |
+| 6 | Invert Copilot reviewer (`scripts/copilot-session-review.sh`) | ✅ implemented `a934cb3` (12 checks) — **review in progress, see §4** |
 | 7 | Claude-absent regression guard (`tests/test-claude-absent.sh`) | ⬜ not started |
 | 8 | Test runner + 3-OS CI (`tests/run-all.sh`, `.github/workflows/ci.yml`) | ⬜ not started |
 | 9 | `doctor` (`scripts/doctor.sh`) | ⬜ not started |
@@ -72,16 +75,16 @@ Current test counts: 8 shell suites + 5 Python suites (90 Python cases), all gre
 
 ---
 
-## 4. Task 6 is in flight — resolve this first
+## 4. Task 6 — implemented, review pending
 
-An implementer subagent was dispatched for Task 6 (invert the Copilot reviewer) and had **not reported** when this handoff was written. Its brief exists at `<workspace>/task-6-brief.md`; no `task-6-report.md` existed at handoff time.
+Task 6 committed at **`a934cb3`** (12 checks pass; RED confirmed before implementation). A task review was dispatched with review package
+`<workspace>/review-88476ca..a934cb3.diff` (BASE is `88476ca`, the parent of `a934cb3` — the two docs commits are deliberately excluded as noise).
 
 **On resume:**
-1. `cd` to the worktree and run `git log --oneline 1085b6a..HEAD`.
-2. **If there are new commits** — the implementer finished. Read `<workspace>/task-6-report.md`, then go straight to the review step (§5, step 3) with `BASE=1085b6a`.
-3. **If there are no new commits** — the agent was lost with the session. Re-dispatch Task 6 from scratch using the brief plus the requirements in §6 below.
+1. If the review result is unknown, **re-dispatch the task review** using the reviewer template in §14 and that diff path. Do not skip it and do not re-run the implementer.
+2. Then run the fix loop if there are findings, ledger `Task 6: complete`, and proceed to Task 7.
 
----
+**Open question the reviewer was asked to adjudicate:** `copilot --help` and `copilot help limits` confirm Copilot CLI has **no turn/step cap** for headless `-p` runs (`--max-autopilot-continues` is interactive-only). The only cost knob is `--max-ai-credits` (soft, credit-based, minimum 30). The implementer deliberately did **not** map `SL_REVIEW_MAX_TURNS` onto it, judging the unit conversion meaningless, and flagged it rather than omitting silently — the right instinct. **Consequence to resolve: the Copilot reviewer currently has no hard bound on its model loop**, while the equivalent Claude Code path does. Given the framework's cost-efficiency premise and that agent/sub-agent turns measured 84% of spend, a separate credit-based knob (e.g. `SL_COPILOT_REVIEW_MAX_CREDITS` → `--max-ai-credits`, default unset) is the likely correct follow-up. Treat it as a new feature for the final review to triage, not a defect in Task 6.
 
 ## 5. The loop protocol (repeat per task, 7 → 10)
 
