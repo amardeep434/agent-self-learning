@@ -1,0 +1,230 @@
+#!/usr/bin/env bash
+# scripts/doctor.sh — resolve and report framework state.
+#
+# The defect this framework shipped with was invisible: on Copilot CLI the
+# background reviewer was told to write memory files itself; Copilot's path
+# allow-list refused; the loop still exited 0, a log file still existed, and
+# nothing was persisted. The review pipeline now runs fully detached
+# (nohup ... &), which means its failures can never reach a hook's exit
+# code at all -- ${SL_LOG_DIR}/persist-failures.log is the only mechanism
+# that replaces that exit code, and surfacing it here is this script's
+# single most important job. Every other section exists to answer "why did
+# a path resolve here" and "is this install actually wired up" in seconds
+# instead of months.
+#
+# No code in this file may reference ~/.claude, the `claude` binary, or
+# CLAUDE.md as anything other than the legacy store it detects (never
+# moves) and the Claude-Code-specific hook file it optionally inspects when
+# `claude` is present. Nothing here is required for Copilot CLI or VS Code.
+set -uo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/lib/config.sh"
+
+STATUS=0
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+# Windows detection for display purposes only (which override in paths.py's
+# chain won). The actual resolution is still done exclusively by paths.py;
+# this mirrors its platform check, it never substitutes for it.
+_sl_is_windows() {
+    case "${OSTYPE:-}" in
+        msys*|cygwin*|win32*) return 0 ;;
+    esac
+    case "$(uname -s 2>/dev/null)" in
+        MINGW*|MSYS*|CYGWIN*) return 0 ;;
+    esac
+    return 1
+}
+
+# Which override in scripts/lib/paths.py's resolve_home() chain won. Display
+# only -- printing just the final path hides the actual debugging question
+# of *why* it resolved there.
+_sl_resolve_source() {
+    if [[ -n "${AGENT_LEARNING_HOME:-}" ]]; then
+        echo "AGENT_LEARNING_HOME"
+    elif [[ -n "${XDG_DATA_HOME:-}" ]]; then
+        echo "XDG_DATA_HOME"
+    elif _sl_is_windows && [[ -n "${LOCALAPPDATA:-}" ]]; then
+        echo "LOCALAPPDATA"
+    else
+        echo "default (\${HOME}/.local/share/agent-learning)"
+    fi
+}
+
+# Actually test writability: create and remove a real temp file. Permission
+# bits lie under many conditions (ACLs, read-only filesystems, containers
+# running as an unexpected uid, Windows) -- this is the only honest test.
+_sl_test_writable() {
+    local dir="$1" tf
+    mkdir -p "$dir" 2>/dev/null || return 1
+    tf=$(mktemp "${dir%/}/.doctor-write-test.XXXXXX" 2>/dev/null) || return 1
+    rm -f "$tf" 2>/dev/null
+    return 0
+}
+
+# Report whether a hook config file exists and, if so, whether it actually
+# references the currently-resolved scripts directory. A hook config
+# pointing at a stale path is precisely the class of bug fixed elsewhere in
+# this plan; doctor exists in part to catch a recurrence of it.
+_sl_check_hook_freshness() {
+    local file="$1" needle="$2"
+    if [[ ! -f "$file" ]]; then
+        echo "not installed"
+        return
+    fi
+    if [[ -z "$needle" ]]; then
+        echo "installed (could not verify target path -- python3/paths.py unavailable)"
+        return
+    fi
+    if grep -qF -- "$needle" "$file" 2>/dev/null; then
+        echo "installed, points at resolved scripts dir"
+    else
+        echo "installed, STALE -- does not reference ${needle}"
+    fi
+}
+
+echo "agent-self-learning doctor"
+echo "==========================="
+echo
+
+# ---------------------------------------------------------------------------
+# 1. Resolved paths -- every key from paths.py, plus which override won.
+# ---------------------------------------------------------------------------
+SOURCE="$(_sl_resolve_source)"
+echo "resolved paths (override source: ${SOURCE}):"
+for pair in "home:${SL_HOME}" "memory:${SL_MEMORY_DIR}" "skills:${SL_SKILLS_DIR}" \
+            "state:${SL_STATE_DIR}" "logs:${SL_LOG_DIR}" "sessions_db:${SL_SEARCH_DB}" \
+            "config_file:${SL_CONFIG_FILE}"; do
+    key="${pair%%:*}"; value="${pair#*:}"
+    printf '  %-12s %s\n' "$key" "$value"
+done
+
+# "scripts" is not exported by config.sh (verified by reading it), so it is
+# obtained the same way config.sh obtains everything else: shelling out to
+# the single resolver, never recomputed here.
+SL_SCRIPTS_DIR=""
+if command -v python3 >/dev/null 2>&1; then
+    SL_SCRIPTS_DIR="$(python3 "${SCRIPT_DIR}/lib/paths.py" get scripts 2>/dev/null || true)"
+fi
+printf '  %-12s %s\n' "scripts" "${SL_SCRIPTS_DIR:-<unresolved: python3/paths.py unavailable>}"
+echo
+
+# ---------------------------------------------------------------------------
+# 2. Writability -- actually tested, not inferred.
+# ---------------------------------------------------------------------------
+echo "writability (create+remove a real temp file, not permission-bit inference):"
+for dir in "${SL_HOME}" "${SL_MEMORY_DIR}" "${SL_SKILLS_DIR}" "${SL_STATE_DIR}" "${SL_LOG_DIR}"; do
+    if _sl_test_writable "$dir"; then
+        printf '  %-60s writable\n' "$dir"
+    else
+        printf '  %-60s NOT WRITABLE\n' "$dir"
+        STATUS=1
+    fi
+done
+echo
+
+# ---------------------------------------------------------------------------
+# 3. Detected harnesses -- presence + hook-config freshness.
+# ---------------------------------------------------------------------------
+echo "harnesses detected:"
+
+if command -v claude >/dev/null 2>&1; then
+    echo "  claude   present (Claude Code)"
+    CLAUDE_SETTINGS="${HOME}/.claude/settings.json"
+    HOOK_STATE="$(_sl_check_hook_freshness "$CLAUDE_SETTINGS" "$SL_SCRIPTS_DIR")"
+    echo "    hooks (~/.claude/settings.json): ${HOOK_STATE}"
+else
+    echo "  claude   absent (normal on a Copilot-only or VS-Code-only machine)"
+fi
+
+if command -v copilot >/dev/null 2>&1; then
+    echo "  copilot  present (Copilot CLI)"
+    COPILOT_HOOKS="${HOME}/.copilot/hooks/self-learning.json"
+    HOOK_STATE="$(_sl_check_hook_freshness "$COPILOT_HOOKS" "$SL_SCRIPTS_DIR")"
+    echo "    hooks (~/.copilot/hooks/self-learning.json): ${HOOK_STATE}"
+else
+    echo "  copilot  absent (normal on a Claude-Code-only or VS-Code-only machine)"
+fi
+
+if command -v code >/dev/null 2>&1 || [[ -d "${HOME}/.vscode" ]]; then
+    echo "  vscode   present (VS Code) -- Copilot Chat adapter/hooks are not yet"
+    echo "           shipped by this release (tracked separately); nothing to check"
+else
+    echo "  vscode   absent"
+fi
+echo
+
+# ---------------------------------------------------------------------------
+# 4. Legacy ~/.claude store -- DETECT ONLY. Never move or modify user data.
+# ---------------------------------------------------------------------------
+LEGACY_HOME=""
+if command -v python3 >/dev/null 2>&1; then
+    LEGACY_HOME="$(python3 -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+import paths
+h = paths.legacy_home()
+print(h if h else "")
+' "${SCRIPT_DIR}/lib" 2>/dev/null || true)"
+fi
+
+echo "legacy store:"
+if [[ -n "$LEGACY_HOME" ]]; then
+    echo "  *** legacy ~/.claude store found: ${LEGACY_HOME} ***"
+    echo "  this release stores data at: ${SL_HOME}"
+    echo "  nothing has been moved or modified. To migrate deliberately, e.g.:"
+    echo "    cp -r ${LEGACY_HOME}/memory ${LEGACY_HOME}/learned-skills ${SL_HOME}/"
+else
+    echo "  none found"
+fi
+echo
+
+# ---------------------------------------------------------------------------
+# 5. Persistence failures -- the load-bearing section. The review pipeline
+# runs fully detached, so its failures cannot reach a hook exit code; this
+# log is the only replacement for that signal, and this is the only place
+# a human sees it. "log absent" and "log present but empty" are reported
+# distinctly on purpose: absent can mean the pipeline has never even run.
+# ---------------------------------------------------------------------------
+FAILURE_LOG="${SL_LOG_DIR}/persist-failures.log"
+echo "persistence failures (${FAILURE_LOG}):"
+if [[ ! -e "$FAILURE_LOG" ]]; then
+    echo "  ABSENT -- this can mean the review pipeline has never run yet, OR that"
+    echo "  it has run and never failed. Absence alone is not proof of health."
+elif [[ ! -s "$FAILURE_LOG" ]]; then
+    echo "  present, EMPTY -- pipeline has run and recorded zero failures."
+else
+    COUNT="$(grep -c '' "$FAILURE_LOG" 2>/dev/null || echo 0)"
+    LAST_LINE="$(tail -n 1 "$FAILURE_LOG")"
+    LAST_TS="${LAST_LINE%% *}"
+    LAST_EPOCH="$(sl_iso_to_epoch "$LAST_TS")"
+    NOW_EPOCH="$(date -u +%s)"
+    if [[ "$LAST_EPOCH" -gt 0 ]]; then
+        AGE_SEC=$(( NOW_EPOCH - LAST_EPOCH ))
+        AGE_DESC="${LAST_TS} (${AGE_SEC}s ago)"
+    else
+        AGE_DESC="unknown -- most recent line has an unparsable timestamp"
+    fi
+    echo "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    echo "  !!! ${COUNT} PERSISTENCE FAILURE(S) RECORDED -- most recent: ${AGE_DESC}"
+    echo "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    echo "  most recent entries (bounded tail, last 5 of ${COUNT}):"
+    tail -n 5 "$FAILURE_LOG" | sed 's/^/    /'
+    STATUS=1
+fi
+echo
+
+echo "review enabled: ${SL_REVIEW_ENABLED}"
+echo
+
+if [[ "$STATUS" -eq 0 ]]; then
+    echo "overall: HEALTHY"
+else
+    echo "overall: UNHEALTHY -- see NOT WRITABLE and/or persistence failures above"
+fi
+
+exit "$STATUS"
