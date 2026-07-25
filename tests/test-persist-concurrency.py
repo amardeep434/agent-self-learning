@@ -54,6 +54,18 @@ sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 
 import store_lock  # noqa: E402
 
+# Printed at import, not inside a test: this is the one line in the whole
+# suite that says WHICH cross-process lock primitive was actually selected
+# on the machine running it, and the Windows backend (msvcrt.locking) has
+# never executed anywhere in this project's history -- it is chosen by a
+# probe that has itself never run on Windows. Reading the answer out of a CI
+# log must not depend on a particular test being reached, not skipped, and
+# not reordered, so it is emitted unconditionally the moment this module
+# loads, in the same `[capability probe]` shape the rest of the suite uses.
+print(f"[capability probe] store_lock backend={store_lock.BACKEND} "
+      f"releases_on_crash={'yes' if store_lock.BACKEND_RELEASES_ON_CRASH else 'no'} "
+      f"platform={sys.platform} os.name={os.name}", flush=True)
+
 # Concurrency of each round. Deliberately modest so the whole suite stays
 # far inside tests/run-all.sh's 120s per-suite timeout on the slowest CI
 # runner, while still being several times larger than the 2-3 processes a
@@ -95,6 +107,7 @@ def _run_barrier(store: Path, payloads: "list[str]", env_extra: "dict | None" = 
     """
     env = dict(os.environ, AGENT_LEARNING_HOME=str(store))
     env.pop("SL_LOG_DIR", None)
+    env.pop("SL_STATE_DIR", None)
     if env_extra:
         env.update(env_extra)
     procs = [subprocess.Popen([sys.executable, str(WRITER)],
@@ -216,6 +229,7 @@ class TestLockTimeoutFailsLoudly(unittest.TestCase):
                 env = dict(os.environ, AGENT_LEARNING_HOME=str(store),
                            SL_PERSIST_LOCK_TIMEOUT="0.5")
                 env.pop("SL_LOG_DIR", None)
+                env.pop("SL_STATE_DIR", None)
                 started = time.monotonic()
                 proc = subprocess.run([sys.executable, str(WRITER)],
                                       input=_payload_memory(1), capture_output=True,
@@ -246,9 +260,13 @@ class TestLockTimeoutFailsLoudly(unittest.TestCase):
 
 class TestStoreLockBackends(unittest.TestCase):
     def test_backend_selected_by_functional_probe(self):
+        # The banner at import time is what a CI reader looks for; this
+        # asserts the value it printed is one of the three real backends
+        # (a typo'd/renamed backend would otherwise print happily and then
+        # fall through to no locking at all).
         self.assertIn(store_lock.BACKEND, ("flock", "msvcrt", "exclusive"))
-        print(f"[capability probe] store_lock backend={store_lock.BACKEND} "
-              f"releases_on_crash={store_lock.BACKEND_RELEASES_ON_CRASH}")
+        self.assertEqual(store_lock.BACKEND_RELEASES_ON_CRASH,
+                         store_lock.BACKEND in ("flock", "msvcrt"))
 
     def test_selected_backend_is_mutually_exclusive(self):
         with tempfile.TemporaryDirectory() as tmp:

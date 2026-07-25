@@ -74,9 +74,12 @@ from __future__ import annotations
 
 import errno
 import os
+import sys
 import tempfile
 import time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # The lock file, relative to the store's state/ directory.
 LOCK_FILENAME = "persist.lock"
@@ -92,6 +95,26 @@ TIMEOUT_ENV_VAR = "SL_PERSIST_LOCK_TIMEOUT"
 STALE_SECONDS = 300.0
 
 _POLL_SECONDS = 0.02
+
+
+def default_lock_dir(env: "dict | None" = None) -> Path:
+    """The one directory every writer must agree on for the lock file.
+
+    A lock only serialises processes that pick the SAME path, so this is
+    deliberately the single definition all three writers use
+    (persist-proposal.py, skill-lifecycle.py, and the `run` CLI that
+    curator-run.sh calls) rather than three copies of the same expression
+    that can drift -- the same reasoning as lib/skill_layout.py.
+
+    $SL_STATE_DIR first (config.sh exports it, so a bash caller and a Python
+    caller in the same run cannot disagree), then paths.py's resolver.
+    """
+    env = os.environ if env is None else env
+    explicit = env.get("SL_STATE_DIR")
+    if explicit:
+        return Path(explicit)
+    import paths  # local import: keeps this module importable standalone
+    return paths.resolve_all(env)["state"]
 
 
 class LockTimeout(Exception):
@@ -335,9 +358,41 @@ class StoreLock:
         return False
 
 
+def _log_lock_timeout(message: str, env: "dict | None" = None) -> None:
+    """Append a lock timeout to persist-failures.log, which doctor.sh
+    surfaces. Shared by the CLI here and persist-proposal.py's own handler
+    so a bash caller's timeout is exactly as visible as a Python one --
+    curator-run.sh in particular runs from cron with nobody watching stderr.
+    Never raises."""
+    env = os.environ if env is None else env
+    try:
+        log_dir = env.get("SL_LOG_DIR")
+        if not log_dir:
+            import paths
+            log_dir = str(paths.resolve_all(env)["logs"])
+        Path(log_dir).mkdir(parents=True, exist_ok=True)
+        import isotime
+        with open(Path(log_dir) / "persist-failures.log", "a",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write(f"{isotime.now_iso()} {message}\n")
+    except (OSError, ImportError):
+        pass
+
+
 def _main(argv: "list[str]") -> int:
-    """Tiny CLI so bash callers and doctor.sh can report the backend without
-    reimplementing the probes."""
+    """Tiny CLI so bash callers (curator-run.sh, via lib/store-lock.sh) and
+    doctor.sh can use and report this lock without reimplementing any of it.
+
+      store_lock.py backend            -- print the selected backend
+      store_lock.py probe              -- backend + crash behaviour + timeout
+      store_lock.py run [--state-dir D] [--timeout S] -- CMD [ARGS...]
+                                       -- run CMD holding the lock
+
+    `run` is the bash entry point: the lock is held for exactly the child's
+    lifetime and released when this wrapper exits, including if the child is
+    killed. There is no acquire/release pair for bash to get wrong, and no
+    way for a bash `set -e` early exit to leak a held lock.
+    """
     if argv and argv[0] == "backend":
         print(BACKEND)
         return 0
@@ -346,10 +401,44 @@ def _main(argv: "list[str]") -> int:
         print(f"releases_on_crash={'yes' if BACKEND_RELEASES_ON_CRASH else 'no'}")
         print(f"timeout={_timeout_from_env():g}")
         return 0
-    print("usage: store_lock.py {backend|probe}")
+    if argv and argv[0] == "run":
+        rest = argv[1:]
+        state_dir = None
+        timeout = None
+        while rest and rest[0].startswith("--"):
+            if rest[0] == "--":
+                rest = rest[1:]
+                break
+            if rest[0] == "--state-dir" and len(rest) > 1:
+                state_dir, rest = rest[1], rest[2:]
+            elif rest[0] == "--timeout" and len(rest) > 1:
+                timeout, rest = float(rest[1]), rest[2:]
+            else:
+                print(f"store_lock.py run: unknown option {rest[0]!r}", file=sys.stderr)
+                return 2
+        if not rest:
+            print("store_lock.py run: no command given", file=sys.stderr)
+            return 2
+        target = Path(state_dir) if state_dir else default_lock_dir()
+        try:
+            lock = StoreLock(target, timeout=timeout)
+            lock.acquire()
+        except LockTimeout as exc:
+            _log_lock_timeout(f"store-lock: timed out running {rest[0]!r}: {exc}")
+            print(f"store_lock.py: {exc}", file=sys.stderr)
+            return 75  # EX_TEMPFAIL: contended, retryable -- not a bug in CMD
+        except LockUnavailable as exc:
+            _log_lock_timeout(f"store-lock: unavailable running {rest[0]!r}: {exc}")
+            print(f"store_lock.py: {exc}", file=sys.stderr)
+            return 74  # EX_IOERR
+        try:
+            import subprocess
+            return subprocess.call(rest)
+        finally:
+            lock.release()
+    print("usage: store_lock.py {backend|probe|run [--state-dir D] [--timeout S] -- CMD...}")
     return 2
 
 
 if __name__ == "__main__":
-    import sys
     raise SystemExit(_main(sys.argv[1:]))

@@ -75,7 +75,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import paths  # noqa: E402
 from isotime import now_iso as _now_iso  # noqa: E402  (fix round D: shared with skill-lifecycle.py, index-session.py, coach-signals.py)
 from proposal_schema import ValidationError, extract_proposal, validate_proposal  # noqa: E402
-from store_lock import LockTimeout, LockUnavailable, StoreLock  # noqa: E402
+from store_lock import LockTimeout, LockUnavailable, StoreLock, default_lock_dir  # noqa: E402
 
 # Bounds the *accumulated* size of a memory file across repeated append-mode
 # proposals. proposal_schema caps a single proposal's content, but says
@@ -854,7 +854,11 @@ def main(argv: list[str]) -> int:
         # Locking only the write half would leave exactly the span that
         # destroyed 38 of 40 skill-telemetry records in the pre-fix
         # measurement.
-        with StoreLock(resolved["state"]):
+        # default_lock_dir(), not resolved["state"] directly: the lock only
+        # serialises processes that pick the SAME path, and skill-lifecycle.py
+        # and curator-run.sh (via lib/store-lock.sh) must pick it too. One
+        # shared definition -- see store_lock.default_lock_dir.
+        with StoreLock(default_lock_dir()):
             planned = _plan(proposal, memory_dir, skills_dir)
             written, total = _write_all(planned)
     except LockTimeout as exc:

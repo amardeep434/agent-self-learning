@@ -31,6 +31,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from isotime import parse_iso  # noqa: E402  (fix round D blocker (a): shared parser, see lib/isotime.py)
 import skill_layout  # noqa: E402  (single definition of the skill-directory layout; see lib/skill_layout.py)
+from store_lock import (  # noqa: E402  (fix-p8: same lock persist-proposal.py takes)
+    LockTimeout, LockUnavailable, StoreLock, default_lock_dir,
+)
 
 # ---------------------------------------------------------------------------
 # Configuration (overridable via environment variables)
@@ -247,6 +250,25 @@ def run_lifecycle(dry_run: bool = False) -> str:
     return "\n".join(lines)
 
 
+def _log_lock_failure(message: str) -> None:
+    """Append to ${SL_LOG_DIR}/persist-failures.log. Never raises -- an
+    unwritable log directory must not replace one failure report with a
+    different one. Same line shape and same log as persist-proposal.py, so
+    doctor.sh needs no new parsing."""
+    try:
+        log_dir = os.environ.get("SL_LOG_DIR")
+        if not log_dir:
+            import paths
+            log_dir = str(paths.resolve_all()["logs"])
+        Path(log_dir).mkdir(parents=True, exist_ok=True)
+        from isotime import now_iso
+        with open(Path(log_dir) / "persist-failures.log", "a",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write(f"{now_iso()} {message}\n")
+    except (OSError, ImportError):
+        pass
+
+
 def main() -> int:
     """CLI entry point."""
     dry_run = "--dry-run" in sys.argv
@@ -256,7 +278,39 @@ def main() -> int:
         return 0
 
     try:
-        output = run_lifecycle(dry_run=dry_run)
+        if dry_run:
+            # No writes, no directory moves -- nothing to serialise, and
+            # taking the lock would make an explicitly no-side-effects mode
+            # create a state directory and a lock file. Same rule as
+            # persist-proposal.py --dry-run.
+            output = run_lifecycle(dry_run=True)
+        else:
+            # fix-p8. run_lifecycle() is one read-modify-write span over the
+            # SAME .usage.json persist-proposal.py writes: load_usage() ->
+            # decide transitions -> shutil.move() skill directories ->
+            # save_usage(). A review persisting a skill anywhere inside that
+            # span was lost exactly as in fix-p7 (measured: 24 of 24 records
+            # destroyed), and the directory moves make it worse than a lost
+            # update -- a skill directory can be moved out from under a write
+            # that is mid-flight. The whole span is held, not just
+            # save_usage(): locking only the final write is the half-fix
+            # fix-p7's mutation B already proved inadequate for this exact
+            # file.
+            with StoreLock(default_lock_dir()):
+                output = run_lifecycle(dry_run=False)
+    except LockTimeout as exc:
+        # Loud, never silent: curator-run.sh invokes this from a 7-day cron
+        # with nobody watching stderr, so the failure has to reach
+        # persist-failures.log, which doctor.sh surfaces. Exit 3, distinct
+        # from the corrupt-usage exit 2, so a caller can tell "contended,
+        # try again later" from "the store is damaged".
+        _log_lock_failure(f"skill-lifecycle: lock timeout: {exc}")
+        print(f"skill-lifecycle: refusing to proceed: {exc}", file=sys.stderr)
+        return 3
+    except LockUnavailable as exc:
+        _log_lock_failure(f"skill-lifecycle: lock unavailable: {exc}")
+        print(f"skill-lifecycle: refusing to proceed: {exc}", file=sys.stderr)
+        return 3
     except UsageCorruptError as exc:
         # Matches persist-proposal.py's policy for the same file: refuse
         # rather than silently treat corrupt-but-present as absent-and-empty.

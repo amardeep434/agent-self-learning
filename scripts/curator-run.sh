@@ -23,6 +23,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/config.sh"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/lib/skill-layout.sh"
+# fix-p8: the same store lock persist-proposal.py and skill-lifecycle.py
+# take. See lib/store-lock.sh for why bash gets a run-command wrapper
+# instead of an acquire/release pair, and why the python3 spawn it costs is
+# acceptable here (7-day cron, 2-hour idle gate, not a hook path).
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/store-lock.sh"
 
 SKILLS_DIR="$SL_SKILLS_DIR"
 ARCHIVE_DIR="${SKILLS_DIR}/${SL_ARCHIVE_DIRNAME}"
@@ -75,10 +81,38 @@ echo "[CURATOR] Starting curator run at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # --- Pre-run backup ---
 # Always back up before any destructive operations.
 
+# fix-p8: taken under the store lock. This is the safety net for everything
+# destructive that follows, so it must be a point-in-time snapshot: a
+# review persisting a skill mid-tar produces a backup that contains some of
+# the new state and some of the old, which is precisely the thing you do
+# NOT want to discover while restoring from it. A tar of a curated skills
+# directory is small and fast, so this hold is short.
+#
+# The lock is released before skill-lifecycle.py is invoked further down --
+# that script takes the SAME lock in its own process, and this lock is not
+# reentrant across processes, so holding it across that call would deadlock
+# the curator against itself for the full acquire timeout. Two short spans,
+# deliberately, not one long hold; see the report for the starvation
+# reasoning.
 BACKUP_FILE="${BACKUP_DIR}/skills-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
 if [[ -d "$SKILLS_DIR" ]]; then
-    tar -czf "$BACKUP_FILE" -C "$(dirname "$SKILLS_DIR")" "$(basename "$SKILLS_DIR")" 2>/dev/null || true
-    echo "[CURATOR] Backup created: $BACKUP_FILE"
+    BACKUP_STATUS=0
+    sl_with_store_lock tar -czf "$BACKUP_FILE" \
+        -C "$(dirname "$SKILLS_DIR")" "$(basename "$SKILLS_DIR")" 2>/dev/null \
+        || BACKUP_STATUS=$?
+    case "$BACKUP_STATUS" in
+        0)  echo "[CURATOR] Backup created: $BACKUP_FILE" ;;
+        75|74)
+            # Lock timeout / lock unavailable. store_lock.py has already
+            # written the detail to persist-failures.log (doctor.sh surfaces
+            # it). Abort rather than continue: running destructive lifecycle
+            # transitions with no verified pre-run backup is exactly the
+            # thing the backup exists to prevent.
+            echo "[CURATOR] ABORTING: could not take the store lock for the pre-run backup" >&2
+            echo "[CURATOR] (see persist-failures.log; another writer held the lock)" >&2
+            exit 1 ;;
+        *)  echo "[CURATOR] WARNING: backup command failed (status ${BACKUP_STATUS})" >&2 ;;
+    esac
 else
     echo "[CURATOR] Skills directory not found, skipping backup"
 fi
@@ -137,9 +171,24 @@ EOF
 # --- Run deterministic transitions ---
 
 echo "[CURATOR] Running deterministic lifecycle transitions..."
+# NOT wrapped in sl_with_store_lock: skill-lifecycle.py takes the lock
+# itself, around the span that actually matters (load .usage.json -> decide
+# -> move directories -> save). Wrapping it here as well would deadlock --
+# same lock, different process, not reentrant.
 TRANSITION_LOG=""
+LIFECYCLE_STATUS=0
 if [[ -f "${SCRIPT_DIR}/skill-lifecycle.py" ]]; then
-    TRANSITION_LOG=$(python3 "${SCRIPT_DIR}/skill-lifecycle.py" 2>&1) || true
+    TRANSITION_LOG=$(python3 "${SCRIPT_DIR}/skill-lifecycle.py" 2>&1) || LIFECYCLE_STATUS=$?
+    # fix-p8: the previous `|| true` swallowed EVERY lifecycle failure,
+    # including a lock timeout (exit 3) and a corrupt .usage.json (exit 2),
+    # leaving a report that reads as a clean run. The curator runs unattended
+    # from cron, so a swallowed failure here is invisible forever.
+    # skill-lifecycle.py already logs lock failures to persist-failures.log;
+    # this makes the curator's OWN report say so too, and marks the run.
+    if [[ "$LIFECYCLE_STATUS" -ne 0 ]]; then
+        echo "[CURATOR] WARNING: lifecycle transitions failed (status ${LIFECYCLE_STATUS})" >&2
+        TRANSITION_LOG="${TRANSITION_LOG}"$'\n'"**[CURATOR] lifecycle transitions FAILED (exit ${LIFECYCLE_STATUS}) -- no transitions were applied.**"
+    fi
 else
     TRANSITION_LOG="[WARN] No skill-lifecycle script found"
 fi
