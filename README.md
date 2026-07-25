@@ -180,8 +180,8 @@ follow-up plan) and no row below claims otherwise.
 | Mid-session turn counting | ✅ PostToolUse hook | ❌ not wired | deliberate: session-end loop is the portable core; covered by `test-turn-counter.sh` |
 | Copilot path independent of Claude Code | — | ✅ | `test-claude-absent.sh` runs the full Copilot review path with no `claude` binary or `~/.claude` present |
 | Session search indexing | ✅ (Claude JSONL) | ❌ planned | Copilot session-state parser is a follow-up plan; not yet exercised by run-all.sh beyond schema tests |
-| Coach signals (Routes A/B) | ✅ | ✅ | consumed by both reviewers; covered by `test-coach-signals.py`, `test-coach-rules-eval.py` |
-| Windows | reasoned-about, not observed | reasoned-about, not observed | CI declares an `ubuntu-latest, macos-latest, windows-latest` × Python `3.9, 3.13` matrix (`.github/workflows/ci.yml`), but no CI run has ever executed on this branch — treat multi-OS behaviour as unverified until a run is green |
+| Coach signals (Routes A/B) | ✅ | ✅ | not just evaluated — actually reaches the reviewer prompt: `session-review.sh`/`copilot-session-review.sh` call `coach-signals.py` then append its merged output as a "Coach signals" section of the review prompt when present and <7 days old; covered by `test-coach-signals.py`, `test-coach-rules-eval.py`, and `test-session-review.sh`'s "coach signal id reaches prompt" assertion, which fails if that wiring ever regresses |
+| Windows | CI has run once, red on both Windows jobs; fix round A addressed the causes found, but no re-run has been observed since | CI has run once, red on both macOS jobs; fix round A addressed the causes found, but no re-run has been observed since | CI declares an `ubuntu-latest, macos-latest, windows-latest` × Python `3.9, 3.13` matrix (`.github/workflows/ci.yml`); Ubuntu passed both jobs on the one run so far. Do not treat Windows/macOS as passing until a subsequent run is green. |
 | Copilot CLI live end-to-end (real session, real file on disk) | n/a | ⏳ pending manual verification | the specific failure this project's harness-neutral persistence work exists to fix; not yet confirmed with a live session |
 
 ## AI Engineering Coach integration (optional)
@@ -212,7 +212,7 @@ rules are skipped and logged, never guessed at. Re-vendor rules with
 | 2 | Background Review (review prompts, memory/skill writes) | Done — reviewer proposes JSON on stdout, `scripts/persist-proposal.py` validates and writes, confined to the resolved store |
 | 3 | Skill Lifecycle (telemetry, state machine, authoring standards) | Done |
 | 4 | Curator + Session Search (consolidation, FTS5 index) | Done |
-| 5 | Integration + Polish (config, caching, install, health check) | Done for Claude Code + Copilot CLI; VS Code Copilot Chat adapter not started (tracked separately); no CI run has executed yet (see Agent compatibility) |
+| 5 | Integration + Polish (config, caching, install, health check) | Done for Claude Code + Copilot CLI; VS Code Copilot Chat adapter not started (tracked separately); CI has run once (Ubuntu green, Windows/macOS red) — see "Agent compatibility" above for current status, do not assume a later run is green without checking |
 
 See "Storage locations" above for the harness-neutral persistence work that
 followed the original 5-phase plan: a shared, vendor-neutral store plus a
