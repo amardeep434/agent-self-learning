@@ -355,3 +355,104 @@ Recorded because the brief invited them:
    four newest suites were unobserved on the matrix; run `30174843845` had in fact run all 41 on
    all six cells, green. The pattern this session has been over-claiming; this one was
    under-claiming.
+
+---
+
+# Addendum — the flaky TOCTOU mutation test (CI `30177334437`)
+
+CI run `30177334437` was 5 of 6 green — **macOS and Windows both passed**, so the case-fold work
+(A3) holds on exactly the case-insensitive filesystems it was written for. The single failure was
+`ubuntu-latest, 3.9`, `tests/test-persist-proposal.py`:
+
+```
+FAIL: test_mutation_forcing_path_based_writer_reproduces_the_race (TestDirFdWritePath)
+AssertionError: 0 not greater than 0 : expected the mutation (DIR_FD_SUPPORTED forced False)
+to reproduce at least one escape in 60 racy iterations, got 0
+```
+
+**Not a product defect.** The test spun a racer thread and asserted `escapes > 0` within 60
+iterations. On an idle runner the race did not manifest, so correct code went red.
+
+**Same class as the branch's earlier "0/40" mistake, in the opposite direction.** That figure sat
+in the record as fact for days before being re-measured at ~18%. Both are the same error: treating
+"the race did not appear in N tries" as information. It is not — in either direction.
+
+## Fixed deterministically, not by raising the iteration count
+
+Bumping 60 to a larger number trades one flake rate for a smaller one and burns CI time without
+making the test sound. Instead the interleaving is now **constructed**, which is the technique the
+P8 round used on the store lock after a mutation survived 2 of 3 runs (`test-store-lock-writers.py`,
+P8 section of `fix-p7-append-race-report.md`).
+
+Both writers have exactly one seam between "every confinement and symlink check has passed against
+the real directory" and "the staged file is created": the call to `_stage` (path writer) or
+`_stage_fd` (fd writer). The test wraps that call and performs the symlink swap inside the wrapper,
+reproducing the exact schedule the racer thread was gambling on — every run, any machine, any load.
+No thread, no iteration count, no rate, no tolerance.
+
+**The replacement is strictly stronger than what it replaces**, because the same forced schedule is
+applied to *both* writers:
+
+| Test | Writer | Constructed interleaving | Assertion |
+|---|---|---|---|
+| `test_forced_interleaving_escapes_the_store_on_the_path_writer` | `DIR_FD_SUPPORTED=False` | mkstemp re-resolves `stage_dir` by path, follows the planted symlink | `SKILL.md` **is** outside the store |
+| `test_forced_interleaving_is_closed_by_the_dir_fd_writer` | `DIR_FD_SUPPORTED=True` | `stage_fd` is already open on the real directory; the path swap redirects nothing | **nothing** outside the store |
+
+The old test could only ever say "the unfixed path is racy". This pair says that **and** "the fix
+closes this exact interleaving" — the second half was never checked before.
+
+Both tests also assert that the swap actually fired (`swapped is True`) before drawing any
+conclusion. Without that, a clean result in the second test would pass vacuously — which is the
+precise failure mode this rewrite exists to eliminate. The intent of the original test (proving the
+pre-fix writer was genuinely racy, so the `dir_fd` fix is load-bearing) is preserved and extended;
+nothing was deleted.
+
+### Determinism, measured
+
+40 consecutive runs of both tests: **0 flaky runs / 40**.
+
+### Mutation results — 2 killed, 0 survived
+
+| Mutation on `_write_all`'s dispatch | Result |
+|---|---|
+| Always `_write_all_fd` (fix cannot be turned off) | **KILLED** — `FAIL: test_forced_interleaving_escapes_the_store_on_the_path_writer` |
+| Always `_write_all_path` (fix removed) | **KILLED** — `FAIL: test_forced_interleaving_is_closed_by_the_dir_fd_writer` |
+| Restored | OK |
+
+Each mutation kills exactly one of the pair, which is the signature of a two-sided test that is
+actually discriminating between the two writers rather than passing on both.
+
+## The sibling in `tests/test-adversarial-sweep.py` — checked, safe, left racing
+
+`TestTOCTOU.test_toctou_symlink_swap_race` was re-examined for the same defect. It does **not** have
+it, in either branch, and the analysis is now written into the test so it does not have to be
+re-derived:
+
+- **dir_fd supported:** asserts `escapes == 0` — a race *not* occurring, the safe direction.
+  Contention only ever gives the attacker more chances, so an idle runner cannot manufacture a
+  failure; only a real regression can.
+- **dir_fd unsupported (native Windows only):** asserts `rate <= 0.5`. This is a probabilistic
+  *upper* bound, not a must-occur assertion. Measured rate is ~10–18% against a 50% ceiling over 40
+  iterations, so a false failure would need a deviation that is itself the story, and it fires only
+  on a total confinement collapse — worth a red build. Zero escapes passes it, so an idle runner is
+  fine here too.
+- Its `finding(...)` call on that branch is report-only by design.
+
+## Scan: does any other test assert that a race *does* occur?
+
+**No — that was the only one.** Method: `grep` across `tests/` for `assertGreater`, `> 0`,
+`>= 1`, `at least one`, and for `race`/`racy`/`iterations`/`ITERATIONS`, then reading every hit.
+Results:
+
+- `tests/test-persist-proposal.py:598` — the test fixed here. The only instance.
+- `tests/test-adversarial-sweep.py` — `TestTOCTOU`, analysed above; asserts zero-escape or an upper
+  bound, never a must-occur.
+- `tests/test-store-lock-writers.py:161-164` — explicitly documents that it **does not race**; it
+  forces the schedule by taking the lock itself. This is the pattern the fix above adopts.
+- `tests/test-coach-signals.py:46`, `tests/test-coach-rules-eval.py:51` — `count > 0` on
+  deterministic rule-evaluation output, no concurrency involved.
+- `tests/test-persist-concurrency.py` — asserts **lost entries == 0** / **lost records == 0** under
+  contention. Safe direction throughout.
+
+The lesson is now recorded in the fixed test's own comment block, so the next person to reach for a
+racer thread sees the two occasions this shape misled the branch.

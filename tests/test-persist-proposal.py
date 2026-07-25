@@ -529,78 +529,163 @@ class TestDirFdWritePath(unittest.TestCase):
                     pass
         self.assertEqual(fd_count(), before, "fd leak on the failure path")
 
-    def test_mutation_forcing_path_based_writer_reproduces_the_race(self):
-        """Mutation test: force DIR_FD_SUPPORTED False (simulating the
-        pre-fix / no-dir_fd state) and confirm the race that
-        tests/test-adversarial-sweep.py's TestTOCTOU holds at zero
-        tolerance actually resurfaces -- i.e. that the zero-escape result
-        with dir_fd enabled is because of the fix, not because the racer
-        thread happens not to win often enough to matter regardless of
-        which writer runs. Uses a smaller iteration count than the
-        standalone race harness in fix-p3-toctou-report.md (this runs in
-        the normal test suite budget); a handful of escapes out of a few
-        dozen racy iterations is enough to demonstrate the mutation is
-        killed without materially slowing the suite.
+    # ------------------------------------------------------------------
+    # The TOCTOU mutation test: FORCED interleaving, not a raced one.
+    #
+    # WHY IT WAS REWRITTEN
+    # --------------------
+    # This used to spin a racer thread flipping `alpha` between a real
+    # directory and a symlink, run 60 iterations against the path-based
+    # writer, and assert `escapes > 0`. It false-failed on an idle
+    # `ubuntu-latest, 3.9` runner (CI 30177334437): 0 escapes in 60
+    # iterations on correct code, red build.
+    #
+    # That assertion shape -- "a race MUST manifest within N tries" -- is
+    # inherently flaky, and this is the second time it has bitten this
+    # branch. The first was the "0 escapes in 40 iterations" figure that sat
+    # in the record as fact for days before being re-measured at ~18%. A race
+    # that requires contention cannot be demonstrated by hoping it appears
+    # within a fixed loop, in EITHER direction. Raising 60 to some larger
+    # number only trades one flake rate for a smaller one and burns CI time;
+    # it does not make the test sound.
+    #
+    # HOW IT WORKS NOW
+    # ----------------
+    # The interleaving is CONSTRUCTED rather than awaited -- the same
+    # technique the P8 round used on the store lock, where a mutation
+    # survived 2 of 3 runs until the test stopped racing and started
+    # forcing the schedule itself (see tests/test-store-lock-writers.py and
+    # the P8 section of fix-p7-append-race-report.md).
+    #
+    # Both writers have exactly one seam between "all confinement and
+    # symlink checks have passed against the real directory" and "the
+    # staged file is created": the call to `_stage` (path writer) or
+    # `_stage_fd` (fd writer). Wrapping that call and performing the swap
+    # inside the wrapper reproduces the precise schedule the racer thread
+    # was gambling on -- every run, on any machine, at any load.
+    #
+    # It is also strictly STRONGER than the old test, because the same
+    # forced schedule is now applied to BOTH writers:
+    #
+    #   * dir_fd OFF (the pre-fix path writer): mkstemp re-resolves
+    #     `stage_dir` by path, follows the freshly planted symlink, and the
+    #     content lands outside the store. Escape, deterministically.
+    #   * dir_fd ON (the fix): `stage_fd` is already an open descriptor on
+    #     the real directory, so swapping the path afterwards redirects
+    #     nothing. No escape, deterministically.
+    #
+    # The old test could only ever say "the unfixed path is racy". This one
+    # says that AND "the fix closes this exact interleaving" -- with no
+    # probabilistic assertion anywhere in it.
+    # ------------------------------------------------------------------
+
+    def _run_write_with_forced_swap(self, dir_fd_enabled):
+        """Perform one skill write, swapping the skill directory for a
+        symlink pointing outside the store at the exact moment between the
+        writer's checks and its staging call.
+
+        Returns `(swap_happened, escaped_names)`. `swap_happened` is
+        returned rather than asserted internally so the caller can prove the
+        interleaving was actually constructed -- an empty `escaped_names`
+        means "the fix held" only if the swap really fired, otherwise it
+        would pass vacuously, which is the failure mode this whole rewrite
+        exists to eliminate.
+        """
+        import shutil
+
+        swapped = {"done": False}
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d) / "store"
+            skills_dir = home / "learned-skills"
+            skills_dir.mkdir(parents=True)
+            outside = Path(d) / "outside"
+            outside.mkdir()
+            skill_dir = skills_dir / "alpha"
+            skill_dir.mkdir()
+
+            def swap_now():
+                # Once only: both writers stage more than one file per
+                # proposal (SKILL.md and .usage.json), and the swap is
+                # meaningful only at the first, which is the one whose
+                # stage_dir is the skill directory being swapped.
+                if swapped["done"]:
+                    return
+                swapped["done"] = True
+                shutil.rmtree(skill_dir)
+                skill_dir.symlink_to(outside, target_is_directory=True)
+
+            real_stage = self.mod._stage
+            real_stage_fd = self.mod._stage_fd
+            prior_dir_fd = self.mod.DIR_FD_SUPPORTED
+
+            def staged_with_swap(root, data):
+                swap_now()
+                return real_stage(root, data)
+
+            def staged_fd_with_swap(stage_fd, data):
+                swap_now()
+                return real_stage_fd(stage_fd, data)
+
+            self.mod._stage = staged_with_swap
+            self.mod._stage_fd = staged_fd_with_swap
+            self.mod.DIR_FD_SUPPORTED = dir_fd_enabled
+            try:
+                proposal = {"version": 1, "memory": [],
+                            "skills": [{"name": "alpha", "content": "pwned"}]}
+                planned = self.mod._plan(proposal, home / "memory", skills_dir)
+                try:
+                    self.mod._write_all(planned)
+                except Exception:
+                    # A refusal is a perfectly good outcome; what matters is
+                    # only whether anything landed outside the store.
+                    pass
+            finally:
+                self.mod._stage = real_stage
+                self.mod._stage_fd = real_stage_fd
+                self.mod.DIR_FD_SUPPORTED = prior_dir_fd
+
+            return swapped["done"], sorted(p.name for p in outside.iterdir())
+
+    def test_forced_interleaving_escapes_the_store_on_the_path_writer(self):
+        """The mutation (DIR_FD_SUPPORTED forced False) must be killed.
+
+        This is the half the old flaky test was trying to establish: that
+        the zero-escape result with dir_fd enabled is because of the fix,
+        not because the racer happened never to win. Deterministic now --
+        no iteration count, no tolerance, no rate.
         """
         if not CAN_SYMLINK:
             self.skipTest("symlink creation probed and unavailable on this runner")
-        import shutil
-        import threading
 
-        self.mod.DIR_FD_SUPPORTED = False
-        try:
-            escapes = 0
-            iterations = 60
-            for _ in range(iterations):
-                with tempfile.TemporaryDirectory() as d:
-                    home = Path(d) / "store"
-                    skills_dir = home / "learned-skills"
-                    skills_dir.mkdir(parents=True)
-                    outside = Path(d) / "outside"
-                    outside.mkdir()
-                    skill_dir = skills_dir / "alpha"
-                    skill_dir.mkdir()
-                    stop = threading.Event()
+        swapped, escaped = self._run_write_with_forced_swap(dir_fd_enabled=False)
+        self.assertTrue(swapped,
+                        "the forced swap never fired -- the seam this test hooks has moved, "
+                        "so this test proved nothing. Re-derive where _write_all_path stages.")
+        self.assertIn(
+            "SKILL.md", escaped,
+            "the path-based writer did NOT follow a symlink planted between its checks and "
+            f"its mkstemp call (found {escaped!r} outside the store). Either _write_all_path "
+            "has been hardened -- in which case delete this test and say so -- or the harness "
+            "is hooking the wrong seam. Both mean the dir_fd fix is no longer known to be "
+            "load-bearing.")
 
-                    def swap():
-                        while not stop.is_set():
-                            try:
-                                if skill_dir.is_symlink():
-                                    skill_dir.unlink()
-                                    skill_dir.mkdir()
-                                elif skill_dir.exists():
-                                    shutil.rmtree(skill_dir)
-                                    skill_dir.symlink_to(outside, target_is_directory=True)
-                            except OSError:
-                                pass
+    def test_forced_interleaving_is_closed_by_the_dir_fd_writer(self):
+        """The other half, which the old test never checked at all: the SAME
+        constructed interleaving must produce no escape once the fix is in
+        force. `stage_fd` is already open on the real directory, so swapping
+        the path afterwards cannot redirect the write."""
+        if not CAN_SYMLINK:
+            self.skipTest("symlink creation probed and unavailable on this runner")
 
-                    racer = threading.Thread(target=swap, daemon=True)
-                    racer.start()
-                    try:
-                        proposal = {"version": 1, "memory": [],
-                                    "skills": [{"name": "alpha", "content": "pwned"}]}
-                        planned = self.mod._plan(proposal, home / "memory", skills_dir)
-                        self.mod._write_all(planned)
-                    except Exception:
-                        pass
-                    finally:
-                        stop.set()
-                        racer.join(timeout=1)
-                    if list(outside.iterdir()):
-                        escapes += 1
-        finally:
-            self.mod.DIR_FD_SUPPORTED = True
-
-        # A generous, non-flaky bar: the unfixed path-based writer measures
-        # ~10-18% in independent runs (see fix-p3-toctou-report.md). Any
-        # escape at all here is sufficient to prove the mutation is killed
-        # (dir_fd-off behaves differently from dir_fd-on, which is 0/N).
-        self.assertGreater(
-            escapes, 0,
-            f"expected the mutation (DIR_FD_SUPPORTED forced False) to reproduce at least one "
-            f"escape in {iterations} racy iterations, got 0 -- either the race harness itself "
-            "is broken, or _write_all_path is unexpectedly also race-free, either of which "
-            "would mean this mutation test isn't actually testing anything.")
+        swapped, escaped = self._run_write_with_forced_swap(dir_fd_enabled=True)
+        self.assertTrue(swapped,
+                        "the forced swap never fired, so a clean result here means nothing. "
+                        "This is exactly the vacuous pass this rewrite exists to prevent.")
+        self.assertEqual(
+            escaped, [],
+            f"content escaped the store ({escaped!r}) under the dir_fd-anchored writer with a "
+            "symlink planted at the precise check-to-stage seam -- the TOCTOU fix has "
+            "regressed. See fix-p3-toctou-report.md.")
 
 
 class TestCrossReviewCaseFoldCollision(unittest.TestCase):

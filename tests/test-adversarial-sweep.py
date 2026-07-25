@@ -774,6 +774,30 @@ class TestTOCTOU(unittest.TestCase):
     # project doesn't have.
     ESCAPE_RATE_CEILING = 0.5  # only used on the no-dir_fd (report-only) branch
 
+    # FLAKE ANALYSIS (final closeout round). Its sibling in
+    # tests/test-persist-proposal.py asserted that a race MUST manifest
+    # within N iterations and false-failed on an idle runner; that shape has
+    # been removed there in favour of a forced interleaving. This test was
+    # re-examined for the same defect and does NOT have it, in either
+    # branch, so it is deliberately left racing:
+    #
+    #  * dir_fd supported: asserts `escapes == 0`. That is the safe
+    #    direction -- a race NOT occurring. Contention only ever gives the
+    #    attacker more chances, so an idle runner cannot manufacture a
+    #    failure here; only a real regression can. Deterministic in
+    #    practice.
+    #  * dir_fd unsupported (native Windows only): asserts
+    #    `rate <= ESCAPE_RATE_CEILING`. This is a probabilistic UPPER bound,
+    #    not a must-occur assertion, and the margin is enormous -- the
+    #    measured rate is ~10-18% against a 50% ceiling over 40 iterations,
+    #    so a false failure needs a deviation that would itself be the
+    #    story. It also fails in the informative direction: it fires only on
+    #    a total confinement collapse, which is worth a red build. Zero
+    #    escapes passes it, so an idle runner is fine here too.
+    #
+    # The `finding(...)` call on that branch is report-only by design: the
+    # residual it names is known, disclosed, and not fixable stdlib-only.
+
     def test_toctou_symlink_swap_race(self):
         if not CAN_SYMLINK:
             loud_skip("toctou:symlink-swap-race", "symlink creation probed and unavailable")
