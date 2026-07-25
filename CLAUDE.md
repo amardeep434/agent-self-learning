@@ -1,16 +1,23 @@
 # Claude Self-Learning — Dev Instructions
 
 > **Branch status: `harness-neutral-persistence`.**
-> The original 10-task implementation plan is complete, and three post-implementation fix
-> rounds (A, B, C) have since landed addressing findings from a whole-branch final review.
+> The original 10-task implementation plan is complete, and six post-implementation fix
+> rounds (A-F) have since landed addressing findings from a whole-branch final review and
+> from the CI matrix it triggered.
 > History for that plan and those rounds:
 > `docs/superpowers/HANDOFF-2026-07-25-harness-neutral-persistence.md` (the original task-by-task
 > handoff, now historical) and `.superpowers/sdd/2026-07-25-harness-neutral-persistence/` (the
 > ledger and each round's fix report). `git log` is the source of truth for what is actually on
 > the branch now — read that before trusting either document's narrative.
-> **Not yet done:** no CI run has been observed green on Windows or macOS since fix round A's
-> platform fixes landed (see "Implementation Roadmap" below); the live Copilot CLI end-to-end
-> check is still pending manual verification.
+> **CI: all six matrix cells are green** (`ubuntu/macos/windows-latest` × Python `3.9`/`3.13`),
+> CI run `30157000235`, 28 suites each. Note that Windows green is not equal coverage: 7
+> write-path security tests (symlink/hardlink/`O_NOFOLLOW`) and 3 shell assertions skip there,
+> each printed with its reason and gated on a probe that verifies the limitation rather than
+> assuming it from the platform name.
+> **Not yet done:** the live Copilot CLI end-to-end check — a real session, with a real model
+> call, persisting a real file under the resolved memory directory — is still pending manual
+> verification. Every end-to-end run so far used a fake `copilot` shim, and this is the exact
+> failure the branch exists to fix, so it should gate the PR leaving draft regardless of CI.
 > Note: this repo is `amardeep434/agent-self-learning` on GitHub; the local folder name still
 > says `claude-self-learning`. Do not rename the folder — it would break the worktree link.
 
@@ -52,6 +59,6 @@ This project originally followed a 5-phase, 10-week roadmap defined in the imple
 | 2 | Background Review (prompts, memory/skill writes) | Done — reviewer proposes JSON on stdout, `scripts/persist-proposal.py` validates and performs every write, confined to the resolved store |
 | 3 | Skill Lifecycle (telemetry, transitions) | Done |
 | 4 | Curator + Session Search | Done |
-| 5 | Integration + Polish | Done for Claude Code + Copilot CLI, including a `doctor.sh` diagnostic; VS Code Copilot Chat adapter/hooks not started (tracked separately). Windows support (Git Bash/WSL, PowerShell wrappers) is implemented and reasoned-about but **not yet confirmed working**: CI has run once on this branch (`gh run view` on the PR for this branch) and was red on all four Windows/macOS jobs (windows-latest × 3.9/3.13, macos-latest × 3.9/3.13); Ubuntu passed both. Fix round A addressed the causes identified from that run, but no subsequent CI run has been observed, so treat Windows/macOS as unverified until a green run is seen — do not claim they pass. The live Copilot CLI end-to-end check (a real session persisting a real file under the resolved memory directory) is still pending manual verification. |
+| 5 | Integration + Polish | Done for Claude Code + Copilot CLI, including a `doctor.sh` diagnostic; VS Code Copilot Chat adapter/hooks not started (tracked separately). Windows support (Git Bash, PowerShell wrappers) is now CI-verified: all six matrix cells green at CI run `30157000235` (28 suites each), after fix rounds A-F fixed real defects the matrix exposed — a Python 3.9 `fromisoformat` failure on `Z` timestamps, GNU-only `date` use on macOS, and CRLF-corrupted `paths.py` stdout plus MSYS path-form mismatches on Windows. Windows green is not equal coverage: 7 write-path security tests and 3 shell assertions skip there (symlinks need elevation; `chmod` does not deny writes under ACLs), each announced with its reason. The live Copilot CLI end-to-end check with a real model call is still pending manual verification. |
 
 A subsequent, still-in-progress plan (`harness-neutral-persistence`) replaced the original Claude-Code-only storage defaults with the vendor-neutral store described in `README.md` under "Storage locations" — the fix for a defect where Copilot CLI's path allow-list silently discarded review output written to `~/.claude`.
