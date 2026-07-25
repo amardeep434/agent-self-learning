@@ -1,7 +1,21 @@
 # uninstall.ps1 — Windows wrapper. Requires Git for Windows (bash) or WSL.
+# Same bash-resolution caveat as install.ps1: the first `bash` on PATH may be
+# WSL's launcher, which would operate on a different filesystem and a
+# different $HOME. scripts/lib/find-bash.ps1 probes for that functionally.
 $ErrorActionPreference = "Stop"
-$bash = Get-Command bash -ErrorAction SilentlyContinue
-if (-not $bash) { Write-Error "bash not found on PATH (install Git for Windows or WSL)."; exit 1 }
+
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-& $bash.Source "$repoRoot/uninstall.sh" @args
+. (Join-Path $repoRoot "scripts/lib/find-bash.ps1")
+
+$scriptPath = ($repoRoot -replace '\\', '/') + "/uninstall.sh"
+
+try {
+    $bashExe = Resolve-DelegableBash -ScriptPath $scriptPath
+}
+catch {
+    Write-Error $_.Exception.Message
+    exit 1
+}
+
+& $bashExe $scriptPath @args
 exit $LASTEXITCODE
