@@ -41,8 +41,25 @@ check "sessionId missing" "|complete" "$OUT"
 # it forever (would time out below) waiting for a Ctrl-D that never comes --
 # exactly the "human runs a hook script by hand" scenario doctor.sh warns
 # about. A 5s bound is generous; the guarded path returns in milliseconds.
+#
+# `pty` (and the `termios`/`fcntl` it pulls in) is a genuinely POSIX-only
+# primitive -- absent from the standard library entirely on native Windows
+# Python, not merely restricted. This is probed by attempting the import
+# and catching the failure, not inferred from `sys.platform`/`os.name`: the
+# same discipline test-persist-proposal.py uses for O_NOFOLLOW. Git Bash's
+# `bash` itself still ships on Windows and its `[[ -t 0 ]]` builtin is
+# portable, so the guard under test is not Windows-specific -- only *this*
+# script's way of manufacturing a real pty to exercise it is.
 PTY_TEST_OUT=$(python3 - "${SCRIPT_DIR}/scripts/lib/stdin-safe.sh" <<'PYEOF'
-import os, pty, subprocess, sys, select
+import sys
+
+try:
+    import pty
+except ImportError as exc:
+    print(f"PTY_UNAVAILABLE: {exc}")
+    sys.exit(0)
+
+import os, subprocess, select
 
 lib_path = sys.argv[1]
 master, slave = pty.openpty()
@@ -61,7 +78,13 @@ proc.wait(timeout=2)
 print("DONE" if "DONE" in out else "NO_DONE_MARKER")
 PYEOF
 )
-check "tty stdin does not hang sl_read_stdin_safe" "DONE" "$PTY_TEST_OUT"
+
+if [[ "$PTY_TEST_OUT" == PTY_UNAVAILABLE:* ]]; then
+    echo "[capability probe] pty (pseudo-terminal) allocation: UNAVAILABLE (${PTY_TEST_OUT#PTY_UNAVAILABLE: }) -- POSIX-only primitive, probed not platform-inferred"
+    echo "SKIP: tty stdin does not hang sl_read_stdin_safe (no pty available to manufacture a real terminal fd on this platform)"
+else
+    check "tty stdin does not hang sl_read_stdin_safe" "DONE" "$PTY_TEST_OUT"
+fi
 
 # Case 6: piped stdin (the real hook path) is read fully, never short-circuited.
 OUT=$(printf 'hello-world' | bash -c "source '${SCRIPT_DIR}/scripts/lib/stdin-safe.sh'; sl_read_stdin_safe")
