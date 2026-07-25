@@ -1,25 +1,30 @@
 # Claude Self-Learning — Dev Instructions
 
 > **Branch status: `harness-neutral-persistence`.**
-> The original 10-task implementation plan is complete, and six post-implementation fix
-> rounds (A-F) have since landed addressing findings from a whole-branch final review and
-> from the CI matrix it triggered.
-> History for that plan and those rounds:
-> `docs/superpowers/HANDOFF-2026-07-25-harness-neutral-persistence.md` (the original task-by-task
-> handoff, now historical) and `.superpowers/sdd/2026-07-25-harness-neutral-persistence/` (the
-> ledger and each round's fix report). `git log` is the source of truth for what is actually on
-> the branch now — read that before trusting either document's narrative.
-> **CI: all six matrix cells are green** (`ubuntu/macos/windows-latest` × Python `3.9`/`3.13`),
-> most recently CI run `30167923350`, 37 suites each at that time (41 now: 29 shell, 12 Python — the four added since that run are unobserved on the matrix; the count grows as
-> suites are added — verify against `bash tests/run-all.sh`'s own "Discovered N suite(s)" line
-> rather than trusting a number written here). The branch was red on this matrix repeatedly
-> through the afternoon of 2026-07-25 (a flaky zero-tolerance timestamp assertion in
-> `tests/test-config.sh`, fixed in a subsequent round); read `gh run list --branch
-> harness-neutral-persistence` for the true recent history rather than assuming the last green
-> run was the only run. Note that Windows green is not equal coverage: 7
-> write-path security tests (symlink/hardlink/`O_NOFOLLOW`) and 3 shell assertions skip there,
-> each printed with its reason and gated on a probe that verifies the limitation rather than
-> assuming it from the platform name.
+> The original 10-task implementation plan is complete. Since then the branch has taken
+> **fix rounds A-F, rounds P0-P9, and a final closeout round** — collectively ~1,700 lines of
+> new production code and ~5,000 of tests that were never part of the agreed plan.
+> History: `.superpowers/sdd/2026-07-25-harness-neutral-persistence/` holds the ledger
+> (`progress.md`), each round's report, `plan-vs-delivered-audit.md` (plan-vs-tree, item by
+> item), and `fix-final-closeout-report.md`.
+> `docs/superpowers/plans/2026-07-25-harness-neutral-persistence.md` is the agreed plan; it now
+> carries in-place `SUPERSEDED` callouts on the eight passages the tree contradicts, plus an
+> Appendix A summarising the post-plan rounds. **Read those callouts before implementing
+> anything from it** — Task 4's flat `<name>.md` skill layout in particular would reintroduce a
+> Critical. `docs/superpowers/HANDOFF-2026-07-25-harness-neutral-persistence.md` is the original
+> task-by-task handoff, now historical.
+> `git log` is the source of truth for what is actually on the branch — read it before trusting
+> any document's narrative, including this one.
+>
+> **CI.** The matrix is `{ubuntu, macos, windows}-latest × Python {3.9, 3.13}`, six cells.
+> **No run id is recorded here, deliberately** — every previous version of this paragraph
+> pinned one and went stale within hours. Run `gh run list --branch harness-neutral-persistence`
+> and `gh run view <id>`; the last run observed while writing this was green on all six cells
+> with the full suite. The branch was red on this matrix repeatedly on 2026-07-25, so read the
+> run *history*, not just the newest entry, before concluding anything. Note that Windows green
+> is not equal coverage: 7 write-path security tests (symlink/hardlink/`O_NOFOLLOW`) and 3 shell
+> assertions skip there, each printed with its reason and gated on a probe that verifies the
+> limitation rather than assuming it from the platform name.
 > **Live Copilot CLI check: DONE (2026-07-25), with one residual.** Run against whatever
 > `copilot` was installed that day (1.0.73 at that moment; it auto-updates, and 1.0.75 has
 > since been observed installed -- this project targets "current, authenticated `copilot`
@@ -64,7 +69,7 @@ This project implements a Hermes-Agent-inspired self-learning system that serves
 ## Development Guidelines
 
 - Scripts must be POSIX-compatible bash (`#!/usr/bin/env bash`)
-- Python scripts target Python 3.8+ (no external dependencies for core scripts)
+- Python scripts are **stdlib only** and target **Python 3.9+** — that is the CI floor (`python-version: ["3.9", "3.13"]` in `.github/workflows/ci.yml`) and the lowest version anything here is actually run against. 3.8 is untested; do not claim it. Write `from __future__ import annotations` in any module using `X | None` annotations.
 - All hooks must complete in <100ms. turn-counter.sh's own target used to be documented as <50ms; measured (fix round C, this machine, `date +%s%N` around 5-6 real runs) at 50-68ms with a native python3 on PATH, consistently over 130-155ms with a pyenv/asdf shim in front of it (the shim itself, not this project's code, costs ~85ms — confirmed by timing the shim vs. the real interpreter binary directly). ~22-25ms of the real-python3 figure is `config.sh`'s one `python3 lib/paths.py all` subprocess spawn per hook invocation. <50ms is not honestly achievable without caching that resolution across hook invocations (e.g. in a state file), which was considered and rejected for this round: caching a store-location resolution risks exactly the silent-wrong-location class this project exists to eliminate if the cache goes stale relative to `AGENT_LEARNING_HOME`/`XDG_DATA_HOME`. Target amended to <100ms (matching the general hook budget above) rather than keep a number the code was already known to miss.
 - Test with `tests/test-*.sh` scripts before committing (or `bash tests/run-all.sh` for the full suite)
 - `install.sh` deploys into the vendor-neutral store resolved by `scripts/lib/paths.py` (default `~/.local/share/agent-learning`, overridable via `AGENT_LEARNING_HOME`/`XDG_DATA_HOME`) — never test it against a real `$HOME`; use `env -i HOME=<tmp> AGENT_LEARNING_HOME=<tmp>/store` and `--dry-run`
@@ -80,6 +85,6 @@ This project originally followed a 5-phase, 10-week roadmap defined in the imple
 | 2 | Background Review (prompts, memory/skill writes) | Done — reviewer proposes JSON on stdout, `scripts/persist-proposal.py` validates and performs every write, confined to the resolved store |
 | 3 | Skill Lifecycle (telemetry, transitions) | Done |
 | 4 | Curator + Session Search | Done |
-| 5 | Integration + Polish | Done for Claude Code + Copilot CLI, including a `doctor.sh` diagnostic; VS Code Copilot Chat adapter/hooks not started (tracked separately). Windows support (Git Bash, PowerShell wrappers) is now CI-verified: all six matrix cells green at CI run `30167923350` (the 37 suites that existed then; 41 now, the four newest unobserved on the matrix), after fix rounds A-F plus later same-day rounds fixed real defects the matrix exposed — a Python 3.9 `fromisoformat` failure on `Z` timestamps, GNU-only `date` use on macOS, CRLF-corrupted `paths.py` stdout plus MSYS path-form mismatches on Windows, and (most recently) a zero-tolerance timestamp round-trip assertion in `tests/test-config.sh` that was flaky under real wall-clock ticks. Windows green is not equal coverage: 7 write-path security tests and 3 shell assertions skip there (symlinks need elevation; `chmod` does not deny writes under ACLs), each announced with its reason. The live Copilot CLI end-to-end check with a real model call is still pending manual verification. |
+| 5 | Integration + Polish | Done for Claude Code + Copilot CLI, including a `doctor.sh` diagnostic; VS Code Copilot Chat adapter/hooks not started (tracked separately). Windows support (Git Bash, PowerShell wrappers) is CI-verified across the six-cell matrix — for current status run `gh run list --branch harness-neutral-persistence` rather than trusting a run id written here. Fix rounds A-F and P0-P9 fixed real defects the matrix exposed: a Python 3.9 `fromisoformat` failure on `Z` timestamps, GNU-only `date` use on macOS, CRLF-corrupted `paths.py` stdout plus MSYS path-form mismatches on Windows, a flaky zero-tolerance timestamp round-trip in `tests/test-config.sh`, a lost-update race in concurrent appends (now a cross-process store lock), and a PowerShell syntax checker that had itself been the parse error. Windows green is not equal coverage: 7 write-path security tests and 3 shell assertions skip there (symlinks need elevation; `chmod` does not deny writes under ACLs), each announced with its reason. **The live Copilot CLI end-to-end check is DONE** (2026-07-25, real paid model call — see the branch-status block at the top of this file for exactly what it did and did not cover); an earlier version of this row said it was still pending, contradicting that block. |
 
-A subsequent, still-in-progress plan (`harness-neutral-persistence`) replaced the original Claude-Code-only storage defaults with the vendor-neutral store described in `README.md` under "Storage locations" — the fix for a defect where Copilot CLI's path allow-list silently discarded review output written to `~/.claude`.
+The `harness-neutral-persistence` plan, now complete, replaced the original Claude-Code-only storage defaults with the vendor-neutral store described in `README.md` under "Storage locations" — the fix for a defect where Copilot CLI's path allow-list silently discarded review output written to `~/.claude`.

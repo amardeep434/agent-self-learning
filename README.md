@@ -51,7 +51,7 @@ SESSION START
 |------------|-----------|---------|---------------|
 | bash | all scripts | 4.0+ | via Git for Windows (Git Bash) or WSL |
 | jq | hook payload + settings/JSON handling | 1.6+ | `winget install jqlang.jq` |
-| python3 | injector, coach signals, session indexing and search (including its bundled `sqlite3` module) | 3.8+ (stdlib only) | `winget install Python.Python.3.12` |
+| python3 | injector, coach signals, session indexing and search (including its bundled `sqlite3` module) | 3.9+ (stdlib only — 3.9 is the CI floor; 3.8 is untested) | `winget install Python.Python.3.12` |
 | sqlite3 (CLI, optional) | manual DB inspection; `self-learning-health.sh`'s database check (degrades to a warning, not a failure, if absent) | any | bundled with Git for Windows or `winget install SQLite.SQLite` |
 | Claude Code | Claude adapter (optional) | current | — |
 | GitHub Copilot CLI | Copilot adapter (optional) | current, authenticated | PowerShell 7+ required for its hooks |
@@ -139,6 +139,12 @@ prints which backend is in force. Waiting is bounded — default 20s,
 overridable with `SL_PERSIST_LOCK_TIMEOUT` — and a timeout fails loudly: a
 non-zero exit plus a `lock timeout` line in `persist-failures.log`.
 
+Both kernel-backed backends are confirmed to *execute* in CI, not merely to
+exist: `tests/test-persist-concurrency.py` prints
+`[capability probe] store_lock backend=...` on every run, and the matrix logs
+show `flock` on the ubuntu and macos cells and `msvcrt` on the windows cells.
+Grep any run's log for `store_lock backend=` to see it for yourself.
+
 Harness-owned config files are a deliberate exception and stay where each
 harness owns them: Claude Code's `~/.claude/settings.json` and Copilot CLI's
 `~/.copilot/hooks/self-learning.json` are not moved into the store — only the
@@ -196,6 +202,46 @@ a detected legacy `~/.claude` store is never fatal, even under `--strict` —
 every machine upgraded from a pre-vendor-neutral install would otherwise fail
 `doctor.sh` forever, training operators to ignore its exit code entirely.
 
+## Known residuals
+
+Stated rather than quietly carried. None of these is a plan to fix; each is a
+limit that a reader should know about before trusting the system further than
+it goes.
+
+- **The TOCTOU hardening does not cover Windows.** `persist-proposal.py`
+  anchors every write on a `dir_fd` with `O_NOFOLLOW`, which closes the
+  resolve-then-open race. Both primitives are POSIX-only and the stdlib
+  offers no Windows equivalent, so Windows falls back to the documented,
+  weaker path-based writer. `doctor.sh` prints which writer is in force.
+  Closing it would need a Windows-specific reimplementation outside the
+  stdlib-only constraint.
+- **The WSL-vs-Git-Bash PATH ambiguity is reasoned about but not CI-tested.**
+  `install.ps1`/`uninstall.ps1` refuse to delegate to a `bash` that cannot see
+  this repository (a `test -f` probe on the exact script path). That guard is
+  parse-checked and behaviourally tested on ubuntu runners, which have `pwsh`
+  but no WSL — so the *scenario* it defends against cannot be reproduced
+  without a Windows PowerShell CI job, which does not exist. The logic is
+  tested; the environment is not.
+- **`transcript.py` parses two undocumented, unversioned third-party on-disk
+  formats** — Copilot CLI's `session-state/<id>/events.jsonl` and Claude
+  Code's `projects/<slug>/<id>.jsonl`. Both were reverse-engineered from real
+  files and neither vendor documents or versions them, so an update on either
+  side can break session digestion. The mitigation is that it **fails
+  loudly**: every degraded outcome — file missing, zero parseable events, or
+  events present but none matching the expected message shape (the exact
+  signature of a renamed schema) — returns a named reason that is appended to
+  `persist-failures.log`, which `doctor.sh` surfaces. It never yields a
+  silently empty transcript, which is this project's signature failure mode.
+  It cannot be made immune to a format change; it can only refuse to hide one.
+- **No genuine interactive Copilot session has yet fired `sessionEnd` with
+  real conversation history in the payload.** The path is verified end-to-end
+  with a real paid model call (see the compatibility table); the remaining gap
+  needs ordinary day-to-day use, not engineering.
+- **34 of the 45 vendored Coach rules are not evaluated** by the adapted Route
+  A evaluator, because they need per-turn telemetry this project does not
+  capture. Each skips loudly with the exact missing field named. See the
+  compatibility table.
+
 ## Uninstall (single command)
 
 ```bash
@@ -228,13 +274,13 @@ follow-up plan) and no row below claims otherwise.
 |------------|-------------|--------------------|-------|
 | Learned memory + skills stores | ✅ | ✅ | shared files, agent-agnostic; covered by `test-persist-proposal.py`, `test-proposal-schema.py` |
 | AGENTS.md learned-context injection | ✅ | ✅ | Copilot also reads CLAUDE.md; covered by `test-inject-agents-md.sh` |
-| Session-end background review | ✅ Stop hook | ✅ sessionEnd hook | both spawn a headless reviewer; covered by `test-session-review.sh` (Claude) and `test-copilot-session-review.sh` (Copilot) |
+| Session-end background review | ✅ Stop hook | ✅ sessionEnd hook | both spawn a headless reviewer that is **denied file-write tools** — Claude via `--allowedTools Read,Glob,Grep --disallowedTools Write,Edit,NotebookEdit`, Copilot via `--allow-tool read`. Every write is `persist-proposal.py`'s. Both argv shapes are asserted (`test-session-review.sh`, `test-copilot-session-review.sh`) and checked against the real installed binaries with no model calls (`test-review-cli-flags.sh`). See "Bounding reviewer cost" for the cost knobs. |
 | Mid-session turn counting | ✅ PostToolUse hook | ❌ not wired | deliberate: session-end loop is the portable core; covered by `test-turn-counter.sh` |
 | Copilot path independent of Claude Code | — | ✅ | `test-claude-absent.sh` runs the full Copilot review path with no `claude` binary or `~/.claude` present |
 | Session search indexing | ✅ (Claude JSONL) | ❌ planned | Copilot session-state parser is a follow-up plan; not yet exercised by run-all.sh beyond schema tests |
 | Coach signals (Routes A/B) | ✅ Route A (11/45 rules, adapted) + ✅ Route B (full, when the fork is installed) | same | reaches the reviewer prompt: `session-review.sh`/`copilot-session-review.sh` call `coach-signals.py` then append its merged output as a "Coach signals" section of the review prompt when present and <7 days old; covered by `test-coach-signals.py`, `test-coach-rules-eval.py`, and `test-session-review.sh`'s "coach signal id reaches prompt" assertion, which fails if that wiring ever regresses. **Route A is not upstream-equivalent**: `scripts/coach-rules-eval.py` evaluates 11 of the 45 vendored rules, each an ADAPTATION to this project's own `messages`/`sessions` columns (per-user-message text/timestamp + session-level counts), never VS Code Copilot Chat's richer per-turn telemetry (modelId, toolsUsed[], referencedFiles[], token counts, etc.) that upstream's `scan: requests` rules actually target and that this project does not capture for either harness. The other 34 rules skip loudly with a reason naming the exact missing field (see the module docstring and `UNSUPPORTED_REASONS` in `coach-rules-eval.py`); `bash tests/run-all.sh` pins this count via `test-coach-rules-eval.py`'s `CoverageAssertionTest` so a future change that silently drops coverage fails the suite. Route B, when the maintained fork is installed, bypasses this gap entirely — it reads Coach's own complete analysis (see "AI Engineering Coach integration" below) rather than re-deriving it from our narrower data. |
-| Windows | ✅ green (Git Bash), with skips — see note | ✅ green (Git Bash), with skips — see note | CI results are per-OS (the whole matrix cell passes or fails), not per-harness, so both columns show the same Windows result. The 37 suites that existed then all ran and passed on `windows-latest` × Python 3.9 and 3.13 as of CI run `30167923350`. Four suites have been added since (`test-persist-concurrency.py`, `test-ps1-wrappers.sh`, `test-store-lock-writers.py`, `test-review-cli-flags.sh`, 41 total) and have **not** yet been observed green on this matrix (run `30170096027` ran them and was red on all six cells; both causes are fixed — see the P9 section of `.superpowers/sdd/2026-07-25-harness-neutral-persistence/fix-p7-append-race-report.md`) — do not read the run id below as covering them. The branch was red on this matrix repeatedly earlier the same day (most recently a flaky zero-tolerance timestamp assertion in `tests/test-config.sh`, since fixed) — check `gh run list --branch harness-neutral-persistence` for current status rather than trusting a run id frozen in this file. **But green ≠ equally covered**: 7 write-path security tests in `test-persist-proposal.py` (symlink, hardlink, and `O_NOFOLLOW` cases) and 3 shell assertions skip on Windows, because creating a real symlink needs Developer Mode or elevation and `chmod` does not deny writes on ACL-governed filesystems. Each skip is printed with its reason and is gated on a probe that verifies the limitation rather than assuming it from the platform name. The symlink/hardlink attack surface is therefore exercised on Linux and macOS only. |
-| macOS | ✅ green | ✅ green | Same per-OS note as the Windows row. The 37 suites that existed then all ran and passed on `macos-latest` × Python 3.9 and 3.13 as of CI run `30167923350`, with no skips; the four suites added since are unobserved green there too. |
+| Windows | ✅ green (Git Bash), with skips — see note | ✅ green (Git Bash), with skips — see note | CI results are per-OS (the whole matrix cell passes or fails), not per-harness, so both columns show the same Windows result. **No run id is frozen here** — earlier versions of this row cited one and went stale within hours, twice. Get the current state with `gh run list --branch harness-neutral-persistence` and `gh run view <id>`; the matrix is `{ubuntu, macos, windows}-latest × Python {3.9, 3.13}`, six cells. As of the last run observed while writing this, all six were green with the full suite. **Green ≠ equally covered**: 7 write-path security tests in `test-persist-proposal.py` (symlink, hardlink, `O_NOFOLLOW`) and 3 shell assertions skip on Windows, because creating a real symlink needs Developer Mode or elevation and `chmod` does not deny writes on ACL-governed filesystems. Every skip prints its reason and is gated on a probe that *verifies* the limitation rather than assuming it from the platform name. The symlink/hardlink attack surface is therefore exercised on Linux and macOS only. |
+| macOS | ✅ green | ✅ green | Same per-OS note as the Windows row, including the "no frozen run id" part. No skips on macOS. |
 | Copilot CLI live end-to-end (real session, real file on disk) | n/a | ✅ verified 2026-07-25 (one residual) | Run against whatever `copilot` version was installed on 2026-07-25 (1.0.73 at that moment; it has since auto-updated past that, e.g. 1.0.75 — this project targets "current, authenticated `copilot` on PATH," never a pinned version, so treat any specific number here as a point-in-time observation, not a requirement) with a real paid model call. `copilot-session-review.sh` completed end-to-end and the writer accepted a valid empty proposal (correct — headless `-p` has no transcript to mine); the same OUTPUT CONTRACT with a transcript produced a conforming proposal and **real content persisted** to `<store>/memory/MEMORY.md`, append mode, 0600, nothing written outside the store. Residual: no genuine *interactive* session has fired the `sessionEnd` hook with real conversation history in the payload yet — that needs ordinary use. |
 
 ## AI Engineering Coach integration (optional)
@@ -280,7 +326,7 @@ signal that can only ever fire zero times. Re-vendor rules with
 | 2 | Background Review (review prompts, memory/skill writes) | Done — reviewer proposes JSON on stdout, `scripts/persist-proposal.py` validates and writes, confined to the resolved store |
 | 3 | Skill Lifecycle (telemetry, state machine, authoring standards) | Done |
 | 4 | Curator + Session Search (consolidation, FTS5 index) | Done |
-| 5 | Integration + Polish (config, caching, install, health check) | Done for Claude Code + Copilot CLI; VS Code Copilot Chat adapter not started (tracked separately); CI green on all six matrix cells (most recently run `30167923350`) — see "Agent compatibility" above for the Windows skip caveat |
+| 5 | Integration + Polish (config, caching, install, health check) | Done for Claude Code + Copilot CLI; VS Code Copilot Chat adapter not started (tracked separately). For CI status run `gh run list --branch harness-neutral-persistence` — no run id is recorded here, deliberately; see "Agent compatibility" above for the Windows skip caveat |
 
 See "Storage locations" above for the harness-neutral persistence work that
 followed the original 5-phase plan: a shared, vendor-neutral store plus a
@@ -305,7 +351,10 @@ claude-self-learning/
     session-search-schema.sql   # Base sessions/messages schema, always applied
     session-search-fts5.sql     # FTS5 index + sync triggers, applied only when probe_fts5() confirms support
   scripts/                      # Hook, review, curator, install/uninstall, and doctor scripts (bash + Python)
-  tests/                        # test suites run by tests/run-all.sh (count drifts — see its own "Discovered N suite(s)" output; 37 as of this writing)
+  tests/                        # test suites discovered by glob and run by tests/run-all.sh
+                                #   (no count is recorded here: it drifts on every suite added or
+                                #    removed, and has gone stale in this file repeatedly. Run
+                                #    `bash tests/run-all.sh` and read its "Discovered N suite(s)" line.)
   docs/
     research/                   # 15 research documents (~789KB)
 ```
