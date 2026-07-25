@@ -103,5 +103,17 @@ else
 fi
 rm -rf "$TMP_HOME" "$FAKE_BIN"
 
+# I8: the prompt used to state a dot-inclusive skill-name charset
+# (^[a-z0-9][a-z0-9._-]*$) that contradicted proposal_schema.py's actual
+# regex, stated a few lines later in the same prompt (self-contradictory).
+# Pin that the prompt states the schema regex once, and never states the
+# stale dot-inclusive form anywhere.
+check "prompt states the real schema regex" "yes" \
+    "$(grep -qF '[A-Za-z0-9][A-Za-z0-9_-]{0,63}' "${SCRIPT_DIR}/scripts/session-review.sh" && echo yes || echo no)"
+check "prompt no longer states the dot-inclusive contradiction" "no" \
+    "$(grep -qE '\[a-z0-9\]\[a-z0-9\._-\]' "${SCRIPT_DIR}/scripts/session-review.sh" && echo yes || echo no)"
+check "prompt no longer instructs the model to write .usage.json itself" "no" \
+    "$(grep -qi 'set created_by.*\.usage\.json' "${SCRIPT_DIR}/scripts/session-review.sh" && echo yes || echo no)"
+
 if [[ "$FAILURES" -gt 0 ]]; then exit 1; fi
 echo "All session-review tests passed."

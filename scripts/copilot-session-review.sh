@@ -31,14 +31,16 @@ ${SL_SKILLS_DIR}/ for existing skills.
 1. Memory review: extract user corrections, project facts, and preferences
    from this session. Write single-line entries (max 120 chars) to MEMORY.md
    or USER.md.
-2. Skill review: extract reusable patterns/workflows as skills under
+2. Skill review: extract reusable patterns/workflows as skills. Each
+   proposed skill is persisted (by the writer, not by you) as
    ${SL_SKILLS_DIR}/<skill-name>/SKILL.md. Prefer updating existing skills.
 
 ## Rules
 - Maximum 3 memory writes + 2 skill operations.
 - Never save secrets, tokens, API keys, passwords, or personal data.
-- Skill names must match ^[a-z0-9][a-z0-9._-]*\$ (max 64 chars); descriptions
-  max 60 chars, one sentence, ending with a period.
+- Skill names must match [A-Za-z0-9][A-Za-z0-9_-]{0,63} (max 64 chars,
+  case-sensitive, digits/letters/underscore/hyphen only -- no dots); skill
+  descriptions max 60 chars, one sentence, ending with a period.
 - Only read files under ${SL_MEMORY_DIR} and ${SL_SKILLS_DIR}.
 - No network requests. No package installs.
 

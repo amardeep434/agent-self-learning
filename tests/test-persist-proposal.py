@@ -23,6 +23,10 @@ def run(stdin_text, home, extra_args=()):
 
 class TestWrites(unittest.TestCase):
     def test_writes_memory_and_skill(self):
+        """C4: skills must land as <name>/SKILL.md (a directory), not a flat
+        <name>.md file -- inject-agents-md.py, curator-run.sh, and
+        skill-lifecycle.py all require a directory, so a flat file is
+        syntactically written but invisible to every consumer."""
         with tempfile.TemporaryDirectory() as d:
             home = Path(d)
             payload = json.dumps({"version": 1,
@@ -31,7 +35,80 @@ class TestWrites(unittest.TestCase):
             r = run(payload, home)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertEqual((home / "memory" / "MEMORY.md").read_text(), "remembered")
-            self.assertEqual((home / "learned-skills" / "alpha.md").read_text(), "# Alpha")
+            self.assertEqual((home / "learned-skills" / "alpha" / "SKILL.md").read_text(), "# Alpha")
+            self.assertFalse((home / "learned-skills" / "alpha.md").exists())
+
+    def test_writes_usage_json_entry_for_new_skill(self):
+        """C4: nothing updated .usage.json either, so the lifecycle state
+        machine could never see an agent-authored skill at all -- it only
+        walks that file's keys."""
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            payload = json.dumps({"version": 1,
+                                  "skills": [{"name": "alpha", "content": "# Alpha"}]})
+            r = run(payload, home)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            usage = json.loads((home / "learned-skills" / ".usage.json").read_text())
+            self.assertEqual(usage["alpha"]["created_by"], "agent")
+            self.assertEqual(usage["alpha"]["state"], "active")
+            self.assertFalse(usage["alpha"]["pinned"])
+            self.assertEqual(usage["alpha"]["use_count"], 0)
+            self.assertIn("created_at", usage["alpha"])
+            self.assertIn("last_patched_at", usage["alpha"])
+
+    def test_refresh_preserves_lifecycle_fields_but_bumps_last_patched_at(self):
+        """Re-persisting an existing skill must not clobber a human's pin,
+        the lifecycle state, or accumulated use_count -- only content and
+        last_patched_at (the activity signal for 'content was patched')
+        should change."""
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            skills_dir = home / "learned-skills"
+            skills_dir.mkdir(parents=True)
+            (skills_dir / "alpha").mkdir()
+            (skills_dir / "alpha" / "SKILL.md").write_text("# Old")
+            (skills_dir / ".usage.json").write_text(json.dumps({
+                "alpha": {"created_by": "agent", "created_at": "2020-01-01T00:00:00+00:00",
+                          "state": "stale", "pinned": True, "use_count": 7}
+            }))
+            payload = json.dumps({"version": 1,
+                                  "skills": [{"name": "alpha", "content": "# New"}]})
+            r = run(payload, home)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual((skills_dir / "alpha" / "SKILL.md").read_text(), "# New")
+            usage = json.loads((skills_dir / ".usage.json").read_text())["alpha"]
+            self.assertEqual(usage["created_at"], "2020-01-01T00:00:00+00:00")
+            self.assertEqual(usage["state"], "stale")
+            self.assertTrue(usage["pinned"])
+            self.assertEqual(usage["use_count"], 7)
+            self.assertNotEqual(usage.get("last_patched_at"), None)
+
+    def test_usage_json_and_skill_content_write_atomically(self):
+        """Both the SKILL.md and the .usage.json entry must land in the same
+        staged-then-renamed transaction: a crash cannot leave one without
+        the other. Simulated here by colliding a *second* skill's directory
+        with a pre-existing file, which must abort the whole write -- so the
+        first skill's SKILL.md and the merged .usage.json (which already
+        includes the first skill) must both be absent afterward."""
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            skills_dir = home / "learned-skills"
+            skills_dir.mkdir(parents=True)
+            # "beta" pre-exists as a plain file, not a directory -- mkdir(name)
+            # for the second skill will fail with FileExistsError.
+            (skills_dir / "beta").write_text("not a directory")
+            payload = json.dumps({"version": 1,
+                                  "skills": [{"name": "alpha", "content": "# Alpha"},
+                                             {"name": "beta", "content": "# Beta"}]})
+            r = run(payload, home)
+            self.assertEqual(r.returncode, 2, r.stderr)
+            # The directory itself may be pre-created (mkdir is not a content
+            # commit), but no file content may have landed: neither the
+            # first skill's SKILL.md nor the merged .usage.json (which
+            # already includes the first skill by the time staging fails on
+            # the second) is committed.
+            self.assertFalse((skills_dir / "alpha" / "SKILL.md").exists())
+            self.assertFalse((skills_dir / ".usage.json").exists())
 
     def test_append_mode_appends(self):
         with tempfile.TemporaryDirectory() as d:
@@ -61,6 +138,26 @@ class TestWrites(unittest.TestCase):
 
 
 class TestRejects(unittest.TestCase):
+    def test_dotted_skill_name_rejects_whole_proposal_including_valid_memory(self):
+        """I8: the reviewer prompts used to state a dot-inclusive skill-name
+        charset (^[a-z0-9][a-z0-9._-]*$) that contradicts proposal_schema's
+        actual regex (no dots). A model that obeyed the (now-corrected)
+        stated rule with a name like 'git.rebase' would get the entire
+        proposal rejected -- and since validation is all-or-nothing, valid
+        memory entries in the same proposal are discarded with it. This
+        pins that exact scenario from the finding as a regression test,
+        independent of which way the prompt-vs-schema mismatch gets fixed."""
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            payload = json.dumps({"version": 1,
+                                  "memory": [{"file": "MEMORY.md", "mode": "replace",
+                                              "content": "valid entry"}],
+                                  "skills": [{"name": "git.rebase", "content": "x"}]})
+            r = run(payload, home)
+            self.assertEqual(r.returncode, 1, r.stderr)
+            self.assertFalse((home / "memory" / "MEMORY.md").exists())
+            self.assertIn("git.rebase", r.stderr)
+
     def test_invalid_proposal_exits_1_and_writes_nothing(self):
         with tempfile.TemporaryDirectory() as d:
             home = Path(d)
@@ -130,10 +227,12 @@ class TestFixRound1Regressions(unittest.TestCase):
             self.assertNotIn("Traceback", r.stderr)
 
     def test_directory_collision_on_second_entry_leaves_first_uncommitted(self):
+        """Post-C4-fix, a skill's target is <name>/SKILL.md; the collision
+        that matters now is SKILL.md itself pre-existing as a directory
+        inside an otherwise-normal skill directory."""
         with tempfile.TemporaryDirectory() as d:
             home = Path(d)
-            (home / "learned-skills").mkdir(parents=True)
-            (home / "learned-skills" / "beta.md").mkdir()
+            (home / "learned-skills" / "beta" / "SKILL.md").mkdir(parents=True)
             payload = json.dumps({"version": 1,
                                   "memory": [{"file": "MEMORY.md", "mode": "replace",
                                               "content": "should-not-persist"}],
@@ -141,6 +240,37 @@ class TestFixRound1Regressions(unittest.TestCase):
             r = run(payload, home)
             self.assertEqual(r.returncode, 2)
             self.assertFalse((home / "memory" / "MEMORY.md").exists())
+            self.assertFalse((home / "learned-skills" / ".usage.json").exists())
+
+    def test_symlinked_skill_directory_is_refused(self):
+        """New attack surface from C4: a skill name now maps to a
+        *directory*, not a flat file. An attacker who can plant
+        learned-skills/<name> as a symlink before the proposal runs must not
+        be able to redirect the write anywhere outside the store."""
+        if sys.platform.startswith("win"):
+            self.skipTest("symlink creation requires privilege on Windows")
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d) / "store"
+            (home / "learned-skills").mkdir(parents=True)
+            outside = Path(d) / "outside"
+            outside.mkdir()
+            (home / "learned-skills" / "evil").symlink_to(outside, target_is_directory=True)
+            payload = json.dumps({"version": 1,
+                                  "skills": [{"name": "evil", "content": "pwned"}]})
+            r = run(payload, home)
+            self.assertEqual(r.returncode, 2)
+            self.assertEqual(list(outside.iterdir()), [])
+
+    def test_skill_name_cannot_collide_with_usage_json(self):
+        """The schema's skill-name regex forbids a leading dot, but this is
+        the filesystem-level backstop: a skill directory must never be able
+        to land on the exact name of the shared metadata file."""
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            payload = json.dumps({"version": 1,
+                                  "skills": [{"name": ".usage.json", "content": "x"}]})
+            r = run(payload, home)
+            self.assertEqual(r.returncode, 1)  # rejected by proposal_schema's regex
 
     def test_append_through_symlinked_existing_file_is_refused(self):
         if sys.platform.startswith("win"):

@@ -68,7 +68,10 @@ Then perform a combined memory + skill review:
 
 2. **Skill review**: Scan for reusable patterns, commands, or workflows that
    should be saved as learned skills. Prefer updating existing skills over
-   creating new narrow ones.
+   creating new narrow ones. Each proposed skill is persisted (by the
+   writer, not by you) as ${SL_SKILLS_DIR}/<skill-name>/SKILL.md, with a
+   matching entry in .usage.json created or refreshed automatically -- you
+   do not write either file yourself.
 
 ## Rules
 
@@ -76,9 +79,9 @@ Then perform a combined memory + skill review:
 - Each memory entry must be a single line, under 120 characters
 - Never save: secrets, tokens, API keys, passwords, personal data beyond name/role
 - Check existing memory before adding -- do not duplicate
-- Skill names must match ^[a-z0-9][a-z0-9._-]*\$ and be max 64 characters
+- Skill names must match [A-Za-z0-9][A-Za-z0-9_-]{0,63} and be max 64
+  characters (case-sensitive, digits/letters/underscore/hyphen only -- no dots)
 - Skill descriptions must be max 60 characters, one sentence, end with period
-- Set created_by="agent" in .usage.json for any new skill
 - You may ONLY use Read, Glob, and Grep tools to gather context
 - Do NOT use Bash for anything except listing files
 - Do NOT make network requests or install packages

@@ -93,5 +93,11 @@ else
 fi
 rm -rf "$TMP_HOME" "$FAKE_BIN"
 
+# I8: same self-contradiction fixed in session-review.sh's prompt.
+check "prompt states the real schema regex" "yes" \
+    "$(grep -qF '[A-Za-z0-9][A-Za-z0-9_-]{0,63}' "${SCRIPT_DIR}/scripts/copilot-session-review.sh" && echo yes || echo no)"
+check "prompt no longer states the dot-inclusive contradiction" "no" \
+    "$(grep -qE '\[a-z0-9\]\[a-z0-9\._-\]' "${SCRIPT_DIR}/scripts/copilot-session-review.sh" && echo yes || echo no)"
+
 if [[ "$FAILURES" -gt 0 ]]; then exit 1; fi
 echo "All copilot-session-review tests passed."

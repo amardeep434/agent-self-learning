@@ -33,6 +33,7 @@ import json
 import os
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
@@ -48,6 +49,14 @@ from proposal_schema import ValidationError, extract_proposal, validate_proposal
 # many small, individually-valid proposals. 1 MiB is generous for a curated
 # memory/skill file while still bounding unattended growth.
 MAX_MEMORY_FILE_BYTES = 1 * 1024 * 1024
+
+# The on-disk skill layout every *consumer* requires (inject-agents-md.py,
+# curator-run.sh, skill-lifecycle.py): a directory per skill containing
+# SKILL.md, plus one shared metadata file at the top of the skills store.
+# This file used to write a flat `<name>.md` instead -- syntactically valid,
+# semantically invisible, since nothing downstream ever looked for it.
+SKILL_CONTENT_FILENAME = "SKILL.md"
+USAGE_FILENAME = ".usage.json"
 
 
 class PersistError(Exception):
@@ -94,6 +103,11 @@ def _assert_inside(root: Path, target: Path) -> None:
     even in that case, since both would resolve to the same symlinked
     destination. Checking root for symlink-ness directly is what actually
     catches that.
+
+    Called once per directory level in `_write_all`'s `dirs` chain (e.g.
+    (skills_dir, skill_dir) for a per-skill directory), so `root` is always
+    `target`'s *immediate* parent in that chain, not necessarily the
+    top-level store directory.
     """
     if root.exists():
         _reject_if_symlink(root, "store directory")
@@ -195,16 +209,96 @@ def _cleanup_tmp(tmp_name: str) -> None:
         pass  # already renamed, or never created -- either way, nothing to do
 
 
-def _plan(proposal: dict, memory_dir: Path, skills_dir: Path) -> list[tuple[Path, Path, str, str]]:
-    planned: list[tuple[Path, Path, str, str]] = []
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _load_usage_dict(skills_dir: Path) -> dict:
+    """Read the shared `.usage.json`, symlink/hardlink/UTF-8 safe, "{}" if absent.
+
+    Uses `_read_existing` -- the same defence-in-depth read path already used
+    for append-mode memory files -- so a planted symlink or hardlink at
+    `.usage.json` is refused exactly like one at MEMORY.md would be, rather
+    than silently read-through.
+    """
+    usage_path = skills_dir / USAGE_FILENAME
+    text = _read_existing(usage_path)
+    if not text.strip():
+        return {}
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        # Refuse rather than silently starting fresh: silently discarding a
+        # corrupt-but-real .usage.json would be a quiet destructive action
+        # of exactly the kind this file's threat model exists to prevent.
+        raise PersistError(f"{usage_path} exists but is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise PersistError(f"{usage_path} does not contain a JSON object")
+    return data
+
+
+def _merge_usage(usage: dict, skill_names: list[str]) -> dict:
+    """Create-or-refresh one `.usage.json` record per skill in this proposal.
+
+    Matches the field semantics skill-lifecycle.py actually reads (see
+    compute_activity_anchor and the created_by/pinned/state/use_count checks
+    in run_lifecycle there) -- this does not invent new fields.
+
+    - created_by/created_at/state/pinned/use_count are seeded only if the
+      record doesn't already have them, so re-persisting an existing skill
+      never clobbers a human's pin, its lifecycle state, or its telemetry.
+    - last_patched_at is always bumped to now: it is the activity field
+      compute_activity_anchor() reads that specifically means "content was
+      patched," which is exactly what this write is doing.
+    """
+    now = _now_iso()
+    merged = dict(usage)
+    for name in skill_names:
+        record = dict(merged.get(name, {}))
+        record.setdefault("created_by", "agent")
+        record.setdefault("created_at", now)
+        record.setdefault("state", "active")
+        record.setdefault("pinned", False)
+        record.setdefault("use_count", 0)
+        record["last_patched_at"] = now
+        merged[name] = record
+    return merged
+
+
+def _plan(proposal: dict, memory_dir: Path, skills_dir: Path) -> list[tuple[tuple[Path, ...], Path, str, str]]:
+    """Build the write plan.
+
+    Each entry is `(dirs, target, mode, content)`: `dirs` is the ordered
+    chain of directories from the top-level store directory down to
+    `target`'s immediate parent, every one of which `_write_all` creates and
+    confinement/symlink-checks in order before anything is staged. Memory
+    entries are a one-level chain (`(memory_dir,)`); skills are two-level
+    (`(skills_dir, skill_dir)`) since each skill now gets its own directory.
+    """
+    planned: list[tuple[tuple[Path, ...], Path, str, str]] = []
     for entry in proposal["memory"]:
-        planned.append((memory_dir, memory_dir / entry["file"], entry["mode"], entry["content"]))
+        planned.append(((memory_dir,), memory_dir / entry["file"], entry["mode"], entry["content"]))
+
+    skill_names = [entry["name"] for entry in proposal["skills"]]
     for entry in proposal["skills"]:
-        planned.append((skills_dir, skills_dir / f"{entry['name']}.md", "replace", entry["content"]))
+        skill_dir = skills_dir / entry["name"]
+        planned.append(((skills_dir, skill_dir), skill_dir / SKILL_CONTENT_FILENAME,
+                        "replace", entry["content"]))
+
+    if skill_names:
+        # Folded into the very same staged-then-renamed transaction as the
+        # skill content below: a crash between the two renames is the one
+        # residual this module can't close (documented in _write_all), but
+        # nothing here introduces a *new* window beyond that pre-existing one.
+        usage = _load_usage_dict(skills_dir)
+        merged = _merge_usage(usage, skill_names)
+        usage_content = json.dumps(merged, indent=2, sort_keys=True) + "\n"
+        planned.append(((skills_dir,), skills_dir / USAGE_FILENAME, "replace", usage_content))
+
     return planned
 
 
-def _write_all(planned: list[tuple[Path, Path, str, str]]) -> tuple[list[str], int]:
+def _write_all(planned: list[tuple[tuple[Path, ...], Path, str, str]]) -> tuple[list[str], int]:
     """Stage every entry, then rename every staged file into place.
 
     Raises PersistError/OSError on any failure. On a staging failure, no real
@@ -220,13 +314,39 @@ def _write_all(planned: list[tuple[Path, Path, str, str]]) -> tuple[list[str], i
     could in principle be swapped for a symlink in that gap. Closing it
     would need `dir_fd`-relative operations throughout, and `mkstemp` has no
     `dir_fd` parameter to hang that off of. Documented, not fixed.
+
+    Each entry's `dirs` chain (see `_plan`) is walked and mkdir'd/checked one
+    level at a time: every directory is created (a no-op if it already
+    exists as a real directory), confinement-checked against its immediate
+    parent via `_assert_inside`, and *explicitly* symlink-checked itself.
+    That explicit check is deliberately redundant with two things that
+    already happen to cover it at the current chain depths (max 2: e.g.
+    skills_dir -> skill_dir): the *next* iteration's `_assert_inside(parent,
+    directory)` call also symlink-checks `parent` (catching a symlinked
+    non-final directory), and the post-loop `_assert_inside(stage_dir,
+    target)` call symlink-checks `stage_dir` (catching a symlinked final
+    directory). A mutation test that deleted the explicit per-directory
+    check accordingly did not reproduce a live vulnerability -- both
+    surrounding checks still closed it. It is kept anyway: it is what makes
+    every directory in the chain check itself directly rather than relying
+    on being some *other* directory's `root` argument on a different
+    iteration, which is what a future third chain level (none exist today)
+    would need to stay safe.
     """
     staged: list[tuple[str, Path]] = []
     total = 0
     try:
-        for root, target, mode, content in planned:
-            root.mkdir(parents=True, exist_ok=True)
-            _assert_inside(root, target)
+        for dirs, target, mode, content in planned:
+            parent: Path | None = None
+            for directory in dirs:
+                directory.mkdir(parents=True, exist_ok=True)
+                if parent is not None:
+                    _assert_inside(parent, directory)
+                _reject_if_symlink(directory, "store directory")
+                parent = directory
+            stage_dir = dirs[-1]
+
+            _assert_inside(stage_dir, target)
             _reject_if_symlink(target, "target file")
             if target.is_dir():
                 # Caught here (staging phase, before any rename) rather than
@@ -245,7 +365,7 @@ def _write_all(planned: list[tuple[Path, Path, str, str]]) -> tuple[list[str], i
                 raise PersistError(
                     f"{target} would exceed {MAX_MEMORY_FILE_BYTES} bytes after this write"
                 )
-            tmp_name = _stage(root, data)
+            tmp_name = _stage(stage_dir, data)
             staged.append((tmp_name, target))
             total += len(content.encode("utf-8"))
 
@@ -280,14 +400,21 @@ def main(argv: list[str]) -> int:
 
     resolved = paths.resolve_all()
     memory_dir, skills_dir = resolved["memory"], resolved["skills"]
-    planned = _plan(proposal, memory_dir, skills_dir)
-
-    if args.dry_run:
-        print(json.dumps({"written": [], "skipped": [str(p) for _, p, _, _ in planned],
-                          "bytes": sum(len(c.encode("utf-8")) for _, _, _, c in planned)}))
-        return 0
 
     try:
+        # _plan (not just _write_all) can now raise: computing the skill
+        # write plan reads and merges the existing `.usage.json`, which is
+        # itself subject to the same symlink/hardlink/corrupt-content
+        # refusals as any other read in this file. Both must map to the
+        # same exit code -- a caller should not be able to tell "planning
+        # failed" from "writing failed" from the exit status alone.
+        planned = _plan(proposal, memory_dir, skills_dir)
+
+        if args.dry_run:
+            print(json.dumps({"written": [], "skipped": [str(p) for _, p, _, _ in planned],
+                              "bytes": sum(len(c.encode("utf-8")) for _, _, _, c in planned)}))
+            return 0
+
         written, total = _write_all(planned)
     except (OSError, PersistError, ValueError) as exc:
         # ValueError is deliberately included alongside the two expected

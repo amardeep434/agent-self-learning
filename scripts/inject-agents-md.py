@@ -4,9 +4,11 @@ in an AGENTS.md file.
 
 Usage: python3 inject-agents-md.py <target-agents-md-path>
 
-Reads (env-configurable):
-    SL_MEMORY_DIR (default ~/.claude/memory)   -> MEMORY.md lines
-    SL_SKILLS_DIR (default ~/.claude/learned-skills) -> */SKILL.md frontmatter
+Reads (env-configurable, falling back to lib/paths.py's resolver -- same as
+every other consumer in this project -- rather than a hardcoded ~/.claude
+default, which would be wrong-location on Copilot CLI and VS Code):
+    SL_MEMORY_DIR -> MEMORY.md lines
+    SL_SKILLS_DIR -> <name>/SKILL.md frontmatter
 
 Everything outside the marker pair is preserved byte-for-byte.
 """
@@ -14,6 +16,9 @@ Everything outside the marker pair is preserved byte-for-byte.
 import os
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import paths  # noqa: E402
 
 BEGIN = "<!-- BEGIN self-learning:managed -->"
 END = "<!-- END self-learning:managed -->"
@@ -93,13 +98,26 @@ def inject(target: Path, block: str) -> None:
     os.replace(str(tmp), str(target))
 
 
+def _default_dir(env_var: str, paths_key: str) -> Path:
+    """Resolve one store directory: explicit env var wins, else lib/paths.py.
+
+    C2-shaped bug fixed here: this used to fall back to a hardcoded
+    ~/.claude/... literal instead of consulting the single path resolver,
+    which is wrong on any install that isn't Claude Code -- Copilot CLI and
+    VS Code Copilot Chat have no ~/.claude at all.
+    """
+    value = os.environ.get(env_var)
+    if value:
+        return Path(value)
+    return paths.resolve_all()[paths_key]
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print("Usage: inject-agents-md.py <target-agents-md-path>", file=sys.stderr)
         return 1
-    home = Path.home()
-    memory_dir = Path(os.environ.get("SL_MEMORY_DIR", str(home / ".claude" / "memory")))
-    skills_dir = Path(os.environ.get("SL_SKILLS_DIR", str(home / ".claude" / "learned-skills")))
+    memory_dir = _default_dir("SL_MEMORY_DIR", "memory")
+    skills_dir = _default_dir("SL_SKILLS_DIR", "skills")
     target = Path(sys.argv[1])
     try:
         inject(target, build_block(memory_dir, skills_dir))
