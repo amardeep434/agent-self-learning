@@ -120,11 +120,32 @@ def load_usage() -> dict:
 
 
 def save_usage(data: dict) -> None:
-    """Atomic write of .usage.json (temp file + rename)."""
+    """Atomic write of .usage.json (temp file + atomic replace).
+
+    fix-p9: `os.replace`, never `Path.rename`. On POSIX the two are the same
+    syscall, so this looked correct for as long as this project was only ever
+    tested on Linux and macOS. On Windows `Path.rename` maps to MoveFile,
+    which FAILS when the destination already exists -- i.e. on every save
+    after the very first one:
+
+        FileExistsError: [WinError 183] Cannot create a file when that file
+        already exists: '...\\.usage.json.tmp' -> '...\\.usage.json'
+
+    so skill-lifecycle.py could never persist a single transition on Windows.
+    `os.replace` is the stdlib's cross-platform atomic-replace primitive and
+    is what every other writer in this project already uses
+    (persist-proposal.py, inject-agents-md.py, coach-signals.py); this was
+    the one straggler. Caught by CI the first time the fix-p8 suite exercised
+    this path on windows-latest -- it is a pre-existing bug, not a regression
+    from the locking work. tests/test-store-lock-writers.py's
+    TestAtomicReplacePortability now fails on ANY platform if a `.rename(`
+    creeps back into scripts/, so the next one does not need a Windows runner
+    to be noticed.
+    """
     tmp = USAGE_FILE.with_suffix(".json.tmp")
     with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
-    tmp.rename(USAGE_FILE)
+    os.replace(str(tmp), str(USAGE_FILE))
 
 
 def compute_activity_anchor(record: dict) -> int | None:

@@ -334,6 +334,47 @@ class TestCuratorTakesTheLock(unittest.TestCase):
               "no transitions applied")
 
 
+class TestAtomicReplacePortability(unittest.TestCase):
+    """`Path.rename`/`os.rename` are NOT atomic-replace on Windows.
+
+    They map to MoveFile, which fails with WinError 183 when the destination
+    exists -- so a temp-file-then-rename writer works on POSIX and fails on
+    every save after the first on Windows. That is exactly what happened to
+    skill-lifecycle.py's save_usage(): correct-looking, POSIX-only, and
+    invisible until CI finally ran a test that exercised it on
+    windows-latest. `os.replace` is the cross-platform primitive.
+
+    This check is deliberately STATIC and therefore runs on every platform:
+    the functional symptom needs a Windows runner, but the defect is
+    detectable by reading the source anywhere. A future straggler should not
+    need a Windows CI cell to be noticed.
+    """
+
+    def test_no_python_writer_uses_rename_for_an_existing_destination(self):
+        # Parsed, not grepped. A textual scan flags the word "rename" inside
+        # the very docstrings and comments that explain why not to use it --
+        # it did, on the first run of this test. The AST sees calls only.
+        import ast
+        offenders = []
+        scanned = 0
+        for path in sorted(list((ROOT / "scripts").glob("*.py"))
+                           + list((ROOT / "scripts" / "lib").glob("*.py"))):
+            scanned += 1
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "rename"):
+                    offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}")
+        self.assertEqual(
+            offenders, [],
+            "these use rename() where an atomic replace is meant; on Windows "
+            "rename() fails when the destination exists (WinError 183). Use "
+            "os.replace():\n  " + "\n  ".join(offenders))
+        print(f"[portability] {scanned} python files under scripts/: "
+              "0 rename() calls (os.replace only)")
+
+
 class TestWritersAgreeOnTheLockFile(unittest.TestCase):
     def test_single_definition_of_the_lock_location(self):
         """A lock only serialises processes that pick the SAME path. Pin that
