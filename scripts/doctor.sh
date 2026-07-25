@@ -359,6 +359,38 @@ else
 fi
 echo
 
+# ---------------------------------------------------------------------------
+# 5c. Coach Route A rule coverage -- fix-p5-coach. scripts/coach-rules-eval.py
+# evaluates a fixed, measured subset of the 45 vendored rules, each an
+# ADAPTATION to this project's own session data (never VS Code Copilot
+# Chat's richer per-turn telemetry the upstream rules actually target -- see
+# that script's module docstring). Surfacing the count here, not just in the
+# script's own stderr, is the point: "45 rules vendored" must never read as
+# "45 rules evaluated" to someone who only runs doctor.sh. Only run when
+# Route A is enabled -- this is a diagnostic for an opt-in feature, not a
+# reason to shell out to python3 on installs that never turned it on.
+# ---------------------------------------------------------------------------
+if [[ "${SL_COACH_RULES_ENABLED:-false}" == "true" ]]; then
+    echo "coach rules (Route A) coverage:"
+    if [[ "$_SL_PYTHON3_AVAILABLE" -eq 0 ]]; then
+        echo "  cannot check -- python3 not found on PATH"
+    elif [[ ! -d "${SL_COACH_RULES_DIR:-}" ]]; then
+        echo "  rules dir not found: ${SL_COACH_RULES_DIR:-<unset>}"
+    else
+        COVERAGE_LINE="$(python3 "${SCRIPT_DIR}/coach-rules-eval.py" \
+            "${SL_COACH_RULES_DIR}" "${SL_SEARCH_DB}" 2>&1 >/dev/null \
+            | grep 'vendored rules evaluated' || true)"
+        if [[ -n "$COVERAGE_LINE" ]]; then
+            echo "  ${COVERAGE_LINE#coach-rules-eval: }"
+            echo "  these are adaptations to this project's own data, not upstream-equivalent"
+            echo "  -- see README.md's Coach signals row and coach-rules-eval.py's module docstring"
+        else
+            echo "  could not determine coverage (coach-rules-eval.py produced no coverage line)"
+        fi
+    fi
+    echo
+fi
+
 echo "review enabled: ${SL_REVIEW_ENABLED}"
 echo
 

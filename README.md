@@ -192,7 +192,7 @@ follow-up plan) and no row below claims otherwise.
 | Mid-session turn counting | ✅ PostToolUse hook | ❌ not wired | deliberate: session-end loop is the portable core; covered by `test-turn-counter.sh` |
 | Copilot path independent of Claude Code | — | ✅ | `test-claude-absent.sh` runs the full Copilot review path with no `claude` binary or `~/.claude` present |
 | Session search indexing | ✅ (Claude JSONL) | ❌ planned | Copilot session-state parser is a follow-up plan; not yet exercised by run-all.sh beyond schema tests |
-| Coach signals (Routes A/B) | ✅ | ✅ | not just evaluated — actually reaches the reviewer prompt: `session-review.sh`/`copilot-session-review.sh` call `coach-signals.py` then append its merged output as a "Coach signals" section of the review prompt when present and <7 days old; covered by `test-coach-signals.py`, `test-coach-rules-eval.py`, and `test-session-review.sh`'s "coach signal id reaches prompt" assertion, which fails if that wiring ever regresses |
+| Coach signals (Routes A/B) | ✅ Route A (11/45 rules, adapted) + ✅ Route B (full, when the fork is installed) | same | reaches the reviewer prompt: `session-review.sh`/`copilot-session-review.sh` call `coach-signals.py` then append its merged output as a "Coach signals" section of the review prompt when present and <7 days old; covered by `test-coach-signals.py`, `test-coach-rules-eval.py`, and `test-session-review.sh`'s "coach signal id reaches prompt" assertion, which fails if that wiring ever regresses. **Route A is not upstream-equivalent**: `scripts/coach-rules-eval.py` evaluates 11 of the 45 vendored rules, each an ADAPTATION to this project's own `messages`/`sessions` columns (per-user-message text/timestamp + session-level counts), never VS Code Copilot Chat's richer per-turn telemetry (modelId, toolsUsed[], referencedFiles[], token counts, etc.) that upstream's `scan: requests` rules actually target and that this project does not capture for either harness. The other 34 rules skip loudly with a reason naming the exact missing field (see the module docstring and `UNSUPPORTED_REASONS` in `coach-rules-eval.py`); `bash tests/run-all.sh` pins this count via `test-coach-rules-eval.py`'s `CoverageAssertionTest` so a future change that silently drops coverage fails the suite. Route B, when the maintained fork is installed, bypasses this gap entirely — it reads Coach's own complete analysis (see "AI Engineering Coach integration" below) rather than re-deriving it from our narrower data. |
 | Windows | ✅ green (Git Bash), with skips — see note | ✅ green (Git Bash), with skips — see note | CI results are per-OS (the whole matrix cell passes or fails), not per-harness, so both columns show the same Windows result. All 28 suites run and pass on `windows-latest` × Python 3.9 and 3.13 as of CI run `30157000235`. **But green ≠ equally covered**: 7 write-path security tests in `test-persist-proposal.py` (symlink, hardlink, and `O_NOFOLLOW` cases) and 3 shell assertions skip on Windows, because creating a real symlink needs Developer Mode or elevation and `chmod` does not deny writes on ACL-governed filesystems. Each skip is printed with its reason and is gated on a probe that verifies the limitation rather than assuming it from the platform name. The symlink/hardlink attack surface is therefore exercised on Linux and macOS only. |
 | macOS | ✅ green | ✅ green | Same per-OS note as the Windows row. All 28 suites run and pass on `macos-latest` × Python 3.9 and 3.13 as of CI run `30157000235`, with no skips. |
 | Copilot CLI live end-to-end (real session, real file on disk) | n/a | ✅ verified 2026-07-25 (one residual) | Run against whatever `copilot` version was installed on 2026-07-25 (1.0.73 at that moment; it has since auto-updated past that, e.g. 1.0.75 — this project targets "current, authenticated `copilot` on PATH," never a pinned version, so treat any specific number here as a point-in-time observation, not a requirement) with a real paid model call. `copilot-session-review.sh` completed end-to-end and the writer accepted a valid empty proposal (correct — headless `-p` has no transcript to mine); the same OUTPUT CONTRACT with a transcript produced a conforming proposal and **real content persisted** to `<store>/memory/MEMORY.md`, append mode, 0600, nothing written outside the store. Residual: no genuine *interactive* session has fired the `sessionEnd` hook with real conversation history in the payload yet — that needs ordinary use. |
@@ -212,8 +212,23 @@ Enable either or both in the resolved store's `self-learning.conf` (see
 When both are enabled, signals are merged and deduplicated by rule id; Route B
 (export) data wins because it comes from Coach's complete analyzer.
 
-Route A rule coverage is a documented subset of Coach's detect DSL; unsupported
-rules are skipped and logged, never guessed at. Re-vendor rules with
+**Route A evaluates 11 of the 45 vendored rules (measured, pinned by a test —
+see the Coach signals row above), and even those 11 are ADAPTATIONS, not
+re-implementations of the upstream rule.** Upstream's `scan: requests` rules
+are written against VS Code Copilot Chat's own per-turn telemetry object
+(`modelId`, `toolsUsed[]`, `referencedFiles[]`, `isCanceled`, `agentMode`,
+`reasoningEffort`, token counts, `toolConfirmations[]`, `customInstructions`,
+`skillsUsed[]`, `slashCommand`, `workspaceName`) — none of which this project
+captures for Claude Code or Copilot CLI. `scripts/coach-rules-eval.py`
+narrows "requests" scope, where evaluable at all, to per-user-message
+text/timestamp already stored in the `messages` table, and documents each
+substitution's limitation (e.g. grouping by `project_path` instead of
+`workspaceName` for `tunnel-vision`; regex-counting the `"[tool: X]"` text
+markers already embedded in stored content instead of structured
+`toolsUsed[]` for `mcp-tool-bloat`, which loses tool arguments and file
+paths). The remaining 34 rules are skipped and logged with the *specific*
+missing field named, never guessed at and never silently coerced into a
+signal that can only ever fire zero times. Re-vendor rules with
 `bash scripts/sync-coach-rules.sh`. The fork lives at
 `<org>/ai-engineering-coach-fork` (see its FORK-NOTES.md for the sync protocol).
 
