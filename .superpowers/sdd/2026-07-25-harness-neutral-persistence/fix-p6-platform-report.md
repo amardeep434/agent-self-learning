@@ -573,3 +573,93 @@ reasoning about how that translation works.
   production scripts), under both system Python 3.13 and Python 3.9
   (`~/.pyenv/versions/3.9.24/bin/python3.9`) shimmed first on `PATH`.
 - All Python suites pass individually under the 3.9 interpreter directly.
+
+## Round four (CI run 30167556385): flaky round-trip window, not a platform bug
+
+Both round-three fixes held: **5 of 6 cells green**, including both Windows
+cells and macOS 3.9 — the Git Bash argv-translation reasoning and the
+`.review-complete` marker both confirmed on real runners. One failure
+remained, on macOS 3.13 only, and it was a genuine flake rather than a
+platform difference (confirmed by the coordinator's framing and by
+inspection, not re-derived):
+
+```
+FAIL: sl_iso_to_epoch round-trip mismatch: wrote '2026-07-25T17:24:29Z',
+      expected an epoch in [1785000270, 1785000270], got '1785000269'
+```
+
+### Real cause
+
+`tests/test-config.sh`'s round-trip check (previously) sampled
+`BEFORE_EPOCH` via a **separate** `date -u +%s` call **after** `WRITTEN` had
+already been captured via its own `date -u +%Y-%m-%dT%H:%M:%SZ` call, and
+compared the parsed result against `[$BEFORE_EPOCH, $AFTER_EPOCH]` with
+**zero width** (both bounds able to equal the exact same second). Two
+distinct bugs, both real:
+
+1. If the wall clock ticked over between the two separate `date` process
+   spawns (`WRITTEN=...` then `BEFORE_EPOCH=...`), `BEFORE_EPOCH` could
+   already be a second *later* than the instant `WRITTEN` actually
+   captured — excluding the correct epoch from the window's own lower
+   bound. This is exactly what the CI log shows: `...269` is the CORRECT
+   parse of `17:24:29Z`; the window `[...270, ...270]` was built one second
+   late.
+2. Even with correct ordering, a zero-width window leaves no slack for the
+   clock ticking during the `sl_iso_to_epoch` subprocess call itself
+   (sourcing `config.sh` in a fresh `bash -c`, running the GNU/BSD `date`
+   fallback chain).
+
+This passes only when the write and the sample land in the same wall-clock
+second — true on any platform, including Linux; macOS 3.13 simply drew the
+short straw in this particular CI run (macOS 3.9 passed the same suite in
+the same run, on timing, not because 3.9 is exempt from the bug).
+
+### Fix
+
+Sample `BEFORE_EPOCH` **first**, ahead of `WRITTEN` (not after), and pad
+both bounds by a full second (`BEFORE_EPOCH - 1`, `AFTER_EPOCH + 1`). The
+property under test — "the round-trip preserves the instant" — survives a
+clock-second boundary; "the test and the producer observed the identical
+second" does not, and was never the actual property worth testing.
+
+### Audit for the same pattern elsewhere
+
+Grepped every test file for `date -u +%s`, `date +%s`, `time.time()`,
+`now_iso`, `datetime.now`, and any `check "..."`/`assertEqual` comparing a
+freshly-sampled timestamp against a written one:
+
+- `tests/test-isotime.py`'s equivalent round-trip check
+  (`test_now_iso_round_trips_through_parse_iso`) already uses
+  `self.assertLess(abs(time.time() - epoch), 5)` — a 5-second tolerance,
+  not zero-width. No fix needed.
+- No other test in the suite (`.usage.json` freshness checks, session
+  `indexed_at`/`last_active` assertions, etc.) compares a written timestamp
+  against a freshly sampled one at all — they check presence, format, or
+  relative ordering, not exact epoch equality.
+- `tests/test-config.sh`'s round-trip check was the **only** zero-tolerance
+  instance found.
+
+### Mutation testing
+
+Made `sl_iso_to_epoch` genuinely wrong — added a spurious `+3600` (one
+hour) to the GNU `date -d` path's result, a real bug, not a timing
+artifact:
+
+```
+FAIL: sl_iso_to_epoch round-trip mismatch: wrote '2026-07-25T17:31:14Z',
+      expected an epoch in [1785000673, 1785000675], got '1785004274'
+```
+
+The widened ±1s window still caught it by roughly four orders of magnitude
+of margin (an hour vs. a one-second tolerance) — confirms the fix is a real
+correctness window, not loosened into meaninglessness. Restored, passes
+again. Ran the fixed test 8 times in a row locally (Linux) with zero
+failures.
+
+## Suite count / interpreter results (round four)
+
+- `bash tests/run-all.sh`: **37/37 suites passed** (unchanged), under both
+  system Python 3.13 and Python 3.9 (`~/.pyenv/versions/3.9.24/bin/python3.9`)
+  shimmed first on `PATH`.
+- This was the last known failure on the branch per the coordinator: 37
+  suites on Linux, both Windows cells, macOS 3.9, and now macOS 3.13.
