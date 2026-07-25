@@ -14,6 +14,7 @@ Covers:
     silently adds a fake-evaluating one) fails the suite
 """
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -21,6 +22,15 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+# The telemetry fixture builders live with the telemetry suite; importing
+# them here keeps ONE definition of "what a real Copilot event looks like"
+# instead of a second copy that could drift from the real store.
+import importlib.util as _ilu
+_TFIX_SPEC = _ilu.spec_from_file_location(
+    "test_telemetry_fixtures", str(Path(__file__).resolve().parent / "test-telemetry.py"))
+TFIX = _ilu.module_from_spec(_TFIX_SPEC)
+_TFIX_SPEC.loader.exec_module(TFIX)
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "scripts" / "coach-rules-eval.py"
@@ -121,10 +131,27 @@ def insert_message(conn, session_id, idx, content, role="user", timestamp=NOW):
 
 
 class CoachRulesEvalBase(unittest.TestCase):
-    def run_eval(self, rules_dir, db_path):
+    def run_eval(self, rules_dir, db_path, telemetry_home=None):
+        """Always runs with the harness telemetry stores pointed somewhere
+        explicit -- never at the developer's real ~/.copilot and ~/.claude.
+
+        Without this, every assertion below would depend on whose machine
+        the suite runs on: the same command would evaluate 19 rules on a
+        workstation with both harnesses installed and 11 in CI, and a
+        "coverage dropped" failure would be indistinguishable from "this
+        laptop has no Copilot sessions". `telemetry_home=None` means an
+        empty, nonexistent store, which is the CI shape.
+        """
+        env = dict(os.environ)
+        if telemetry_home is None:
+            env["SL_COPILOT_HOME"] = "/nonexistent-telemetry-store"
+            env["CLAUDE_CONFIG_DIR"] = "/nonexistent-telemetry-store"
+        else:
+            env["SL_COPILOT_HOME"] = str(telemetry_home)
+            env["CLAUDE_CONFIG_DIR"] = str(telemetry_home)
         proc = subprocess.run(
             [sys.executable, str(SCRIPT), str(rules_dir), str(db_path)],
-            capture_output=True, text=True,
+            capture_output=True, text=True, env=env,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         return json.loads(proc.stdout), proc.stderr
@@ -467,9 +494,260 @@ class BespokeAdapterTest(CoachRulesEvalBase):
         self.assertNotIn("frustration-signals", [s["id"] for s in signals])
 
 
+class TelemetryAdapterTest(CoachRulesEvalBase):
+    """Fire/no-fire pairs for every rule backed by scripts/lib/telemetry.py.
+
+    The fixtures are built with tests/test-telemetry.py's own builders, whose
+    event shapes were copied from the real harness stores -- so "this rule
+    can fire" is demonstrated against the shape the harness actually writes,
+    not against a shape invented to make the rule fire.
+
+    The standing rule this class exists to enforce: a rule that evaluates
+    but can never fire is worse than a loud skip. Every rule below therefore
+    gets BOTH a firing case and a silent case, and the class after this one
+    proves each of them skips loudly when the telemetry store is absent.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = Path(self.tmp) / "search.db"
+        conn = make_db(str(self.db))
+        insert_session(conn, "s0", 1)
+        conn.commit()
+        conn.close()
+        self.store = Path(self.tmp) / "store"
+        (self.store / "session-state").mkdir(parents=True)
+
+    def copilot(self, session_id, events):
+        return TFIX.copilot_session(str(self.store), session_id, events)
+
+    def usage_rows(self, rows):
+        conn = sqlite3.connect(str(self.store / "session-store.db"))
+        conn.executescript(TFIX.CopilotStoreDbTest.DDL)
+        conn.execute("INSERT INTO sessions (id) VALUES ('s1')")
+        conn.executemany(
+            "INSERT INTO assistant_usage_events (session_id, model, input_tokens,"
+            " output_tokens, cache_read_tokens, duration_ms, reasoning_effort,"
+            " created_at) VALUES ('s1',?,?,?,?,?,?,'2026-07-25')", rows)
+        conn.commit()
+        conn.close()
+
+    def fired(self, rule_id):
+        signals, stderr = self.run_eval(VENDOR_RULES, self.db, telemetry_home=self.store)
+        self.assertNotIn(
+            "skipping {} ".format(rule_id), stderr,
+            "{} skipped when it should have evaluated:\n{}".format(rule_id, stderr))
+        return [s for s in signals if s["id"] == rule_id]
+
+    # -- model-overreliance ------------------------------------------------
+    def test_model_overreliance_fires_on_a_single_dominant_model(self):
+        self.usage_rows([("claude-opus-4.6", 100, 10, 0, 500, None)] * 20
+                        + [("gpt-5.4", 100, 10, 0, 500, None)])
+        self.assertTrue(self.fired("model-overreliance"))
+
+    def test_model_overreliance_silent_when_models_are_varied(self):
+        self.usage_rows([("m{}".format(i % 5), 100, 10, 0, 500, None) for i in range(30)])
+        self.assertEqual(self.fired("model-overreliance"), [])
+
+    # -- reasoning-effort-overuse ------------------------------------------
+    def test_reasoning_effort_overuse_fires_on_mostly_high(self):
+        self.usage_rows([("m", 100, 10, 0, 500, "high")] * 25)
+        self.assertTrue(self.fired("reasoning-effort-overuse"))
+
+    def test_reasoning_effort_overuse_silent_on_mostly_low(self):
+        self.usage_rows([("m", 100, 10, 0, 500, "low")] * 25)
+        self.assertEqual(self.fired("reasoning-effort-overuse"), [])
+
+    def test_reasoning_effort_unknown_rows_stay_out_of_the_denominator(self):
+        """21 high + 100 NULL must still read as 100% high effort, because
+        upstream's own field is `totalKnown`. Counting NULLs as not-high
+        would silently suppress the signal on any harness that does not
+        record the setting."""
+        self.usage_rows([("m", 100, 10, 0, 500, "high")] * 21
+                        + [("m", 100, 10, 0, 500, None)] * 100)
+        self.assertTrue(self.fired("reasoning-effort-overuse"))
+
+    # -- cache-hit-starvation ----------------------------------------------
+    def test_cache_hit_starvation_fires_on_large_uncached_prompts(self):
+        self.usage_rows([("m", 50000, 10, 0, 500, None)] * 25)
+        self.assertTrue(self.fired("cache-hit-starvation"))
+
+    def test_cache_hit_starvation_silent_when_prompts_are_cached(self):
+        self.usage_rows([("m", 50000, 10, 49000, 500, None)] * 25)
+        self.assertEqual(self.fired("cache-hit-starvation"), [])
+
+    # -- slow-responses ----------------------------------------------------
+    def test_slow_responses_fires_on_long_turns(self):
+        for i in range(8):
+            self.copilot("s{}".format(i), TFIX.simple_turn(
+                "0", user="x", start=0, end=45))
+        self.assertTrue(self.fired("slow-responses"))
+
+    def test_slow_responses_silent_on_quick_turns(self):
+        for i in range(8):
+            self.copilot("s{}".format(i), TFIX.simple_turn(
+                "0", user="x", start=0, end=2))
+        self.assertEqual(self.fired("slow-responses"), [])
+
+    # -- verbose-output ----------------------------------------------------
+    def test_verbose_output_fires_on_long_answers_to_short_prompts(self):
+        for i in range(12):
+            self.copilot("s{}".format(i), TFIX.simple_turn(
+                "0", user="fix it", out_tokens=9000))
+        self.assertTrue(self.fired("verbose-output"))
+
+    def test_verbose_output_silent_when_answers_are_short(self):
+        for i in range(12):
+            self.copilot("s{}".format(i), TFIX.simple_turn(
+                "0", user="fix it", out_tokens=200))
+        self.assertEqual(self.fired("verbose-output"), [])
+
+    # -- high-cancellation -------------------------------------------------
+    def test_high_cancellation_fires_when_most_turns_are_aborted(self):
+        for i in range(6):
+            events = TFIX.simple_turn("0", user="x")
+            events.insert(-1, TFIX.ev("abort", {"reason": "user_initiated"},
+                                      "2026-07-25T22:40:03.000Z"))
+            self.copilot("s{}".format(i), events)
+        self.assertTrue(self.fired("high-cancellation"))
+
+    def test_high_cancellation_silent_when_turns_complete(self):
+        for i in range(6):
+            self.copilot("s{}".format(i), TFIX.simple_turn("0", user="x"))
+        self.assertEqual(self.fired("high-cancellation"), [])
+
+    # -- runaway-agent-loops -----------------------------------------------
+    def test_runaway_agent_loops_fires_on_many_tools_under_a_subagent(self):
+        for i in range(4):
+            events = TFIX.simple_turn("0", user="x", tools=[
+                ("bash", {"command": "ls"})] * 20)
+            events.insert(-1, TFIX.ev("subagent.started", {"agentName": "explore"},
+                                      "2026-07-25T22:40:01.000Z"))
+            self.copilot("s{}".format(i), events)
+        self.assertTrue(self.fired("runaway-agent-loops"))
+
+    def test_runaway_agent_loops_silent_when_agent_turns_use_few_tools(self):
+        for i in range(4):
+            events = TFIX.simple_turn("0", user="x", tools=[
+                ("bash", {"command": "ls"})] * 5)
+            events.insert(-1, TFIX.ev("subagent.started", {"agentName": "explore"},
+                                      "2026-07-25T22:40:01.000Z"))
+            self.copilot("s{}".format(i), events)
+        self.assertEqual(self.fired("runaway-agent-loops"), [])
+
+    def test_runaway_agent_loops_skips_when_no_turn_is_agent_attributed(self):
+        """Not the same as "silent". With no subagent anywhere, there is no
+        population for a rule about agent loops to be measured over, so the
+        honest output is a skip -- reporting "0 runaway loops" from a corpus
+        that contains no agent turns at all would be a clean bill of health
+        derived from absent data."""
+        for i in range(4):
+            self.copilot("s{}".format(i), TFIX.simple_turn(
+                "0", user="x", tools=[("bash", {"command": "ls"})] * 20))
+        signals, stderr = self.run_eval(VENDOR_RULES, self.db, telemetry_home=self.store)
+        self.assertIn("skipping runaway-agent-loops ", stderr)
+        self.assertEqual([s for s in signals if s["id"] == "runaway-agent-loops"], [])
+
+    # -- excessive-file-context --------------------------------------------
+    def test_excessive_file_context_fires_on_wide_file_fanout(self):
+        for i in range(12):
+            self.copilot("s{}".format(i), TFIX.simple_turn("0", user="x", tools=[
+                ("view", {"path": "/repo/f{}.py".format(n)}) for n in range(35)]))
+        self.assertTrue(self.fired("excessive-file-context"))
+
+    def test_excessive_file_context_silent_on_narrow_fanout(self):
+        for i in range(12):
+            self.copilot("s{}".format(i), TFIX.simple_turn("0", user="x", tools=[
+                ("view", {"path": "/repo/f{}.py".format(n)}) for n in range(3)]))
+        self.assertEqual(self.fired("excessive-file-context"), [])
+
+
+class TelemetryDetectPinTest(CoachRulesEvalBase):
+    """Each telemetry adapter hardcodes one rule's predicate, so it must
+    refuse to run if that rule's `detect` block ever changes shape.
+
+    Found by mutation testing: disabling `_pin()` entirely left the whole
+    suite green, because every fixture used the rules exactly as vendored.
+    Without this test, a `sync-coach-rules.sh` re-sync that tightened a
+    threshold expression or added an OR-branch would keep emitting the OLD
+    predicate's answer under the NEW rule's name -- silently wrong, which is
+    the one outcome worse than a skip.
+    """
+
+    def test_changed_detect_block_skips_instead_of_evaluating_the_old_predicate(self):
+        tmp = tempfile.mkdtemp()
+        db = Path(tmp) / "search.db"
+        conn = make_db(str(db))
+        insert_session(conn, "s0", 1)
+        conn.commit()
+        conn.close()
+
+        rules_dir = Path(tmp) / "rules"
+        rules_dir.mkdir()
+        for rule_file in VENDOR_RULES.glob("*.md"):
+            text = rule_file.read_text(encoding="utf-8")
+            if rule_file.stem == "high-cancellation":
+                text = text.replace("match: isCanceled == true",
+                                    "match: isCanceled == true AND agentMode == \"ask\"")
+            (rules_dir / rule_file.name).write_text(text, encoding="utf-8")
+
+        store = Path(tmp) / "store"
+        (store / "session-state").mkdir(parents=True)
+        for i in range(6):
+            events = TFIX.simple_turn("0", user="x")
+            events.insert(-1, TFIX.ev("abort", {"reason": "user_initiated"},
+                                      "2026-07-25T22:40:03.000Z"))
+            TFIX.copilot_session(str(store), "s{}".format(i), events)
+
+        signals, stderr = self.run_eval(rules_dir, db, telemetry_home=store)
+        self.assertIn("skipping high-cancellation ", stderr)
+        self.assertIn("detect block changed", stderr)
+        self.assertEqual([s for s in signals if s["id"] == "high-cancellation"], [])
+
+
+class TelemetryAbsentSkipsLoudlyTest(CoachRulesEvalBase):
+    """With no harness store, every telemetry-backed rule must SKIP, naming
+    the missing source -- never evaluate to a clean bill of health.
+
+    This is the regression guard for the failure mode that motivated the
+    whole design: a rule scored against zero records reports "no problem"
+    in exactly the situation where the honest answer is "no data".
+    """
+
+    TELEMETRY_RULE_IDS = [
+        "model-overreliance", "reasoning-effort-overuse", "cache-hit-starvation",
+        "slow-responses", "verbose-output", "high-cancellation",
+        "runaway-agent-loops", "excessive-file-context",
+    ]
+
+    def test_all_telemetry_rules_skip_with_a_source_naming_reason(self):
+        tmp = tempfile.mkdtemp()
+        db = Path(tmp) / "search.db"
+        conn = make_db(str(db))
+        insert_session(conn, "s0", 1)
+        conn.commit()
+        conn.close()
+
+        signals, stderr = self.run_eval(VENDOR_RULES, db)  # no telemetry_home
+        emitted = {s["id"] for s in signals}
+        for rule_id in self.TELEMETRY_RULE_IDS:
+            self.assertIn("skipping {} ".format(rule_id), stderr,
+                          "{} did not skip loudly with no telemetry store".format(rule_id))
+            self.assertNotIn(rule_id, emitted)
+        self.assertIn("events.jsonl", stderr)
+        self.assertIn("projects/*.jsonl", stderr)
+
+
 class SkipPathTest(CoachRulesEvalBase):
-    """The 34 unreachable rules must skip loudly and name the specific
-    missing field, never silently evaluate to a no-op."""
+    """Every rule this evaluator does not evaluate must skip LOUDLY with a
+    specific reason, never silently evaluate to a no-op.
+
+    The count this class used to describe as "the 34 unreachable rules" was
+    corrected on 2026-07-26: 8 of them were reachable from harness telemetry
+    all along (now TELEMETRY_ADAPTERS), 11 are IDE-only by upstream's own
+    `requiresIdeContext` flag and are a correct permanent skip for a CLI
+    harness, and the rest are reachable-but-unimplemented with a named
+    cost. See coach-rules-eval.py's UNSUPPORTED_REASONS header."""
 
     def test_every_real_vendored_rule_either_evaluates_or_names_missing_field(self):
         tmp = tempfile.mkdtemp()
@@ -521,7 +799,13 @@ class CoverageAssertionTest(CoachRulesEvalBase):
     without a corresponding test above, someone added an evaluator without
     proving it can fire -- update both together, deliberately."""
 
+    # 11 from the project's own index (generic engine + REQUEST_ADAPTERS +
+    # the two bespoke session adapters). The 8 TELEMETRY_ADAPTERS are NOT
+    # counted here: this test runs with no harness store, where they must
+    # skip. TelemetryAdapterTest covers them with a store present, and
+    # TelemetryAbsentSkipsLoudlyTest pins that they skip without one.
     EXPECTED_EVALUATED = 11
+    EXPECTED_TELEMETRY_ADAPTERS = 8
     EXPECTED_TOTAL_RULES = 45
 
     def test_coverage_count_pinned(self):

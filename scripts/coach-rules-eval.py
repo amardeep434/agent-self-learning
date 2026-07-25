@@ -8,13 +8,35 @@ written against VS Code Copilot Chat's own per-turn telemetry object
 (modelId, toolsUsed[], referencedFiles[], editedFiles[], aiCode.loc,
 isCanceled, agentMode/agentName, reasoningEffort, promptTokens/
 completionTokens/cacheReadTokens, totalElapsed, toolConfirmations[],
-customInstructions, skillsUsed[], slashCommand, workspaceName). None of
-that exists in this project's data for either Claude Code or Copilot CLI:
-schema/session-search-schema.sql only stores, per message, `role`,
-`content` (flattened text; tool calls survive only as an unattributed
-"[tool: Name]" marker with no args/paths) and `timestamp`, plus session-
-level `project_path`/`message_count`. There is no richer per-request
-telemetry indexer for either harness.
+customInstructions, skillsUsed[], slashCommand, workspaceName).
+
+TWO DATA SOURCES, AND A CORRECTION OF RECORD (2026-07-26)
+---------------------------------------------------------
+This module long said that "none of that exists in this project's data".
+That was true of this project's OWN index -- schema/session-search-schema.sql
+stores, per message, only `role`, `content` (flattened text; tool calls
+survive as an unattributed "[tool: Name]" marker with no args/paths) and
+`timestamp`, plus session-level `project_path`/`message_count` -- and it was
+WRONG as a statement about what is available. Both harnesses write rich
+per-request telemetry of their own, and this project already reads those
+same stores to build the reviewer's conversation digest
+(scripts/lib/transcript.py). Fields recorded here as "not captured" for
+months were captured by the harness all along and simply never plumbed.
+
+So there are now two sources:
+
+  1. The project's own index (SL_SEARCH_DB) -- role/content/timestamp.
+     Feeds the generic engine, REQUEST_ADAPTERS, and the two bespoke
+     session adapters.
+  2. scripts/lib/telemetry.py -- Copilot CLI's
+     session-state/<id>/events.jsonl and session-store.db, and Claude
+     Code's projects/<slug>/<id>.jsonl, normalised into per-turn and
+     per-API-call records. Feeds TELEMETRY_ADAPTERS. See that module's
+     docstring for the field-by-field evidence, which was gathered by
+     reading the real stores, not from documentation.
+
+A rule whose input selection comes back empty raises, so it SKIPS loudly
+rather than reporting a clean bill of health from no data.
 
 Where a rule's *predicate* can be evaluated faithfully against an
 equivalent field we genuinely store, this module does so and calls the
@@ -56,11 +78,19 @@ Supported `detect` DSL, scan: sessions (generic engine):
            clauses joined by " AND "
 `requestCount` maps to the sessions.message_count column.
 
-Plus per-rule-id adapters (see REQUEST_ADAPTERS/eval_tunnel_vision/
-eval_mcp_tool_bloat below) for rules whose detect block does not fit the
-generic engine but whose predicate is evaluable against data we store.
-Every other rule is skipped with a field-specific reason (see
+Plus per-rule-id adapters (see REQUEST_ADAPTERS/TELEMETRY_ADAPTERS/
+eval_tunnel_vision/eval_mcp_tool_bloat below) for rules whose detect block
+does not fit the generic engine but whose predicate is evaluable against
+data we have. Every other rule is skipped with a specific reason (see
 UNSUPPORTED_REASONS).
+
+That `detect` grammar above is a deliberately narrow SUBSET of upstream's.
+Upstream ships a real expression language -- lexer, parser and interpreter
+under src/core/dsl/ (~4,300 lines) with function calls, pipes and format
+filters. This module hand-parses two regex-shaped clause forms and hardcodes
+everything else per rule id. That is a scoping decision, not an
+implementation of the dialect: any rule whose detect block changes shape is
+refused by its adapter's `_pin()` check rather than silently misread.
 """
 
 from __future__ import annotations
@@ -75,6 +105,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from isotime import parse_iso  # noqa: E402  (single source of truth, see module docstring)
+import telemetry  # noqa: E402  (harness-native per-request telemetry; see TELEMETRY_ADAPTERS)
 
 OPS = {
     ">=": lambda a, b: a >= b,
@@ -96,88 +127,151 @@ CHECK_CLAUSE_RE = re.compile(
 # requestCount engine.
 BESPOKE_SESSION_IDS = {"tunnel-vision", "mcp-tool-bloat"}
 
-# Field-specific reasons for every rule this evaluator does NOT evaluate.
-# Named per project instruction: "unsupported" alone is not an acceptable
-# skip reason -- state exactly what data would be needed.
+# ---------------------------------------------------------------------------
+# Rules this evaluator does NOT evaluate, each with the SPECIFIC reason.
+#
+# REWRITTEN 2026-07-26 against upstream's own source, not against a guess.
+# The previous version of this table said "not captured" for most entries,
+# meaning "not in schema/session-search-schema.sql". That conflated one
+# project's index with what is obtainable, and it was wrong for a majority
+# of the entries. Ground truth, read from microsoft/AI-Engineering-Coach at
+# HEAD 766d0f2 (2026-07-24; the vendored rules' own commit 9b4deb1 is no
+# longer reachable in the public history):
+#
+#   * Upstream is not a VS Code-internals consumer. Its README is "any
+#     harness, one dashboard", and src/core/parser-harnesses.ts registers
+#     parsers for Claude Code, Codex CLI and OpenCode alongside VS Code;
+#     src/core/parser-vscode-cli.ts parses Copilot CLI's OWN
+#     session-state/<id>/events.jsonl -- the same file scripts/lib/
+#     telemetry.py now reads. src/core/types/session-types.ts even documents
+#     the CLI origins field by field ("Copilot CLI: session.start.data.
+#     reasoningEffort and session.model_change.data.reasoningEffort").
+#     So the telemetry was never unobtainable; it was unplumbed.
+#
+#   * Upstream itself marks exactly ELEVEN rules `requiresIdeContext: true`
+#     and DROPS them when analysing a non-IDE harness
+#     (src/core/detector-registry.ts getActiveDetectors(); the flag is set
+#     in analyzer-patterns.ts as `harness && !startsWith('Local Agent') &&
+#     !== 'Xcode'`). Those eleven are marked IDE-ONLY below. For a CLI
+#     harness they are a CORRECT permanent skip, not a coverage gap --
+#     upstream would skip them too. They are reachable only through Route B
+#     (`SL_COACH_EXPORT_ENABLED`, the Coach extension's own export), and
+#     then only for sessions the user actually ran in VS Code Copilot Chat.
+#
+#   * The remaining entries are genuinely reachable from data already on
+#     disk, and are skipped here for a stated cost/fidelity reason, not
+#     because the data is missing. Each names what would have to be built.
+# ---------------------------------------------------------------------------
 UNSUPPORTED_REASONS = {
-    # scan: sessions
-    "broken-flow-state": "needs flowScoreStats (per-day session-fragmentation "
-        "scoring across request timestamps) -- that algorithm is not specified "
-        "anywhere in the vendored rule or an available upstream source; "
-        "reconstructing it would be guessing, not adapting",
-    "copy-paste-blindness": "needs aiCode.loc and per-request messageText/"
-        "editedFiles at turn granularity within a session -- not captured; "
-        "only session-level message_count is stored",
-    "instruction-bloat": "needs customInstructions size per session -- "
-        "Claude Code/Copilot CLI custom-instructions content is not captured",
-    "low-markdown-ratio": "needs aiCode diff LOC (markdown vs code) per "
-        "session -- code-change size is not captured",
-    "no-devcontainer": "needs vscode-vs-terminal request classification "
-        "(terminalReqs/vscodeReqs) -- a VS Code-specific concept not "
-        "applicable to, or captured by, Claude Code/Copilot CLI",
-    "no-spec-driven-development": "needs first(requests).referencedFiles and "
-        ".agentMode -- not captured; evaluating on messageText alone would "
-        "silently drop 2 of the rule's OR-branches and change its meaning",
-    "no-spec-structure": "needs someWhere(requests, agentMode, agent) -- "
-        "agentMode is not captured / not applicable to these harnesses",
-    "session-drift": "needs workTypeCount(requests), a per-request work-type "
-        "classifier with no taxonomy specified anywhere available -- would "
-        "require inventing a classification scheme",
-    "speed-accept": "needs aiCode.loc and inter-request acceptance timing -- "
-        "code-diff size is not captured",
-    "vibe-coding": "needs aiCode.loc per session -- code-change size is not "
-        "captured",
-    # scan: requests
-    "agentic-no-tools": "needs agentMode/agentName and toolsUsed per request "
-        "-- Claude Code/Copilot CLI have no ask/agent mode toggle, and tool "
-        "use is only visible as an unattributed session-wide marker, not "
-        "per request",
-    "agent-mode-for-asks": "needs agentMode, toolsUsed, aiCode, "
-        "referencedFiles, editedFiles per request -- none captured",
-    "auto-approve-terminal": "needs toolConfirmations[] (auto-approve events) "
-        "per request -- not captured",
-    "auto-avoidance": "needs modelId per request -- not captured",
-    "cache-hit-starvation": "needs promptTokens/cacheReadTokens per request "
-        "-- token usage is not captured",
-    "context-engineering-gaps": "needs agentName, skillsUsed, toolsUsed "
-        "(mcp_ prefix), referencedFiles, customInstructions per request -- "
-        "none captured",
-    "excessive-file-context": "needs referencedFiles per request -- not "
-        "captured",
-    "high-cancellation": "needs isCanceled per request -- not captured",
-    "model-overreliance": "needs modelId per request -- not captured",
-    "no-custom-instructions": "needs customInstructions per request -- not "
-        "captured",
-    "no-file-context": "needs referencedFiles/editedFiles per request -- not "
-        "captured",
-    "no-language-exploration": "needs a per-request programming-language "
-        "field -- not captured",
-    "no-plan-mode": "needs agentMode/slashCommand per request -- not "
-        "captured",
-    "no-skills": "needs skillsUsed per request -- only a generic "
-        "'[tool: Skill]' marker is stored per session, not which skill or "
-        "which request invoked it",
-    "no-slash-commands": "needs a parsed slashCommand per request -- not "
-        "captured",
-    "premium-for-lookup-questions": "needs modelId (for modelTier) per "
-        "request -- not captured",
-    "premium-waste": "needs modelId per request -- not captured",
-    "profanity": "no patterns: wordlist is provided by the rule; evaluating "
-        "it would require inventing a moderation wordlist -- a product/"
-        "judgment call out of scope for this evaluator",
-    "reasoning-effort-overuse": "needs reasoningEffort per request -- not "
-        "captured",
-    "runaway-agent-loops": "needs toolsUsed per request plus agentMode/"
-        "agentName -- tool use is only visible at session granularity, not "
-        "per request",
-    "slow-responses": "needs totalElapsed (response latency) per request -- "
-        "not captured",
-    "verbose-output": "needs completionTokens per request -- token usage is "
-        "not captured",
-    "verbose-prompt-no-compression": "needs skillsUsed (hasSkillByPattern) "
-        "per request -- only an unattributed session-wide tool marker is "
-        "stored",
-    "yolo-mode": "needs toolConfirmations[] per request -- not captured",
+    # -- IDE-ONLY (upstream `requiresIdeContext: true`; skipped for CLI
+    #    harnesses by upstream too). Route B reaches these; Route A cannot,
+    #    and should not pretend to.
+    "agent-mode-for-asks": "IDE-ONLY (upstream requiresIdeContext): keys off "
+        "VS Code's ask/agent mode toggle. Neither CLI has that toggle -- "
+        "upstream's own CLI parser hardcodes agentMode='agent' "
+        "(parser-vscode-cli.ts, parser-claude.ts), so the rule's ask-mode "
+        "branch could never fire here. Reachable via Route B only",
+    "agentic-no-tools": "IDE-ONLY (upstream requiresIdeContext): same "
+        "agentMode dependency as agent-mode-for-asks. toolsUsed IS now "
+        "captured (see telemetry.py), but the mode half of the predicate is "
+        "constant for a CLI harness. Reachable via Route B only",
+    "auto-approve-terminal": "IDE-ONLY (upstream requiresIdeContext), and "
+        "independently unmeasurable here: upstream's CLI and Claude parsers "
+        "populate toolConfirmations for NO harness but VS Code "
+        "(parser-vscode-request.ts is the only parser that sets it). Copilot "
+        "CLI does emit permission.requested/completed, but an AUTO-approved "
+        "call emits no permission event at all -- measured across 242 real "
+        "confirmations, every approval took human-scale time (min 0.638s) "
+        "and only non-interactive DENIALS were instantaneous (median "
+        "0.004s). An auto-approve RATE computed from this stream would have "
+        "a permanently zero numerator: a rule that evaluates and can never "
+        "fire, which is worse than this skip. Reachable via Route B only",
+    "instruction-bloat": "IDE-ONLY (upstream requiresIdeContext): needs "
+        "customInstructions byte size, which upstream reads from the VS Code "
+        "workspace, not from any CLI session log. Reachable via Route B only",
+    "no-custom-instructions": "IDE-ONLY (upstream requiresIdeContext): same "
+        "customInstructions dependency. Reachable via Route B only",
+    "no-devcontainer": "IDE-ONLY (upstream requiresIdeContext): needs a "
+        "vscode-vs-terminal request classification, a distinction that does "
+        "not exist inside a single CLI harness. Reachable via Route B only",
+    "no-file-context": "IDE-ONLY (upstream requiresIdeContext): the rule is "
+        "about attaching file context in the chat UI. referencedFiles/"
+        "editedFiles ARE now captured for both CLIs (telemetry.py), but a "
+        "CLI agent reads files by calling a tool, so the absence the rule "
+        "looks for cannot occur and it would never fire. Reachable via "
+        "Route B only",
+    "no-plan-mode": "IDE-ONLY (upstream requiresIdeContext): needs VS Code's "
+        "plan mode / slash command surface. Reachable via Route B only",
+    "no-skills": "IDE-ONLY (upstream requiresIdeContext). skillsUsed IS now "
+        "captured (Copilot's `skill` tool + skill.invoked; Claude's Skill "
+        "tool), but the rule fires on the ABSENCE of skill usage across an "
+        "IDE session population, which a CLI-only corpus cannot represent. "
+        "Reachable via Route B only",
+    "no-slash-commands": "IDE-ONLY (upstream requiresIdeContext): needs a "
+        "parsed slashCommand, which upstream extracts only in the VS Code "
+        "request parser. Confirmed absent from the CLI corpus: 0 of 136 "
+        "real Copilot user.message events began with a slash. Reachable via "
+        "Route B only",
+    "yolo-mode": "IDE-ONLY (upstream requiresIdeContext), and independently "
+        "unmeasurable here for the same reason as auto-approve-terminal -- "
+        "see that entry for the measured evidence. Reachable via Route B only",
+
+    # -- REACHABLE from data already on disk, not implemented here. Each of
+    #    these is a cost/fidelity decision with a named missing piece, NOT a
+    #    missing-data claim.
+    "broken-flow-state": "reachable but not implemented: needs "
+        "flowScoreStats, a per-day session-fragmentation score. Upstream "
+        "implements it in src/core/analyzer-flow.ts; the vendored rule file "
+        "does not carry the algorithm, so evaluating it here means porting "
+        "that analyzer rather than adapting a predicate",
+    "copy-paste-blindness": "reachable but not implemented: needs aiCode.loc "
+        "per request. Upstream derives it by pulling generated code out of "
+        "tool arguments (file_text/new_str/content) and counting lines "
+        "(parser-vscode-cli.ts). telemetry.py captures the tool calls and "
+        "paths but not the code bodies -- doing so would put whole file "
+        "contents in memory for every indexed session",
+    "low-markdown-ratio": "reachable but not implemented: same aiCode.loc "
+        "dependency as copy-paste-blindness, plus per-language attribution",
+    "speed-accept": "reachable but not implemented: same aiCode.loc "
+        "dependency, plus inter-request acceptance timing",
+    "vibe-coding": "reachable but not implemented: same aiCode.loc dependency",
+    "no-spec-driven-development": "reachable but not implemented: needs "
+        "first(requests).referencedFiles (now captured) AND .agentMode "
+        "(constant 'agent' for both CLIs). Two of the rule's three OR "
+        "branches would be dead, changing what the signal means",
+    "no-spec-structure": "reachable but would never fire: the predicate is "
+        "someWhere(requests, agentMode, agent), and agentMode is hardcoded "
+        "'agent' for every CLI request by upstream's own parsers -- so the "
+        "condition is universally true and the rule is a constant. Skipped "
+        "deliberately rather than emitted as a permanent signal",
+    "session-drift": "reachable but not implemented: needs "
+        "workTypeCount(requests). Upstream ships a work-type classifier; the "
+        "vendored rule does not carry its taxonomy, so implementing it here "
+        "would mean inventing a different one and calling it the same rule",
+    "context-engineering-gaps": "reachable but not implemented: needs "
+        "agentName, skillsUsed, toolsUsed (mcp_ prefix) and referencedFiles "
+        "-- all now captured -- PLUS customInstructions, which is not "
+        "available outside the IDE. Blocked on that one field",
+    "no-language-exploration": "reachable but not implemented: needs a "
+        "per-request programming-language attribution, which upstream "
+        "derives from aiCode blocks -- same dependency as vibe-coding",
+    "auto-avoidance": "reachable but not implemented: modelId is now "
+        "captured, but the predicate also needs modelTier(models.topModel) "
+        "and a countWhere(...) regex over model ids -- the same maintained "
+        "premium-tier table premium-waste needs",
+    "premium-waste": "reachable but not implemented: needs modelTier(modelId) "
+        "AND aiCode.length. modelId is now captured; the tier mapping is a "
+        "maintained upstream table of which model ids bill as premium, and "
+        "hardcoding a snapshot of it here would silently rot as models ship",
+    "premium-for-lookup-questions": "reachable but not implemented: same "
+        "modelTier(modelId) dependency as premium-waste",
+    "verbose-prompt-no-compression": "reachable but not implemented: needs "
+        "hasSkillByPattern(skillsUsed) -- skillsUsed is now captured, but "
+        "the rule's pattern set is not carried in the vendored rule file",
+    "profanity": "no patterns: the wordlist is supplied by the rule and the "
+        "vendored file carries none; upstream keeps it in src/core/"
+        "profanity.ts. Evaluating it would mean inventing a moderation "
+        "wordlist -- a product judgment out of scope for this evaluator",
 }
 
 
@@ -636,6 +730,229 @@ def eval_frustration_signals(rule, user_messages):
     return matched
 
 
+# --------------------------------------------------------------------------
+# Telemetry-backed adapters (scripts/lib/telemetry.py)
+#
+# These rules were skipped as "not captured" until 2026-07-26. That was
+# correct about this project's OWN session index (role/content/timestamp
+# only) and wrong about the world: both harnesses write per-request
+# telemetry of their own, and this project already reads those same stores
+# for the reviewer's conversation digest. See telemetry.py's module
+# docstring for the field-by-field evidence, gathered by reading the real
+# stores rather than by consulting documentation.
+#
+# Two rules that LOOK reachable from the same data are still skipped, on
+# evidence rather than assumption -- see UNSUPPORTED_REASONS for yolo-mode
+# and auto-approve-terminal. Confirmations are captured; auto-approvals are
+# not, because an auto-approved call emits no permission event at all. A
+# rate over the surviving records would have a permanently zero numerator.
+# --------------------------------------------------------------------------
+
+def _require_records(records, rule_id, what):
+    """Turn an empty telemetry selection into a loud skip.
+
+    Never returns an empty list to an adapter. A rule scored against zero
+    records reports "no problem found" in exactly the situation where the
+    honest answer is "no data" -- the failure mode this branch has ruled
+    worse than skipping.
+    """
+    if not records:
+        raise ValueError(
+            "harness telemetry has no usable {} records -- neither Copilot "
+            "CLI's session-state/*/events.jsonl + session-store.db nor "
+            "Claude Code's projects/*.jsonl yielded any (harness not "
+            "installed, or no sessions yet)".format(what)
+        )
+    return records
+
+
+def _pin(rule, match=None, check=None):
+    d = rule["detect"]
+    if match is not None and d.get("match", "").strip() != match:
+        raise ValueError("detect block changed since this adapter was written")
+    if check is not None and d.get("check", "").strip() != check:
+        raise ValueError("detect block changed since this adapter was written")
+    return d
+
+
+def _thresholds(rule, *keys):
+    t = rule["thresholds"]
+    for key in keys:
+        if key not in t:
+            raise ValueError("threshold {} not defined".format(key))
+    return t
+
+
+def eval_model_overreliance(rule, tel):
+    _pin(rule, check="models.topShare > thresholds.maxTopModelRate AND "
+                     "models.modelCount < thresholds.minModels AND "
+                     "models.total > thresholds.minSample")
+    t = _thresholds(rule, "maxTopModelRate", "minModels", "minSample")
+    calls = _require_records(
+        telemetry.requests_with(tel.api_calls, "modelId"), rule["id"], "modelId")
+    counts = Counter(c["modelId"] for c in calls)
+    total = len(calls)
+    top_count = counts.most_common(1)[0][1]
+    share = top_count / total
+    if not (share > t["maxTopModelRate"] and len(counts) < t["minModels"]
+            and total > t["minSample"]):
+        return None
+    return top_count
+
+
+def eval_reasoning_effort_overuse(rule, tel):
+    _pin(rule, check="stats.totalKnown > thresholds.minSample AND "
+                     "stats.ratio > thresholds.maxRatio")
+    t = _thresholds(rule, "minSample", "maxRatio")
+    # "totalKnown" is upstream's own word for it: records where the field is
+    # ABSENT are excluded from the denominator, not counted as low effort.
+    calls = _require_records(
+        telemetry.requests_with(tel.api_calls, "reasoningEffort"),
+        rule["id"], "reasoningEffort")
+    premium = sum(1 for c in calls if c["reasoningEffort"] in ("high", "max"))
+    ratio = premium / len(calls)
+    if not (len(calls) > t["minSample"] and ratio > t["maxRatio"]):
+        return None
+    return premium
+
+
+def eval_cache_hit_starvation(rule, tel):
+    _pin(rule, match="promptTokens > thresholds.minPromptTokens",
+               check="count > thresholds.minSample AND "
+                     "cacheRate < thresholds.minCacheRate")
+    t = _thresholds(rule, "minPromptTokens", "minSample", "minCacheRate")
+    calls = _require_records(
+        telemetry.requests_with(tel.api_calls, "promptTokens", "cacheReadTokens"),
+        rule["id"], "promptTokens/cacheReadTokens")
+    matched = [c for c in calls if c["promptTokens"] > t["minPromptTokens"]]
+    if not matched:
+        return None
+    total_prompt = sum(c["promptTokens"] for c in matched)
+    total_cache = sum(c["cacheReadTokens"] for c in matched)
+    cache_rate = (total_cache / total_prompt) if total_prompt else 0.0
+    if not (len(matched) > t["minSample"] and cache_rate < t["minCacheRate"]):
+        return None
+    return len(matched)
+
+
+def eval_slow_responses(rule, tel):
+    _pin(rule, match="totalElapsed > thresholds.slowMs AND totalElapsed > 0",
+               check="count > thresholds.minCount")
+    t = _thresholds(rule, "slowMs", "minCount")
+    # Turn granularity, not API-call granularity: upstream's totalElapsed is
+    # how long the USER waited for a request, which in an agentic harness
+    # spans many API calls.
+    turns = _require_records(
+        telemetry.requests_with(tel.turns, "totalElapsed"), rule["id"], "totalElapsed")
+    matched = sum(1 for r in turns if r["totalElapsed"] > t["slowMs"])
+    if not matched > t["minCount"]:
+        return None
+    return matched
+
+
+def eval_verbose_output(rule, tel):
+    _pin(rule, match="completionTokens > thresholds.minCompletionTokens AND "
+                     "messageLength > 0 AND messageLength < "
+                     "thresholds.maxMessageLength",
+               check="ratio > thresholds.maxRatio AND count > thresholds.minSample")
+    t = _thresholds(rule, "minCompletionTokens", "maxMessageLength",
+                    "minSample", "maxRatio")
+    turns = _require_records(
+        telemetry.requests_with(tel.turns, "completionTokens", "messageLength"),
+        rule["id"], "completionTokens/messageLength")
+    matched = sum(1 for r in turns
+                  if r["completionTokens"] > t["minCompletionTokens"]
+                  and 0 < r["messageLength"] < t["maxMessageLength"])
+    ratio = matched / len(turns)
+    if not (ratio > t["maxRatio"] and matched > t["minSample"]):
+        return None
+    return matched
+
+
+def eval_high_cancellation(rule, tel):
+    _pin(rule, match="isCanceled == true", check="ratio > thresholds.maxCancelRate")
+    t = _thresholds(rule, "maxCancelRate")
+    turns = _require_records(
+        telemetry.requests_with(tel.turns, "isCanceled"), rule["id"], "isCanceled")
+    matched = sum(1 for r in turns if r["isCanceled"])
+    ratio = matched / len(turns)
+    if not ratio > t["maxCancelRate"]:
+        return None
+    return matched
+
+
+def eval_runaway_agent_loops(rule, tel):
+    _pin(rule, match="toolsUsed.length >= thresholds.minToolsPerReq AND "
+                     "(agentMode == \"agent\" OR agentName != \"\")",
+               check="count >= thresholds.minReqs")
+    t = _thresholds(rule, "minToolsPerReq", "minReqs")
+    # ADAPTATION: the `agentMode == "agent"` branch is dropped -- neither
+    # harness has an ask/agent mode toggle, so there is nothing to map it
+    # to. The surviving `agentName != ""` branch is genuinely populated
+    # (Copilot subagent.started.agentName; Claude Agent/Task tool inputs),
+    # which is why this is an adaptation and not a silent no-op.
+    turns = _require_records(
+        telemetry.requests_with(tel.turns, "toolsUsed", "agentName"),
+        rule["id"], "toolsUsed/agentName")
+    matched = sum(1 for r in turns if len(r["toolsUsed"]) >= t["minToolsPerReq"])
+    if not matched >= t["minReqs"]:
+        return None
+    return matched
+
+
+def eval_excessive_file_context(rule, tel):
+    _pin(rule, match="length(referencedFiles) >= thresholds.minFiles",
+               check="stats.outlierCount >= thresholds.minOutliers AND "
+                     "stats.ratio >= thresholds.maxRatio")
+    t = _thresholds(rule, "minFiles", "minOutliers", "maxRatio")
+    turns = _require_records(
+        telemetry.requests_with(tel.turns, "referencedFiles"),
+        rule["id"], "referencedFiles")
+    outliers = sum(1 for r in turns if len(r["referencedFiles"]) >= t["minFiles"])
+    ratio = outliers / len(turns)
+    if not (outliers >= t["minOutliers"] and ratio >= t["maxRatio"]):
+        return None
+    return outliers
+
+
+TELEMETRY_ADAPTERS = {
+    "excessive-file-context": eval_excessive_file_context,
+    "model-overreliance": eval_model_overreliance,
+    "reasoning-effort-overuse": eval_reasoning_effort_overuse,
+    "cache-hit-starvation": eval_cache_hit_starvation,
+    "slow-responses": eval_slow_responses,
+    "verbose-output": eval_verbose_output,
+    "high-cancellation": eval_high_cancellation,
+    "runaway-agent-loops": eval_runaway_agent_loops,
+}
+
+
+class TelemetrySource:
+    """Lazily-built, evaluated-once holder for the two telemetry streams.
+
+    Built at most once per process and only if some rule actually asks for
+    it: extraction walks up to MAX_SESSIONS harness session logs, which is
+    real I/O that the eleven pre-existing rules have no use for.
+    """
+
+    def __init__(self, env=None):
+        self._env = env
+        self._turns = None
+        self._api_calls = None
+
+    @property
+    def turns(self):
+        if self._turns is None:
+            self._turns = telemetry.build_turn_requests(self._env)
+        return self._turns
+
+    @property
+    def api_calls(self):
+        if self._api_calls is None:
+            self._api_calls = telemetry.build_api_calls(self._env)
+        return self._api_calls
+
+
 REQUEST_ADAPTERS = {
     "caps-lock": eval_caps_lock,
     "late-night-coding": eval_late_night_coding,
@@ -648,7 +965,8 @@ REQUEST_ADAPTERS = {
 
 # Total rule ids this evaluator can produce a signal for (used only for the
 # coverage line printed to stderr).
-SUPPORTED_COUNT = len(REQUEST_ADAPTERS) + len(BESPOKE_SESSION_IDS) + 1  # +1 = mega-sessions/abandon-sessions handled by the generic engine below, counted explicitly in main()
+SUPPORTED_COUNT = (len(REQUEST_ADAPTERS) + len(TELEMETRY_ADAPTERS)
+                   + len(BESPOKE_SESSION_IDS) + 1)  # +1 = mega-sessions/abandon-sessions handled by the generic engine below, counted explicitly in main()
 
 
 def main():
@@ -663,6 +981,7 @@ def main():
         return 0
     user_messages = load_user_messages(db_path)
     tool_markers_by_session = None  # lazily computed only if a rule needs it
+    telemetry_source = None  # ditto -- harness telemetry is real I/O
 
     signals = []
     evaluated = 0
@@ -686,7 +1005,11 @@ def main():
             continue
 
         try:
-            if rule_id in REQUEST_ADAPTERS:
+            if rule_id in TELEMETRY_ADAPTERS:
+                if telemetry_source is None:
+                    telemetry_source = TelemetrySource()
+                count = TELEMETRY_ADAPTERS[rule_id](rule, telemetry_source)
+            elif rule_id in REQUEST_ADAPTERS:
                 count = REQUEST_ADAPTERS[rule_id](rule, user_messages)
             elif rule_id == "tunnel-vision":
                 count = eval_tunnel_vision(rule, sessions)
