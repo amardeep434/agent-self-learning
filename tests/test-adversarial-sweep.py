@@ -690,26 +690,43 @@ class TestConfinementBackstop(unittest.TestCase):
 class TestTOCTOU(unittest.TestCase):
     ITERATIONS = 40  # matches the prior ad-hoc sweep's iteration count
 
-    # persist-proposal.py's own docstrings already acknowledge a narrow,
-    # deliberately-unclosed race between the last confinement/symlink check
-    # on stage_dir and the mkstemp() call that actually resolves it again by
-    # path ("Closing it would need dir_fd-relative operations throughout,
-    # and mkstemp has no dir_fd parameter to hang that off of. Documented,
-    # not fixed."). Running this attack for real (not just reading the
-    # docstring) measures a ~10% (4/40) escape rate under a tight busy-loop
-    # racer -- materially different from "prior run: 40 iterations, 0
-    # escapes". That prior figure predates this codified version and this
-    # exact measurement; see fix-p1-p2-report.md.
+    # HISTORY: persist-proposal.py's docstrings used to acknowledge a
+    # narrow, deliberately-unclosed race between the last confinement/
+    # symlink check on stage_dir and the mkstemp() call that actually
+    # resolved it again by path. Two independent measurements of that race
+    # (a prior codified run of exactly this test reporting ~10%, and a
+    # from-scratch reproduction at 18.3% / 11 of 60) superseded a much
+    # older, wrong "0 escapes in 40 iterations" claim -- see the correction
+    # appended to
+    # .superpowers/sdd/2026-07-25-harness-neutral-persistence/progress.md
+    # and fix-p3-toctou-report.md for the full record, including the
+    # determination that the leaked material was real file content
+    # (SKILL.md / staged .persist-tmp-* files carrying actual proposal
+    # content), never just empty directories.
     #
-    # This is NOT asserted at zero tolerance: doing so would turn this
-    # suite red on every run over an already-known, already-documented
-    # residual that a full fix (dir_fd-pinned file ops end to end, with a
-    # Windows fallback since dir_fd is POSIX-only) is out of scope for the
-    # two verification gaps this suite was commissioned to close. Instead
-    # the escape rate is measured and reported every run, and only fails
-    # the suite past a generous ceiling that would still catch a total
-    # confinement collapse (e.g. the symlink check being removed outright).
-    ESCAPE_RATE_CEILING = 0.5
+    # FIX: persist-proposal.py now does the entire write -- every directory
+    # in the chain below the trusted store root, the target stat, the
+    # staged-file create, and the final rename -- through dir_fd-anchored
+    # syscalls (O_NOFOLLOW open/mkdir/stat/replace/unlink relative to an
+    # already-open directory fd) whenever DIR_FD_SUPPORTED is true (a real
+    # functional probe, not a platform-name check or a bare
+    # os.supports_dir_fd lookup -- see persist-proposal.py's
+    # _probe_dir_fd_support docstring for why the latter alone is not
+    # trustworthy here). That closes the exact re-resolution race this test
+    # exercises: measured at 0/300 escapes in a standalone harness at higher
+    # iteration counts than this suite runs by default (see
+    # fix-p3-toctou-report.md), so this test now asserts zero tolerance
+    # wherever dir_fd is actually available.
+    #
+    # RESIDUAL: dir_fd has no equivalent on native Windows (`os.mkdir(...,
+    # dir_fd=...)` etc. raise NotImplementedError there; DIR_FD_SUPPORTED's
+    # functional probe correctly reports False there). On such a platform
+    # this test measures and reports the rate without failing the suite
+    # over an already-known, already-disclosed, currently-unfixable-with-
+    # the-stdlib gap -- a hard failure there would not be honest about
+    # what's actually achievable without a Windows-native primitive this
+    # project doesn't have.
+    ESCAPE_RATE_CEILING = 0.5  # only used on the no-dir_fd (report-only) branch
 
     def test_toctou_symlink_swap_race(self):
         if not CAN_SYMLINK:
@@ -757,21 +774,33 @@ class TestTOCTOU(unittest.TestCase):
                     escapes += 1
 
         rate = escapes / self.ITERATIONS
-        print(f"[TOCTOU] {escapes}/{self.ITERATIONS} ({rate:.0%}) iterations escaped the store "
+        dir_fd = WRITER_MOD.DIR_FD_SUPPORTED
+        print(f"[TOCTOU] dir_fd={'supported' if dir_fd else 'UNSUPPORTED (fallback path)'} "
+              f"{escapes}/{self.ITERATIONS} ({rate:.0%}) iterations escaped the store "
               "under active symlink-swap contention", file=sys.stderr)
-        if escapes:
-            finding(
-                f"TOCTOU: {escapes}/{self.ITERATIONS} ({rate:.0%}) symlink-swap-race iterations wrote "
-                "content outside the store -- a real, measured instance of the residual "
-                "persist-proposal.py's own docstring already acknowledges between the last "
-                "stage_dir symlink check and tempfile.mkstemp() re-resolving it by path. "
-                "Not fixed in this pass (needs dir_fd-pinned file ops, out of scope for the "
-                "two assigned verification gaps); see fix-p1-p2-report.md.")
-        self.assertLessEqual(
-            rate, self.ESCAPE_RATE_CEILING,
-            f"{escapes}/{self.ITERATIONS} ({rate:.0%}) exceeds the sanity ceiling of "
-            f"{self.ESCAPE_RATE_CEILING:.0%} -- this looks like a total confinement "
-            "collapse, not the known narrow residual.")
+
+        if not dir_fd:
+            if escapes:
+                finding(
+                    f"TOCTOU: {escapes}/{self.ITERATIONS} ({rate:.0%}) symlink-swap-race iterations "
+                    "wrote content outside the store on a platform without dir_fd support -- the "
+                    "known, disclosed residual of the path-based fallback writer (see "
+                    "_write_all_path's docstring and fix-p3-toctou-report.md). Not fixable with the "
+                    "stdlib alone on this platform.")
+            self.assertLessEqual(
+                rate, self.ESCAPE_RATE_CEILING,
+                f"{escapes}/{self.ITERATIONS} ({rate:.0%}) exceeds the sanity ceiling of "
+                f"{self.ESCAPE_RATE_CEILING:.0%} -- this looks like a total confinement "
+                "collapse, not the known narrow residual.")
+            return
+
+        # dir_fd IS supported here: zero tolerance. Any escape at all is a
+        # regression in the fix this test exists to hold the line on.
+        self.assertEqual(
+            escapes, 0,
+            f"{escapes}/{self.ITERATIONS} ({rate:.0%}) escaped the store with dir_fd support "
+            "available -- the TOCTOU fix has regressed. See fix-p3-toctou-report.md for the "
+            "design this is supposed to guarantee.")
 
 
 if __name__ == "__main__":

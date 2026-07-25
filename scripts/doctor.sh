@@ -128,6 +128,47 @@ done
 echo
 
 # ---------------------------------------------------------------------------
+# 2b. dir_fd (TOCTOU) support -- fix-p3-toctou.
+#
+# scripts/persist-proposal.py closes a symlink-swap race in its write path
+# using dir_fd-anchored syscalls (O_NOFOLLOW open/mkdir/stat/replace/unlink
+# relative to an already-open directory fd) wherever the platform actually
+# supports them -- checked with a real functional probe at persist-proposal
+# import time (_probe_dir_fd_support), not a platform-name guess or a bare
+# os.supports_dir_fd lookup (which is demonstrably unreliable for
+# os.replace specifically on this project's own Linux dev/CI host -- see
+# that function's docstring). Where the probe fails (known case: native
+# Windows, which has no dir_fd concept at all), persist-proposal.py falls
+# back to the older path-based writer, which has a measured, disclosed
+# TOCTOU residual (tests/test-adversarial-sweep.py's TestTOCTOU;
+# .superpowers/sdd/2026-07-25-harness-neutral-persistence/fix-p3-toctou-report.md).
+# Surfacing which mode is active here is the whole point: an operator
+# should never have to read source to find out whether that residual
+# applies to their install.
+# ---------------------------------------------------------------------------
+if [[ "${_SL_PYTHON3_AVAILABLE}" == "1" ]]; then
+    DIR_FD_PROBE="$(python3 -c '
+import sys
+sys.path.insert(0, "'"${SCRIPT_DIR}"'")
+import importlib.util
+spec = importlib.util.spec_from_file_location("persist_proposal", "'"${SCRIPT_DIR}"'/persist-proposal.py")
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+print("yes" if m.DIR_FD_SUPPORTED else "no")
+' 2>/dev/null || echo "unknown")"
+    case "${DIR_FD_PROBE}" in
+        yes) echo "dir_fd TOCTOU fix: ACTIVE (persist-proposal.py writes are dir_fd-anchored; race closed)" ;;
+        no)  echo "dir_fd TOCTOU fix: NOT AVAILABLE on this platform -- persist-proposal.py is using the" ;
+             echo "  older path-based writer, which has a known, measured symlink-swap TOCTOU residual." ;
+             echo "  See .superpowers/sdd/2026-07-25-harness-neutral-persistence/fix-p3-toctou-report.md." ;;
+        *)   echo "dir_fd TOCTOU fix: could not probe (persist-proposal.py failed to import)" ;;
+    esac
+else
+    echo "dir_fd TOCTOU fix: cannot probe -- python3 unavailable"
+fi
+echo
+
+# ---------------------------------------------------------------------------
 # 3. Detected harnesses -- presence + hook-config freshness.
 #
 # Round A finding: with python3 absent, SL_SCRIPTS_DIR resolves to "" (see

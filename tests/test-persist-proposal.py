@@ -70,11 +70,23 @@ CAN_HARDLINK = _can_hardlink()
 # so checking for the attribute is the correct probe for it.
 HAS_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0) != 0
 
+# DIR_FD_SUPPORTED (fix-p3-toctou): the same real functional probe
+# persist-proposal.py itself uses to decide whether it can run the
+# dir_fd-anchored writer (_write_all_fd) or must fall back to the weaker,
+# disclosed-residual path-based one (_write_all_path). Imported from the
+# module under test rather than reimplemented here, since a second,
+# independent implementation of "is dir_fd usable" could silently drift
+# from the one that actually gates production behaviour.
+_writer_for_probe = _load_writer_module()
+DIR_FD_SUPPORTED = _writer_for_probe.DIR_FD_SUPPORTED
+
 print(f"[capability probe] symlink creation: {'AVAILABLE' if CAN_SYMLINK else 'UNAVAILABLE (probed, not platform-assumed)'}",
       file=sys.stderr)
 print(f"[capability probe] hardlink creation: {'AVAILABLE' if CAN_HARDLINK else 'UNAVAILABLE (probed, not platform-assumed)'}",
       file=sys.stderr)
 print(f"[capability probe] O_NOFOLLOW: {'AVAILABLE' if HAS_O_NOFOLLOW else 'UNAVAILABLE (POSIX-only primitive)'}",
+      file=sys.stderr)
+print(f"[capability probe] dir_fd (functional): {'AVAILABLE' if DIR_FD_SUPPORTED else 'UNAVAILABLE (e.g. native Windows)'}",
       file=sys.stderr)
 
 
@@ -436,6 +448,140 @@ class TestInternalGuardsUnreachableThroughSchema(unittest.TestCase):
                     del self.mod.os.O_NOFOLLOW
                 else:
                     self.mod.os.O_NOFOLLOW = original
+
+
+class TestDirFdWritePath(unittest.TestCase):
+    """fix-p3-toctou: exercises _write_all_fd directly (rather than only
+    black-box through the CLI), and the dispatch/leak/mutation properties
+    that make it safe to run on every hook invocation.
+    """
+
+    def setUp(self):
+        self.mod = _load_writer_module()
+        if not self.mod.DIR_FD_SUPPORTED:
+            self.skipTest("dir_fd probed and unavailable on this runner (e.g. native Windows) "
+                          "-- _write_all_fd is not the active code path there")
+
+    def test_write_all_dispatches_to_fd_path_when_supported(self):
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            proposal = {"version": 1,
+                        "memory": [{"file": "MEMORY.md", "mode": "replace", "content": "x"}],
+                        "skills": []}
+            planned = self.mod._plan(proposal, home / "memory", home / "learned-skills")
+            written, total = self.mod._write_all(planned)
+            self.assertEqual((home / "memory" / "MEMORY.md").read_text(), "x")
+            self.assertIn(str(home / "memory" / "MEMORY.md"), written)
+
+    def test_no_fd_leak_across_many_successful_and_failed_writes(self):
+        """Every fd opened by _write_all_fd must close on both the success
+        and the failure path -- a leak here is a slow resource exhaustion
+        bug in a script that runs on every review, not just an untidy
+        detail. /proc/self/fd is the ground truth on Linux; skipped where
+        unavailable (e.g. macOS, which has no /proc)."""
+        if not Path("/proc/self/fd").is_dir():
+            self.skipTest("/proc/self/fd unavailable on this platform")
+
+        def fd_count():
+            return len(os.listdir("/proc/self/fd"))
+
+        before = fd_count()
+        for i in range(50):
+            with tempfile.TemporaryDirectory() as d:
+                home = Path(d)
+                proposal = {"version": 1,
+                            "memory": [{"file": "MEMORY.md", "mode": "replace", "content": f"n{i}"}],
+                            "skills": [{"name": f"skill{i}", "content": "# x"}]}
+                planned = self.mod._plan(proposal, home / "memory", home / "learned-skills")
+                self.mod._write_all(planned)
+        self.assertEqual(fd_count(), before, "fd leak on the success path")
+
+        for i in range(50):
+            with tempfile.TemporaryDirectory() as d:
+                home = Path(d)
+                # SKILL.md pre-exists as a directory -- forces a failure
+                # partway through staging.
+                (home / "learned-skills" / "beta" / "SKILL.md").mkdir(parents=True)
+                proposal = {"version": 1, "skills": [{"name": "beta", "content": "x"}]}
+                try:
+                    planned = self.mod._plan(proposal, home / "memory", home / "learned-skills")
+                    self.mod._write_all(planned)
+                except Exception:
+                    pass
+        self.assertEqual(fd_count(), before, "fd leak on the failure path")
+
+    def test_mutation_forcing_path_based_writer_reproduces_the_race(self):
+        """Mutation test: force DIR_FD_SUPPORTED False (simulating the
+        pre-fix / no-dir_fd state) and confirm the race that
+        tests/test-adversarial-sweep.py's TestTOCTOU holds at zero
+        tolerance actually resurfaces -- i.e. that the zero-escape result
+        with dir_fd enabled is because of the fix, not because the racer
+        thread happens not to win often enough to matter regardless of
+        which writer runs. Uses a smaller iteration count than the
+        standalone race harness in fix-p3-toctou-report.md (this runs in
+        the normal test suite budget); a handful of escapes out of a few
+        dozen racy iterations is enough to demonstrate the mutation is
+        killed without materially slowing the suite.
+        """
+        if not CAN_SYMLINK:
+            self.skipTest("symlink creation probed and unavailable on this runner")
+        import shutil
+        import threading
+
+        self.mod.DIR_FD_SUPPORTED = False
+        try:
+            escapes = 0
+            iterations = 60
+            for _ in range(iterations):
+                with tempfile.TemporaryDirectory() as d:
+                    home = Path(d) / "store"
+                    skills_dir = home / "learned-skills"
+                    skills_dir.mkdir(parents=True)
+                    outside = Path(d) / "outside"
+                    outside.mkdir()
+                    skill_dir = skills_dir / "alpha"
+                    skill_dir.mkdir()
+                    stop = threading.Event()
+
+                    def swap():
+                        while not stop.is_set():
+                            try:
+                                if skill_dir.is_symlink():
+                                    skill_dir.unlink()
+                                    skill_dir.mkdir()
+                                elif skill_dir.exists():
+                                    shutil.rmtree(skill_dir)
+                                    skill_dir.symlink_to(outside, target_is_directory=True)
+                            except OSError:
+                                pass
+
+                    racer = threading.Thread(target=swap, daemon=True)
+                    racer.start()
+                    try:
+                        proposal = {"version": 1, "memory": [],
+                                    "skills": [{"name": "alpha", "content": "pwned"}]}
+                        planned = self.mod._plan(proposal, home / "memory", skills_dir)
+                        self.mod._write_all(planned)
+                    except Exception:
+                        pass
+                    finally:
+                        stop.set()
+                        racer.join(timeout=1)
+                    if list(outside.iterdir()):
+                        escapes += 1
+        finally:
+            self.mod.DIR_FD_SUPPORTED = True
+
+        # A generous, non-flaky bar: the unfixed path-based writer measures
+        # ~10-18% in independent runs (see fix-p3-toctou-report.md). Any
+        # escape at all here is sufficient to prove the mutation is killed
+        # (dir_fd-off behaves differently from dir_fd-on, which is 0/N).
+        self.assertGreater(
+            escapes, 0,
+            f"expected the mutation (DIR_FD_SUPPORTED forced False) to reproduce at least one "
+            f"escape in {iterations} racy iterations, got 0 -- either the race harness itself "
+            "is broken, or _write_all_path is unexpectedly also race-free, either of which "
+            "would mean this mutation test isn't actually testing anything.")
 
 
 if __name__ == "__main__":

@@ -17,6 +17,23 @@ every real file exactly as it was before this run. The one residual risk is a
 failure *during* the rename phase itself (see README below on atomicity), which
 the code documents rather than silently ignoring, per the exit-code contract.
 
+TOCTOU: on platforms where the `os` module reports dir_fd support for
+open/mkdir/stat/replace/unlink (checked via `os.supports_dir_fd`, never by
+platform name -- see DIR_FD_SUPPORTED below), every directory below the
+trusted store root (memory_dir/skills_dir themselves, resolved by paths.py
+and never proposal-derived) is opened relative to its parent's already-open
+file descriptor with O_NOFOLLOW, and every subsequent stat/read/write/rename
+against it is anchored to that same fd. There is then no point where a path
+component is re-resolved from a string after being validated, which is what
+closes the race a prior version of this module measured at up to ~18% escape
+under active contention (tests/test-adversarial-sweep.py's TestTOCTOU; see
+.superpowers/sdd/2026-07-25-harness-neutral-persistence/fix-p3-toctou-report.md).
+Windows has no dir_fd support in the stdlib `os` module at all (`os.mkdir`
+etc. raise NotImplementedError there), so on Windows this module falls back
+to the previous path-based implementation (_write_all_path) and the TOCTOU
+window it has is disclosed, not silently reintroduced -- see
+_write_all_path's docstring and `doctor.sh`'s dir_fd probe.
+
 THREAT MODEL: the proposal originates from a background LLM agent whose
 context may have been influenced by prompt injection. Assume the content is
 adversarial: it wants to write outside the store, clobber an arbitrary file,
@@ -31,6 +48,7 @@ import argparse
 import errno
 import json
 import os
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -57,6 +75,60 @@ MAX_MEMORY_FILE_BYTES = 1 * 1024 * 1024
 # semantically invisible, since nothing downstream ever looked for it.
 SKILL_CONTENT_FILENAME = "SKILL.md"
 USAGE_FILENAME = ".usage.json"
+
+def _probe_dir_fd_support() -> bool:
+    """Real functional probe, not a platform-name check and not a bare
+    `os.supports_dir_fd` set-membership lookup either.
+
+    This codebase has been bitten repeatedly by assuming what a platform
+    *name* implies (see tests/test-path-compare-lib.sh, tests/test-doctor.sh,
+    and the CAN_SYMLINK/CAN_HARDLINK probes in tests/test-persist-proposal.py)
+    -- but `os.supports_dir_fd` itself turned out to be an unreliable proxy
+    for what we actually need here: on this project's own Linux dev/CI
+    environment, `os.replace in os.supports_dir_fd` is False (only
+    `os.rename` is listed, even though both wrap the same syscall), while
+    `os.replace(src, dst, src_dir_fd=..., dst_dir_fd=...)` demonstrably
+    works when called for real. Trusting the set literally for os.replace
+    would have wrongly reported dir_fd as unsupported everywhere this
+    module actually runs, silently falling back to the documented-weaker
+    path-based writer on every POSIX platform -- exactly the kind of
+    "measured wrong, believed for years" mistake this fix exists to correct
+    (see the module docstring's TOCTOU section). A real, disposable
+    open/mkdir/stat/replace/unlink sequence in a throwaway temp directory is
+    the only thing that can't lie the way an introspection table can.
+    """
+    if not (hasattr(os, "O_DIRECTORY") and hasattr(os, "O_NOFOLLOW")):
+        return False
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            root_fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.mkdir("probe-dir", dir_fd=root_fd)
+                sub_fd = os.open("probe-dir", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                  dir_fd=root_fd)
+                try:
+                    fd = os.open("a", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=sub_fd)
+                    os.close(fd)
+                    os.stat("a", dir_fd=sub_fd, follow_symlinks=False)
+                    os.replace("a", "b", src_dir_fd=sub_fd, dst_dir_fd=sub_fd)
+                    os.unlink("b", dir_fd=sub_fd)
+                finally:
+                    os.close(sub_fd)
+            finally:
+                os.close(root_fd)
+        return True
+    except (OSError, NotImplementedError):
+        return False
+
+
+DIR_FD_SUPPORTED = _probe_dir_fd_support()
+
+# Retries for picking a temp-file name that doesn't collide inside a
+# dir_fd-anchored directory (no path-based tempfile.mkstemp equivalent
+# exists for dir_fd -- see _stage_fd). Collisions are pathologically
+# unlikely (16 hex chars of os.urandom per attempt); this bounds a
+# pathological run rather than looping forever.
+_TMP_NAME_ATTEMPTS = 8
 
 
 class PersistError(Exception):
@@ -314,7 +386,23 @@ def _plan(proposal: dict, memory_dir: Path, skills_dir: Path) -> list[tuple[tupl
 
 
 def _write_all(planned: list[tuple[tuple[Path, ...], Path, str, str]]) -> tuple[list[str], int]:
+    """Dispatch to the dir_fd-anchored writer where the platform supports
+    it, else the path-based writer below. See DIR_FD_SUPPORTED and
+    _write_all_fd's docstring for what "supports it" means and why this is
+    a capability check, never a platform-name branch.
+    """
+    if DIR_FD_SUPPORTED:
+        return _write_all_fd(planned)
+    return _write_all_path(planned)
+
+
+def _write_all_path(planned: list[tuple[tuple[Path, ...], Path, str, str]]) -> tuple[list[str], int]:
     """Stage every entry, then rename every staged file into place.
+
+    Path-based fallback used only when DIR_FD_SUPPORTED is false (i.e. on
+    Windows, which has no dir_fd support in the stdlib `os` module at all --
+    see DIR_FD_SUPPORTED). Everywhere DIR_FD_SUPPORTED is true, _write_all_fd
+    runs instead and closes the race described below.
 
     Raises PersistError/OSError on any failure. On a staging failure, no real
     target has been touched. On a (much less likely) rename failure partway
@@ -324,11 +412,19 @@ def _write_all(planned: list[tuple[tuple[Path, ...], Path, str, str]]) -> tuple[
     a journal or a directory-swap trick this stdlib-only, cross-platform
     script does not attempt.
 
-    A narrower, un-closed residual also lives between `_assert_inside(root,
-    ...)` above and `tempfile.mkstemp(dir=root)` inside `_stage`: `root`
-    could in principle be swapped for a symlink in that gap. Closing it
-    would need `dir_fd`-relative operations throughout, and `mkstemp` has no
-    `dir_fd` parameter to hang that off of. Documented, not fixed.
+    KNOWN, DISCLOSED RESIDUAL (this function only): a race lives between
+    `_assert_inside(root, ...)` above and `tempfile.mkstemp(dir=root)` inside
+    `_stage`: `root` could in principle be swapped for a symlink in that gap.
+    Measured (tests/test-adversarial-sweep.py's TestTOCTOU, prior to the
+    dir_fd fix) at up to ~18% escape under active contention on POSIX; this
+    path-based function is still exactly that vulnerable, because closing it
+    needs dir_fd-relative operations throughout, which Windows's `os` module
+    does not provide (`os.mkdir(..., dir_fd=...)` etc. raise
+    NotImplementedError there; `os.supports_dir_fd` is empty). Unfixable on
+    this platform with the stdlib alone -- disclosed here, in the module
+    docstring, and via `doctor.sh`'s dir_fd probe, rather than silently
+    weaker. See
+    .superpowers/sdd/2026-07-25-harness-neutral-persistence/fix-p3-toctou-report.md.
 
     Each entry's `dirs` chain (see `_plan`) is walked and mkdir'd/checked one
     level at a time: every directory is created (a no-op if it already
@@ -404,6 +500,264 @@ def _write_all(planned: list[tuple[tuple[Path, ...], Path, str, str]]) -> tuple[
         for tmp_name, _target in staged:
             _cleanup_tmp(tmp_name)
         raise
+
+
+# ===========================================================================
+# dir_fd-anchored write path (used when DIR_FD_SUPPORTED). Every directory
+# below the trusted store root is opened relative to its parent's already-
+# open file descriptor, with O_NOFOLLOW; every subsequent stat/read/write/
+# rename against it is anchored to that fd rather than a path string. A
+# planted symlink can therefore never be "raced in" between a check and the
+# operation that check was guarding: the kernel resolves each `name` against
+# the fd atomically inside a single syscall, and O_NOFOLLOW makes that
+# syscall fail outright (ELOOP) rather than follow a symlink swapped in
+# mid-flight. This is what closes the race _write_all_path documents as
+# unfixed.
+# ===========================================================================
+
+def _close_quietly(fd: int) -> None:
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def _cleanup_tmp_fd(stage_fd: int, tmp_name: str) -> None:
+    try:
+        os.unlink(tmp_name, dir_fd=stage_fd)
+    except OSError:
+        pass  # already renamed, or never created -- nothing to do
+
+
+def _reject_suspicious_component(name: str) -> None:
+    """Same suspicious-name backstop as _assert_inside's target-name check,
+    applied to a single path component instead of a resolved Path. Needed
+    because the dir_fd walk below deliberately never resolves/stringifies a
+    full path (that re-resolution is exactly the TOCTOU surface being
+    closed) -- so it can't reuse _assert_inside's parent.resolve() logic and
+    needs its own component-level check instead.
+    """
+    if name in ("", ".", "..") or "/" in name or "\\" in name:
+        raise PersistError(f"refusing suspicious path component: {name!r}")
+
+
+def _raise_dir_open_error(name: str, exc: OSError) -> None:
+    if exc.errno == errno.ELOOP:
+        raise PersistError(f"refusing to use symlinked directory: {name!r}") from exc
+    if exc.errno == errno.ENOTDIR:
+        raise PersistError(f"expected a directory but found something else: {name!r}") from exc
+    raise exc
+
+
+def _mkdir_and_open_dir_fd(name: str, dir_fd: int) -> int:
+    """Open `name` (relative to `dir_fd`) as a directory fd, O_NOFOLLOW,
+    creating it first if it doesn't exist yet.
+
+    The critical property: the *final* open() call that actually hands back
+    a usable fd always carries O_NOFOLLOW and is always the last thing that
+    happens, after any create-if-missing attempt. So even if something swaps
+    `name` for a symlink in the gap between our first failed open and our
+    mkdir (the FileExistsError branch below), the re-opening open() call
+    still refuses it -- there is no window where a symlink resolved by this
+    function goes unchecked.
+    """
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        return os.open(name, flags, dir_fd=dir_fd)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        _raise_dir_open_error(name, exc)
+
+    try:
+        os.mkdir(name, dir_fd=dir_fd)
+    except FileExistsError:
+        pass  # raced with something creating it -- the verifying open below decides
+
+    try:
+        return os.open(name, flags, dir_fd=dir_fd)
+    except OSError as exc:
+        _raise_dir_open_error(name, exc)
+        raise AssertionError("unreachable")  # _raise_dir_open_error always raises
+
+
+def _stat_relative(stage_fd: int, name: str):
+    """os.stat anchored to `stage_fd`, not following symlinks. None if absent."""
+    try:
+        return os.stat(name, dir_fd=stage_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
+def _read_existing_fd(stage_fd: int, name: str) -> str:
+    """dir_fd-anchored counterpart to _read_existing: same symlink/hardlink/
+    UTF-8 refusals, anchored to `stage_fd` instead of re-resolving a path.
+    """
+    flags = os.O_RDONLY | os.O_NOFOLLOW
+    try:
+        fd = os.open(name, flags, dir_fd=stage_fd)
+    except FileNotFoundError:
+        return ""
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise PersistError(f"refusing to use symlinked target: {name!r}") from exc
+        raise
+    fd_owned_by_handle = False
+    try:
+        st = os.fstat(fd)
+        if st.st_nlink > 1:
+            raise PersistError(f"refusing to read multiply-linked file: {name!r}")
+        handle = os.fdopen(fd, "r", encoding="utf-8", newline="")
+        fd_owned_by_handle = True
+        try:
+            with handle:
+                return handle.read()
+        except UnicodeDecodeError as exc:
+            raise PersistError(f"existing file is not valid UTF-8: {name!r}") from exc
+    finally:
+        if not fd_owned_by_handle:
+            os.close(fd)
+
+
+def _stage_fd(stage_fd: int, data: str) -> str:
+    """dir_fd-anchored counterpart to _stage: write `data` to a fresh,
+    uniquely-named temp file inside the directory `stage_fd` refers to, and
+    return its (relative) name. tempfile.mkstemp has no dir_fd parameter, so
+    uniqueness is reimplemented here with O_CREAT|O_EXCL and a random name,
+    the same approach mkstemp itself uses internally, retried up to
+    _TMP_NAME_ATTEMPTS times on collision.
+
+    Same 0600 rationale as `_stage`: learned content is sensitive, and this
+    removes any window where a partially-written file is readable by anyone
+    but the owner.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    fd = None
+    tmp_name = None
+    for _ in range(_TMP_NAME_ATTEMPTS):
+        candidate = f".persist-tmp-{os.urandom(8).hex()}"
+        try:
+            fd = os.open(candidate, flags, 0o600, dir_fd=stage_fd)
+        except FileExistsError:
+            continue
+        tmp_name = candidate
+        break
+    if fd is None:
+        raise PersistError("could not create a unique temp file after repeated attempts")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        _cleanup_tmp_fd(stage_fd, tmp_name)
+        raise
+    return tmp_name
+
+
+def _write_all_fd(planned: list[tuple[tuple[Path, ...], Path, str, str]]) -> tuple[list[str], int]:
+    """dir_fd-anchored implementation of the write phase. See the module
+    docstring's TOCTOU section and this section's banner comment above for
+    the design; see _write_all_path's docstring for the race this replaces.
+
+    Every fd this function opens is closed in a `finally`, on every path
+    including exceptions -- a leaked fd in a script that runs once per
+    review is a slow, hard-to-diagnose resource leak in a long-lived
+    session, not just an untidy detail.
+    """
+    staged: list[tuple[int, str, Path]] = []  # (stage_fd, tmp_name, target)
+    all_fds: list[int] = []
+    total = 0
+    try:
+        for dirs, target, mode, content in planned:
+            opened_this_entry: list[int] = []
+            try:
+                parent_fd: int | None = None
+                for i, directory in enumerate(dirs):
+                    if i == 0:
+                        # The top-level root (memory_dir/skills_dir) is
+                        # trusted -- resolved by paths.py, never derived
+                        # from proposal content -- so creating/opening it is
+                        # still done by path. Its own symlink-ness is
+                        # explicitly rejected, and the O_NOFOLLOW open right
+                        # after is atomic against anything that swaps it in
+                        # the gap: a symlink there fails the open, it is
+                        # never followed.
+                        directory.mkdir(parents=True, exist_ok=True)
+                        _reject_if_symlink(directory, "store directory")
+                        fd = os.open(str(directory), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                    else:
+                        # Everything below the root may be proposal-derived
+                        # (a skill name). Structural checks first -- pure
+                        # string comparisons on the Path objects `_plan`
+                        # built, not filesystem calls, so they cannot be
+                        # raced -- catch the cases pathlib's `/` operator
+                        # can produce from an adversarial raw name (see
+                        # tests/test-adversarial-sweep.py's
+                        # TestConfinementBackstop): an absolute raw name
+                        # discards `dirs[i-1]` entirely (parent mismatch,
+                        # caught below), and a raw ".."/"."/"" collapses to
+                        # `directory == dirs[i-1]` itself (also a parent
+                        # mismatch, since dirs[i-1]'s own parent can never
+                        # equal dirs[i-1]) or is caught directly by the
+                        # component check. Only once both checks pass does
+                        # this touch the filesystem at all.
+                        prior = dirs[i - 1]
+                        if directory.parent != prior:
+                            raise PersistError(f"refusing directory outside its chain: {directory}")
+                        _reject_suspicious_component(directory.name)
+                        fd = _mkdir_and_open_dir_fd(directory.name, parent_fd)
+                    opened_this_entry.append(fd)
+                    parent_fd = fd
+            except BaseException:
+                for fd in opened_this_entry:
+                    _close_quietly(fd)
+                raise
+
+            # Every fd but the last (stage_fd, the target's immediate
+            # parent) is no longer needed once its child has been opened.
+            for fd in opened_this_entry[:-1]:
+                _close_quietly(fd)
+            stage_fd = opened_this_entry[-1]
+            all_fds.append(stage_fd)
+
+            if target.parent != dirs[-1]:
+                raise PersistError(f"refusing target outside its directory: {target}")
+            _reject_suspicious_component(target.name)
+
+            st = _stat_relative(stage_fd, target.name)
+            if st is not None:
+                if stat.S_ISLNK(st.st_mode):
+                    raise PersistError(f"refusing to use symlinked target: {target}")
+                if stat.S_ISDIR(st.st_mode):
+                    # Caught here (staging phase, before any rename) rather
+                    # than left to surface as an IsADirectoryError from
+                    # os.replace() during the commit phase below -- see
+                    # _write_all_path's matching comment for why that
+                    # ordering matters for the all-or-nothing guarantee.
+                    raise PersistError(f"refusing to write over existing directory: {target}")
+
+            data = _read_existing_fd(stage_fd, target.name) + content if mode == "append" else content
+            if len(data.encode("utf-8")) > MAX_MEMORY_FILE_BYTES:
+                raise PersistError(
+                    f"{target} would exceed {MAX_MEMORY_FILE_BYTES} bytes after this write"
+                )
+            tmp_name = _stage_fd(stage_fd, data)
+            staged.append((stage_fd, tmp_name, target))
+            total += len(content.encode("utf-8"))
+
+        written: list[str] = []
+        for stage_fd, tmp_name, target in staged:
+            os.replace(tmp_name, target.name, src_dir_fd=stage_fd, dst_dir_fd=stage_fd)
+            written.append(str(target))
+        return written, total
+    except BaseException:
+        for stage_fd, tmp_name, _target in staged:
+            _cleanup_tmp_fd(stage_fd, tmp_name)
+        raise
+    finally:
+        for fd in all_fds:
+            _close_quietly(fd)
 
 
 def main(argv: list[str]) -> int:
