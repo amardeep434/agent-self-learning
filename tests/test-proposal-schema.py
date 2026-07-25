@@ -174,6 +174,49 @@ class TestImportant4MemoryCaps(unittest.TestCase):
             ps.validate_proposal(p)
 
 
+class TestCaseFoldSkillCollision(unittest.TestCase):
+    """Two skill names in ONE proposal that fold to the same directory entry.
+
+    Reported as an unfixed finding by tests/test-adversarial-sweep.py on
+    macOS and Windows CI: 'alpha' and 'ALPHA' produced two independent
+    .usage.json records over a single directory, so one skill's content was
+    destroyed. Rejected at the schema layer, which needs no filesystem at
+    all -- so unlike the sweep's probe these assertions are meaningful on
+    every runner, including case-sensitive Linux.
+    """
+
+    def _rejects(self, a, b):
+        p = good()
+        p["skills"] = [{"name": a, "content": "x"}, {"name": b, "content": "y"}]
+        with self.assertRaises(ps.ValidationError) as ctx:
+            ps.validate_proposal(p)
+        # The message must name the problem, not just fail: this rejection
+        # reaches a human only through persist-failures.log.
+        self.assertIn("case-folded", str(ctx.exception))
+
+    def test_alpha_and_upper_alpha_rejected(self):
+        self._rejects("alpha", "ALPHA")
+
+    def test_mixed_case_variants_rejected(self):
+        self._rejects("My-Skill", "my-skill")
+
+    def test_single_character_case_variant_rejected(self):
+        self._rejects("a", "A")
+
+    def test_distinct_names_still_accepted(self):
+        p = good()
+        p["skills"] = [{"name": "alpha", "content": "x"}, {"name": "beta", "content": "y"}]
+        out = ps.validate_proposal(p)
+        self.assertEqual([s["name"] for s in out["skills"]], ["alpha", "beta"])
+
+    def test_exact_casing_is_preserved_not_normalised(self):
+        """Rejection must not become silent lowercasing of a legal name."""
+        p = good()
+        p["skills"] = [{"name": "MySkill", "content": "x"}]
+        out = ps.validate_proposal(p)
+        self.assertEqual(out["skills"][0]["name"], "MySkill")
+
+
 class TestImportant5WindowsReserved(unittest.TestCase):
     """IMPORTANT 5: Windows reserved device names validate"""
     def test_windows_reserved_con(self):

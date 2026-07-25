@@ -594,6 +594,24 @@ class TestFilesystemLayerSweep(unittest.TestCase):
             self.assertEqual(leftovers, [], f"leftover temp files: {leftovers}")
 
     def test_case_collision_alpha_ALPHA(self):
+        """'alpha' + 'ALPHA' in one proposal must be REFUSED, on every runner.
+
+        History, because this case is the reason the assertion is worded the
+        way it is: this used to `finding(...)` and pass. On macOS and
+        Windows CI (both probing `case-insensitive filesystem: AVAILABLE`)
+        the two names produced two independent `.usage.json` records over a
+        single folded directory entry, so one skill's content was destroyed
+        -- and the sweep printed that fact into a green matrix rather than
+        failing on it.
+
+        `proposal_schema.validate_proposal` now rejects names that collide
+        under casefold, and it does so WITHOUT consulting the filesystem.
+        That makes this assertion platform-independent, which is a strict
+        improvement over the old shape: the rejection is now proven on all
+        six matrix cells instead of only on the two that could reproduce the
+        collision. The CASE_INSENSITIVE_FS probe stays, but only to record
+        which filesystem the run observed -- it no longer gates the check.
+        """
         attack("fs:case-collision-alpha-ALPHA")
         with tempfile.TemporaryDirectory() as d:
             home = Path(d)
@@ -603,34 +621,62 @@ class TestFilesystemLayerSweep(unittest.TestCase):
             ]})
             r = run(payload, home)
             self.assertNotIn("Traceback", r.stderr)
-            if not CASE_INSENSITIVE_FS:
-                loud_skip("fs:case-collision-alpha-ALPHA (strict check)",
-                          "probed filesystem is case-sensitive here; 'alpha' and "
-                          "'ALPHA' land in distinct directories, so the collision "
-                          "this attack targets cannot occur on this runner")
+            # Exit 1 is validation refusal (where this is caught). Exit 2
+            # would be the writer's cross-review guard. Exit 0 is a FAILURE
+            # anywhere: on a case-insensitive filesystem it is the
+            # content-destroying outcome, and on a case-sensitive one it
+            # means a store that would be corrupt the moment it were synced
+            # to macOS was written anyway.
+            self.assertIn(r.returncode, (1, 2), r.stderr)
+            self.assertRegex(r.stderr, r"case-fold")
+            # A refusal must not half-apply.
+            self.assertFalse((home / "learned-skills" / ".usage.json").exists(),
+                             "a refused proposal must leave no .usage.json behind")
+            self.assertFalse((home / "learned-skills" / "alpha").exists(),
+                             "a refused proposal must write no skill directory")
+
+    def test_case_variant_of_an_existing_skill_never_destroys_it(self):
+        """The ACROSS-review half: 'alpha' persisted, then 'ALPHA' proposed.
+
+        The schema check above cannot see this -- it only holds the proposal
+        in hand. persist-proposal's `_assert_no_case_fold_collision` covers
+        it by observing whether the path resolves onto a differently-cased
+        real directory entry, so the behaviour legitimately differs by
+        filesystem and both outcomes are asserted rather than one being
+        skipped:
+
+        * case-sensitive: two distinct skills, both survive intact;
+        * case-insensitive: the second proposal is refused, exit 2, and the
+          first skill's content is untouched.
+
+        The outcome ruled out everywhere is 'accepted, and alpha's content
+        is gone'.
+        """
+        attack("fs:case-collision-across-reviews")
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            first = run(json.dumps({"version": 1, "skills": [
+                {"name": "alpha", "content": "# lower"}]}), home)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            r = run(json.dumps({"version": 1, "skills": [
+                {"name": "ALPHA", "content": "# upper"}]}), home)
+            self.assertNotIn("Traceback", r.stderr)
+            skills = home / "learned-skills"
+            if CASE_INSENSITIVE_FS:
+                self.assertEqual(r.returncode, 2, r.stderr)
+                self.assertIn("case-folds onto existing skill", r.stderr)
+                self.assertEqual(sorted(json.loads((skills / ".usage.json").read_text())),
+                                 ["alpha"])
+            else:
+                loud_skip("fs:case-collision-across-reviews (refusal path)",
+                          "probed filesystem is case-sensitive here, so 'ALPHA' "
+                          "resolves to no existing entry and is correctly accepted "
+                          "as a distinct skill; only the macOS/Windows cells can "
+                          "exercise the refusal")
                 self.assertEqual(r.returncode, 0, r.stderr)
-                self.assertEqual((home / "learned-skills" / "alpha" / "SKILL.md").read_text(), "# lower")
-                self.assertEqual((home / "learned-skills" / "ALPHA" / "SKILL.md").read_text(), "# upper")
-                return
-            # Case-insensitive filesystem (macOS/Windows CI): 'alpha' and
-            # 'ALPHA' fold to the same directory entry. proposal_schema's
-            # duplicate check compares Python strings, which does not see
-            # this collision. We do not hard-fail CI on the known
-            # consequence (see fix-p1-p2-report.md) -- only flag it loudly
-            # if observed, since fixing filesystem-case-fold awareness is
-            # outside this sweep's assigned scope.
-            self.assertIn(r.returncode, (0, 2), r.stderr)
-            if r.returncode == 0:
-                usage_path = home / "learned-skills" / ".usage.json"
-                usage = json.loads(usage_path.read_text()) if usage_path.exists() else {}
-                if len(usage) == 2 and set(usage.keys()) == {"alpha", "ALPHA"}:
-                    finding(
-                        "case-insensitive filesystem: 'alpha' and 'ALPHA' both "
-                        "recorded as independent skills in .usage.json, but they "
-                        "fold to one directory entry on disk -- only one skill's "
-                        "content actually survives. Not fixed in this pass "
-                        "(outside the two assigned verification-gap tasks); see "
-                        "fix-p1-p2-report.md.")
+                self.assertEqual((skills / "ALPHA" / "SKILL.md").read_text(), "# upper")
+            # Asserted on BOTH branches: alpha survives either way.
+            self.assertEqual((skills / "alpha" / "SKILL.md").read_text(), "# lower")
 
     def test_written_files_are_mode_0600(self):
         if IS_WINDOWS:

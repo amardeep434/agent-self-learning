@@ -137,6 +137,31 @@ def validate_proposal(obj: object) -> dict:
 
     names = [e["name"] for e in skills_out]
     _need(len(names) == len(set(names)), "duplicate skill names")
+    # Case-fold collision WITHIN one proposal. The exact-string check above
+    # does not see it, and on a case-insensitive filesystem (macOS, Windows
+    # -- both probed live in tests/test-adversarial-sweep.py's CI runs)
+    # "alpha" and "ALPHA" name two records in .usage.json but one directory
+    # on disk, so one skill's content is silently destroyed by the other.
+    #
+    # Rejected unconditionally, not gated on a filesystem probe, because
+    # this is ambiguous everywhere: a reviewer that emits two names
+    # differing only in case in a single proposal has no coherent intent to
+    # honour, and there is no filesystem on which accepting both is
+    # obviously right. Rejecting here is also the safest of the available
+    # behaviours -- nothing is written, so no existing store is touched or
+    # rewritten. Re-writing the SAME skill is unaffected: that is the
+    # identical string, already rejected by the line above and never a
+    # legitimate thing to send twice in one proposal.
+    #
+    # casefold(), not lower(): lower() is not sufficient for full Unicode
+    # case-insensitive matching. Names are ASCII-constrained by
+    # SKILL_NAME_RE so the two agree here today, but the fold is the
+    # correct operation and stays correct if that regex is ever widened.
+    folded = [n.casefold() for n in names]
+    _need(len(folded) == len(set(folded)),
+          "skill names collide when case-folded (they would share one "
+          "directory on a case-insensitive filesystem): "
+          + repr(sorted(n for n in names if folded.count(n.casefold()) > 1)))
 
     _need(total <= MAX_TOTAL_BYTES, f"proposal exceeds {MAX_TOTAL_BYTES} bytes total")
     return {"version": SCHEMA_VERSION, "memory": memory_out, "skills": skills_out}

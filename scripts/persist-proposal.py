@@ -357,6 +357,68 @@ def _merge_usage(usage: dict, skill_names: list[str]) -> dict:
     return merged
 
 
+def _folds_onto_other_entry(name: str, entry_exists: bool, actual_entries: "list[str]") -> bool:
+    """Would writing skill `name` land on an EXISTING, differently-cased entry?
+
+    Pure and side-effect-free so it can be exercised directly on a
+    case-sensitive filesystem, where the condition it detects cannot be
+    reproduced (see tests/test-persist-proposal.py).
+
+    `entry_exists` is `(skills_dir / name).exists()`; `actual_entries` is
+    `os.listdir(skills_dir)` -- the names the directory REALLY holds.
+
+    This is an observation, not a platform-name branch and not a probe file
+    dropped in the user's store:
+
+    - Case-sensitive FS, `alpha/` present, name "ALPHA": the path does not
+      exist -> False. Two genuinely distinct skills stay legal, which they
+      are on that filesystem.
+    - Case-insensitive FS, `alpha/` present, name "ALPHA": the path DOES
+      exist (it folds onto `alpha/`) yet "ALPHA" is not in the real
+      directory listing -> True. Writing would overwrite `alpha`'s SKILL.md
+      while `.usage.json` gained a second, independent "ALPHA" record --
+      the exact content-destroying collision this detects.
+    - Either FS, re-writing `alpha` as "alpha": exists, and "alpha" IS in
+      the listing -> False. A legitimate update of the same skill is never
+      blocked; that is the loop's normal, most common operation.
+    - Either FS, brand-new name: does not exist -> False.
+    """
+    return entry_exists and name not in actual_entries
+
+
+def _assert_no_case_fold_collision(skills_dir: Path, skill_names: list[str]) -> None:
+    """Refuse a write that a case-folding filesystem would land on another skill.
+
+    The in-proposal case is caught earlier and cheaply, by
+    proposal_schema.validate_proposal. This is the ACROSS-review case: an
+    earlier review created `alpha`, a later one proposes `ALPHA`. Same
+    destruction, one review cycle apart, and invisible to any check that
+    only looks at the proposal in hand.
+
+    Refuse rather than merge or silently rename. Merging would join two
+    skills the reviewer meant to keep apart; renaming to the on-disk casing
+    would silently rewrite the user's store, which this module's threat
+    model forbids outright. Refusing writes nothing at all, and raising
+    PersistError puts a named reason in front of a human: exit 2, which the
+    detached pipeline in both review scripts records in
+    persist-failures.log, which doctor.sh surfaces. Loud, never a drop.
+    """
+    try:
+        actual_entries = os.listdir(skills_dir)
+    except FileNotFoundError:
+        return  # nothing on disk yet; nothing to collide with
+    for name in skill_names:
+        if _folds_onto_other_entry(name, (skills_dir / name).exists(), actual_entries):
+            existing = [e for e in actual_entries if e.casefold() == name.casefold()]
+            raise PersistError(
+                f"skill {name!r} case-folds onto existing skill(s) {sorted(existing)!r} "
+                f"on this filesystem: writing it would overwrite their content while "
+                f"recording a separate {USAGE_FILENAME} entry. Refusing the whole "
+                f"proposal; rename the skill or update the existing one under its "
+                f"exact name."
+            )
+
+
 def _plan(proposal: dict, memory_dir: Path, skills_dir: Path) -> list[tuple[tuple[Path, ...], Path, str, str]]:
     """Build the write plan.
 
@@ -391,6 +453,11 @@ def _plan(proposal: dict, memory_dir: Path, skills_dir: Path) -> list[tuple[tupl
     skill_names = [entry["name"] for entry in proposal["skills"]]
     if skill_names:
         _reject_if_symlink(skills_dir, "store directory")
+        # Before anything is staged, and inside the store lock (main() holds
+        # it around _plan for exactly this read-modify-write reason), so a
+        # concurrent writer cannot create the colliding entry between the
+        # check and the write.
+        _assert_no_case_fold_collision(skills_dir, skill_names)
     for entry in proposal["skills"]:
         skill_dir = skills_dir / entry["name"]
         planned.append(((skills_dir, skill_dir), skill_dir / SKILL_CONTENT_FILENAME,

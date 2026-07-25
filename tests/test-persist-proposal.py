@@ -603,5 +603,110 @@ class TestDirFdWritePath(unittest.TestCase):
             "would mean this mutation test isn't actually testing anything.")
 
 
+class TestCrossReviewCaseFoldCollision(unittest.TestCase):
+    """`alpha` written by an earlier review, `ALPHA` proposed by a later one.
+
+    The schema layer cannot see this one -- it only holds the proposal in
+    hand -- so it is the writer's job. What CAN and CANNOT be established on
+    this machine, stated explicitly:
+
+    * The DECISION LOGIC is fully testable anywhere, because
+      `_folds_onto_other_entry` is pure: it takes the two facts the writer
+      observes (does the path exist; what does the directory really
+      contain) and returns a verdict. All four quadrants are asserted below.
+    * The OBSERVATION that feeds it -- a case-insensitive filesystem
+      reporting `skills/ALPHA` as existing when only `skills/alpha` was
+      created -- cannot be reproduced on a case-sensitive filesystem. Only
+      the macOS and Windows CI cells can confirm that end to end; there,
+      tests/test-adversarial-sweep.py's probe reports
+      `case-insensitive filesystem: AVAILABLE` and its collision case
+      asserts the rejection for real.
+    * What IS asserted here end-to-end is the property that matters most
+      for not breaking a working store: on this (case-sensitive)
+      filesystem, `alpha` and `ALPHA` remain two legitimate, independently
+      writable skills, and re-writing an existing skill under its exact
+      name is never refused.
+    """
+
+    def setUp(self):
+        self.mod = _load_writer_module()
+
+    def test_pure_helper_all_four_quadrants(self):
+        f = self.mod._folds_onto_other_entry
+        # Case-insensitive FS: path resolves, but the real listing disagrees.
+        self.assertTrue(f("ALPHA", True, ["alpha", ".usage.json"]))
+        # Case-sensitive FS, same store: the path simply is not there.
+        self.assertFalse(f("ALPHA", False, ["alpha", ".usage.json"]))
+        # Legitimate re-write of the same skill, either filesystem.
+        self.assertFalse(f("alpha", True, ["alpha", ".usage.json"]))
+        # Brand-new skill, either filesystem.
+        self.assertFalse(f("beta", False, ["alpha", ".usage.json"]))
+
+    def test_helper_is_pure(self):
+        """No filesystem access, so it cannot behave differently per runner."""
+        with tempfile.TemporaryDirectory() as d:
+            before = sorted(os.listdir(d))
+            self.mod._folds_onto_other_entry("ALPHA", True, ["alpha"])
+            self.assertEqual(sorted(os.listdir(d)), before)
+
+    def test_rejection_is_raised_and_names_the_collision(self):
+        """Drive _assert_no_case_fold_collision directly with the observation
+        a case-insensitive filesystem would produce, by creating the entry
+        under the casing that folds. On a case-sensitive runner this is done
+        by asking about the name that IS on disk under different casing --
+        so the assertion below simulates only the filesystem's answer, never
+        the writer's logic."""
+        with tempfile.TemporaryDirectory() as d:
+            skills = Path(d) / "learned-skills"
+            (skills / "alpha").mkdir(parents=True)
+            # Real call, real directory; on a case-insensitive filesystem the
+            # `.exists()` inside will be True for "ALPHA" and this raises.
+            # On a case-sensitive one it returns cleanly -- which is correct
+            # there, and is asserted as such by the end-to-end case below.
+            if (skills / "ALPHA").exists():
+                with self.assertRaises(self.mod.PersistError) as ctx:
+                    self.mod._assert_no_case_fold_collision(skills, ["ALPHA"])
+                self.assertIn("case-folds onto existing skill", str(ctx.exception))
+            else:
+                self.mod._assert_no_case_fold_collision(skills, ["ALPHA"])
+
+    def test_same_name_rewrite_is_never_refused(self):
+        """The loop's most common operation must keep working."""
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            first = json.dumps({"version": 1, "skills": [{"name": "alpha", "content": "# v1"}]})
+            self.assertEqual(run(first, home).returncode, 0)
+            second = json.dumps({"version": 1, "skills": [{"name": "alpha", "content": "# v2"}]})
+            r = run(second, home)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual((home / "learned-skills" / "alpha" / "SKILL.md").read_text(), "# v2")
+
+    def test_case_variants_across_reviews_do_not_destroy_content(self):
+        """Whichever way the filesystem behaves, no content is silently lost.
+
+        Case-sensitive: both survive as separate skills (exit 0).
+        Case-insensitive: the second proposal is REFUSED (exit 2) and the
+        first skill's content is untouched. The one outcome ruled out on
+        every platform is 'exit 0 and alpha's content is gone'.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            self.assertEqual(run(json.dumps(
+                {"version": 1, "skills": [{"name": "alpha", "content": "# lower"}]}), home).returncode, 0)
+            r = run(json.dumps(
+                {"version": 1, "skills": [{"name": "ALPHA", "content": "# upper"}]}), home)
+            skills = home / "learned-skills"
+            if r.returncode == 0:
+                self.assertEqual((skills / "alpha" / "SKILL.md").read_text(), "# lower")
+                self.assertEqual((skills / "ALPHA" / "SKILL.md").read_text(), "# upper")
+            else:
+                self.assertEqual(r.returncode, 2, r.stderr)
+                self.assertIn("case-folds onto existing skill", r.stderr)
+                # Nothing rewritten, nothing merged, nothing dropped.
+                self.assertEqual((skills / "alpha" / "SKILL.md").read_text(), "# lower")
+                usage = json.loads((skills / ".usage.json").read_text())
+                self.assertEqual(sorted(usage), ["alpha"])
+
+
 if __name__ == "__main__":
     unittest.main()
