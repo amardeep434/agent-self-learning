@@ -201,6 +201,48 @@ fi
 echo
 
 # ---------------------------------------------------------------------------
+# 2c. Write-serialisation lock backend -- fix-p7-append-race.
+#
+# persist-proposal.py serialises its whole read-modify-write transaction
+# with scripts/lib/store_lock.py. Which backend that module selects decides
+# what happens when a holder crashes: the kernel-held backends (flock,
+# msvcrt) are dropped by the OS on process death, so nothing can wedge;
+# the O_CREAT|O_EXCL fallback instead breaks a lock older than
+# STALE_SECONDS. An operator staring at "reviews stopped persisting" needs
+# to know which of those applies without reading source -- and, if the lock
+# is genuinely held, where the file is.
+# ---------------------------------------------------------------------------
+if [[ "${_SL_PYTHON3_AVAILABLE}" == "1" ]]; then
+    # Same argv-not-interpolated-into--c discipline as 2b above (Git Bash
+    # only auto-translates POSIX paths passed as their own argv token).
+    LOCK_PROBE="$(python3 -c '
+import sys
+sys.path.insert(0, sys.argv[1] + "/lib")
+import store_lock
+print(store_lock.BACKEND, "yes" if store_lock.BACKEND_RELEASES_ON_CRASH else "no")
+' "${SCRIPT_DIR}" 2>/dev/null || echo "unknown unknown")"
+    LOCK_BACKEND="${LOCK_PROBE%% *}"
+    LOCK_CRASH_SAFE="${LOCK_PROBE##* }"
+    case "${LOCK_BACKEND}" in
+        flock|msvcrt)
+            echo "write lock: ACTIVE, backend '${LOCK_BACKEND}' (kernel-held; released automatically" ;
+            echo "  if a writer crashes, so a dead process cannot wedge future reviews)" ;;
+        exclusive)
+            echo "write lock: ACTIVE, backend 'exclusive' (O_CREAT|O_EXCL fallback -- no kernel" ;
+            echo "  primitive probed usable here). A crashed writer's lock is broken by age" ;
+            echo "  instead; delete ${SL_STATE_DIR}/persist.lock if reviews stop persisting." ;;
+        *)
+            echo "write lock: could not probe (scripts/lib/store_lock.py failed to import)" ;;
+    esac
+    if [[ "${LOCK_BACKEND}" != "unknown" && "${LOCK_CRASH_SAFE}" == "no" ]]; then
+        echo "  lock file: ${SL_STATE_DIR}/persist.lock"
+    fi
+else
+    echo "write lock: cannot probe -- python3 unavailable"
+fi
+echo
+
+# ---------------------------------------------------------------------------
 # 3. Detected harnesses -- presence + hook-config freshness.
 #
 # Round A finding: with python3 absent, SL_SCRIPTS_DIR resolves to "" (see

@@ -99,6 +99,26 @@ for one. The keys are: `home`, `state`, `skills` (`learned-skills/`), `memory`,
 (`self-learning.conf`), and `scripts` (installed copies of everything under
 `scripts/`).
 
+### Concurrent writes are serialised
+
+Both harnesses can fire a review hook at nearly the same moment, and the
+review pipeline is detached by design, so two `persist-proposal.py` processes
+racing each other is ordinary operation, not an edge case. Every write
+transaction (read existing content → merge → stage → rename) therefore runs
+under one whole-store exclusive lock at `<state>/persist.lock`
+(`scripts/lib/store_lock.py`). Without it, concurrent appends to `MEMORY.md`
+— and concurrent updates to `learned-skills/.usage.json` — silently
+overwrote each other while every writer reported success.
+
+The lock is `flock` on POSIX and `msvcrt.locking` on Windows, each chosen by a
+functional probe rather than a platform name, with an `O_CREAT|O_EXCL`
+lockfile as a last resort. Both kernel-backed backends are released by the OS
+when the holding process dies, so a crashed review cannot wedge the store;
+only the fallback needs (and has) age-based stale-lock breaking. `doctor.sh`
+prints which backend is in force. Waiting is bounded — default 20s,
+overridable with `SL_PERSIST_LOCK_TIMEOUT` — and a timeout fails loudly: a
+non-zero exit plus a `lock timeout` line in `persist-failures.log`.
+
 Harness-owned config files are a deliberate exception and stay where each
 harness owns them: Claude Code's `~/.claude/settings.json` and Copilot CLI's
 `~/.copilot/hooks/self-learning.json` are not moved into the store — only the

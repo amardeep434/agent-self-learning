@@ -34,6 +34,23 @@ to the previous path-based implementation (_write_all_path) and the TOCTOU
 window it has is disclosed, not silently reintroduced -- see
 _write_all_path's docstring and `doctor.sh`'s dir_fd probe.
 
+CONCURRENCY: the plan+write transaction (everything from reading an existing
+MEMORY.md or `.usage.json` through renaming the staged files into place) is
+serialised across processes by lib/store_lock.py's whole-store lock. Without
+it, two hooks firing near-simultaneously -- which both harnesses do, and which
+the detached-by-design review pipeline makes likely rather than exotic -- each
+read the same file, each append their own entry, and each rename their own
+copy over the other's: one of the two appends is destroyed and BOTH processes
+exit 0 printing a success JSON. Measured before the fix, with a
+barrier-synchronised harness: 30-38 of 40 concurrent appends lost, and 38 of
+40 `.usage.json` skill-telemetry records lost (so this was never an
+append-only defect -- "replace"-mode skill writes read-modify-write
+`.usage.json` too). See tests/test-persist-concurrency.py and
+.superpowers/sdd/2026-07-25-harness-neutral-persistence/fix-p7-append-race-report.md.
+Acquisition is bounded; on timeout this exits non-zero AND writes to
+${SL_LOG_DIR}/persist-failures.log, which doctor.sh surfaces -- a silent
+give-up would be the very failure mode this project exists to eliminate.
+
 THREAT MODEL: the proposal originates from a background LLM agent whose
 context may have been influenced by prompt injection. Assume the content is
 adversarial: it wants to write outside the store, clobber an arbitrary file,
@@ -58,6 +75,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import paths  # noqa: E402
 from isotime import now_iso as _now_iso  # noqa: E402  (fix round D: shared with skill-lifecycle.py, index-session.py, coach-signals.py)
 from proposal_schema import ValidationError, extract_proposal, validate_proposal  # noqa: E402
+from store_lock import LockTimeout, LockUnavailable, StoreLock  # noqa: E402
 
 # Bounds the *accumulated* size of a memory file across repeated append-mode
 # proposals. proposal_schema caps a single proposal's content, but says
@@ -766,6 +784,32 @@ def _write_all_fd(planned: list[tuple[tuple[Path, ...], Path, str, str]]) -> tup
             _close_quietly(fd)
 
 
+def _log_persist_failure(resolved: dict, message: str) -> None:
+    """Append one line to ${SL_LOG_DIR}/persist-failures.log.
+
+    This module normally reports failure through its exit code, and the
+    shell wrappers (session-review.sh, copilot-session-review.sh) turn a
+    non-zero status into a line in this same log. A lock timeout is logged
+    here as well, directly: it is the one failure that is *expected* to be
+    transient and contended, so the operator needs to see how often it
+    happens and against which lock file, not just that "the pipeline failed
+    (status 2)". The line shape matches what the wrappers already write
+    (`<ISO-8601 Z> <component>: <message>`), because doctor.sh tails this
+    file verbatim.
+
+    Never raises: a store whose logs/ directory is unwritable must still get
+    the non-zero exit code, not a traceback that replaces one failure report
+    with a different one.
+    """
+    try:
+        log_dir = Path(os.environ.get("SL_LOG_DIR") or resolved["logs"])
+        log_dir.mkdir(parents=True, exist_ok=True)
+        with open(log_dir / "persist-failures.log", "a", encoding="utf-8", newline="\n") as handle:
+            handle.write(f"{_now_iso()} persist-proposal: {message}\n")
+    except OSError:
+        pass
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="Persist a reviewer proposal.")
     parser.add_argument("--dry-run", action="store_true",
@@ -794,15 +838,30 @@ def main(argv: list[str]) -> int:
         # refusals as any other read in this file. Both must map to the
         # same exit code -- a caller should not be able to tell "planning
         # failed" from "writing failed" from the exit status alone.
-        planned = _plan(proposal, memory_dir, skills_dir)
-
         if args.dry_run:
+            # No lock: a dry run writes nothing, so there is no
+            # read-modify-write span to serialise, and taking the lock would
+            # mean creating the state directory and a lock file as a side
+            # effect of an explicitly no-side-effects mode.
+            planned = _plan(proposal, memory_dir, skills_dir)
             print(json.dumps({"written": [], "skipped": [str(p) for _, p, _, _ in planned],
                               "bytes": sum(len(c.encode("utf-8")) for _, _, _, c in planned)}))
             return 0
 
-        written, total = _write_all(planned)
-    except (OSError, PersistError, ValueError) as exc:
+        # _plan is inside the lock, not just _write_all: planning reads and
+        # merges the existing `.usage.json`, which is itself a
+        # read-modify-write whose result is written at the end of _write_all.
+        # Locking only the write half would leave exactly the span that
+        # destroyed 38 of 40 skill-telemetry records in the pre-fix
+        # measurement.
+        with StoreLock(resolved["state"]):
+            planned = _plan(proposal, memory_dir, skills_dir)
+            written, total = _write_all(planned)
+    except LockTimeout as exc:
+        _log_persist_failure(resolved, f"lock timeout: {exc}")
+        print(f"persist-proposal: write failed: {exc}", file=sys.stderr)
+        return 2
+    except (OSError, PersistError, LockUnavailable, ValueError) as exc:
         # ValueError is deliberately included alongside the two expected
         # failure types: it's the base class for UnicodeDecodeError and
         # covers any future decode/parse-shaped failure in the write path
