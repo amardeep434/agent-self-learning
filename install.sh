@@ -150,13 +150,20 @@ echo ""
 # Legacy-install detection (design decision 4): preserve-and-notify, never
 # migrate. This only reads ~/.claude to decide whether to print a note; it
 # never writes to or moves anything under it.
+# fix-p6: the lib directory used to be baked into the -c source string as
+# a bash-interpolated literal (`sys.path.insert(0, '${SCRIPT_DIR}/...')`).
+# Git Bash only auto-translates POSIX-style paths to Windows form when they
+# appear as their own argv token passed to a native executable, not when
+# baked into the middle of a quoted -c string -- passed as sys.argv[1]
+# instead, the same safe pattern doctor.sh's own legacy-home probe and
+# tests/lib/path-compare.sh's sl_legacy_home already use.
 LEGACY_HOME="$(python3 -c "
 import sys
-sys.path.insert(0, '${SCRIPT_DIR}/scripts/lib')
+sys.path.insert(0, sys.argv[1])
 import paths
 found = paths.legacy_home()
 print(found or '')
-" 2>/dev/null || true)"
+" "${SCRIPT_DIR}/scripts/lib" 2>/dev/null || true)"
 
 if [[ -n "$LEGACY_HOME" ]]; then
     echo "NOTE: a legacy install was found at ${LEGACY_HOME}."

@@ -170,15 +170,24 @@ echo
 # applies to their install.
 # ---------------------------------------------------------------------------
 if [[ "${_SL_PYTHON3_AVAILABLE}" == "1" ]]; then
+    # fix-p6: SCRIPT_DIR used to be baked into this -c source string as a
+    # bash-interpolated literal (twice: sys.path.insert and
+    # spec_from_file_location), the same pattern that broke a fix-p6 test
+    # on Windows (Git Bash only auto-translates POSIX-style paths passed as
+    # their OWN argv token to a native executable, not paths embedded
+    # inside a quoted -c string). Passed as sys.argv[1] instead, matching
+    # the safe pattern already used a few lines down in this same file
+    # (legacy-home probe) and in tests/lib/path-compare.sh.
     DIR_FD_PROBE="$(python3 -c '
 import sys
-sys.path.insert(0, "'"${SCRIPT_DIR}"'")
+script_dir = sys.argv[1]
+sys.path.insert(0, script_dir)
 import importlib.util
-spec = importlib.util.spec_from_file_location("persist_proposal", "'"${SCRIPT_DIR}"'/persist-proposal.py")
+spec = importlib.util.spec_from_file_location("persist_proposal", script_dir + "/persist-proposal.py")
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 print("yes" if m.DIR_FD_SUPPORTED else "no")
-' 2>/dev/null || echo "unknown")"
+' "${SCRIPT_DIR}" 2>/dev/null || echo "unknown")"
     case "${DIR_FD_PROBE}" in
         yes) echo "dir_fd TOCTOU fix: ACTIVE (persist-proposal.py writes are dir_fd-anchored; race closed)" ;;
         no)  echo "dir_fd TOCTOU fix: NOT AVAILABLE on this platform -- persist-proposal.py is using the" ;
