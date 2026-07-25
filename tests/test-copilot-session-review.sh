@@ -99,5 +99,68 @@ check "prompt states the real schema regex" "yes" \
 check "prompt no longer states the dot-inclusive contradiction" "no" \
     "$(grep -qE '\[a-z0-9\]\[a-z0-9\._-\]' "${SCRIPT_DIR}/scripts/copilot-session-review.sh" && echo yes || echo no)"
 
+# 8) P0 fix: a real sessionEnd payload + a seeded events.jsonl actually
+# reaches the reviewer's prompt. Uses the argv-recording shim technique from
+# case 1 above, but now feeds a realistic sessionId JSON payload on stdin and
+# a matching ~/.copilot/session-state/<id>/events.jsonl fixture, then asserts
+# the transcript's placeholder content shows up in what "copilot" was
+# invoked with (the -p prompt argument).
+TMP8="$(mktemp -d)"; FAKE_BIN8="$(mktemp -d)"
+cat > "${FAKE_BIN8}/copilot" <<'EOF'
+#!/usr/bin/env bash
+for ((i=1; i<=$#; i++)); do
+    if [[ "${!i}" == "-p" ]]; then
+        j=$((i+1))
+        printf '%s' "${!j}" > "${FAKE_COPILOT_PROMPT_FILE}"
+    fi
+done
+printf '{"version": 1}\n'
+EOF
+chmod +x "${FAKE_BIN8}/copilot"
+
+SESSION_ID="d60c51bf-e2e8-case8-0000-000000000008"
+STATE_DIR="${TMP8}/.copilot/session-state/${SESSION_ID}"
+mkdir -p "$STATE_DIR"
+cat > "${STATE_DIR}/events.jsonl" <<EOF
+{"type":"session.start","data":{"sessionId":"${SESSION_ID}"},"id":"e0","parentId":null,"timestamp":"2026-07-25T12:00:00Z"}
+{"type":"user.message","data":{"content":"UNIQUE_MARKER_USER_TURN_CASE8"},"id":"e1","parentId":"e0","timestamp":"2026-07-25T12:00:01Z"}
+{"type":"assistant.message","data":{"content":"UNIQUE_MARKER_ASSISTANT_TURN_CASE8"},"id":"e2","parentId":"e1","timestamp":"2026-07-25T12:00:02Z"}
+{"type":"session.shutdown","data":{"shutdownType":"complete"},"id":"e3","parentId":"e2","timestamp":"2026-07-25T12:00:03Z"}
+EOF
+
+FAKE_COPILOT_PROMPT_FILE="${TMP8}/prompt.txt"
+export FAKE_COPILOT_PROMPT_FILE
+echo "{\"sessionId\":\"${SESSION_ID}\",\"timestamp\":1784982920820,\"cwd\":\"/tmp\",\"reason\":\"complete\"}" \
+    | env -i HOME="$TMP8" PATH="${FAKE_BIN8}:${PATH}" \
+        AGENT_LEARNING_HOME="${TMP8}/store" SL_CONFIG_FILE="/nonexistent/x.conf" \
+        FAKE_COPILOT_PROMPT_FILE="$FAKE_COPILOT_PROMPT_FILE" \
+        bash "${SCRIPT_DIR}/scripts/copilot-session-review.sh" >/dev/null 2>&1 || true
+
+for _ in $(seq 1 50); do
+    [[ -s "$FAKE_COPILOT_PROMPT_FILE" ]] && break
+    sleep 0.2
+done
+
+check "transcript user turn reached the prompt" "yes" \
+    "$(grep -q 'UNIQUE_MARKER_USER_TURN_CASE8' "$FAKE_COPILOT_PROMPT_FILE" 2>/dev/null && echo yes || echo no)"
+check "transcript assistant turn reached the prompt" "yes" \
+    "$(grep -q 'UNIQUE_MARKER_ASSISTANT_TURN_CASE8' "$FAKE_COPILOT_PROMPT_FILE" 2>/dev/null && echo yes || echo no)"
+check "transcript section framed as untrusted data" "yes" \
+    "$(grep -q 'untrusted conversation data' "$FAKE_COPILOT_PROMPT_FILE" 2>/dev/null && echo yes || echo no)"
+rm -rf "$TMP8" "$FAKE_BIN8"
+unset FAKE_COPILOT_PROMPT_FILE
+
+# 9) Missing transcript is logged visibly to persist-failures.log, never a
+# silent empty review -- a sessionId with no matching session-state dir.
+TMP9="$(mktemp -d)"
+echo '{"sessionId":"session-with-no-transcript-on-disk","reason":"complete"}' \
+    | env -i HOME="$TMP9" PATH="$PATH" \
+        AGENT_LEARNING_HOME="${TMP9}/store" SL_CONFIG_FILE="/nonexistent/x.conf" \
+        bash "${SCRIPT_DIR}/scripts/copilot-session-review.sh" >/dev/null 2>&1 || true
+FAILURE_LOG="${TMP9}/store/logs/persist-failures.log"
+check "missing transcript logged to persist-failures.log" "yes" \
+    "$([[ -f "$FAILURE_LOG" ]] && grep -q 'transcript unavailable' "$FAILURE_LOG" && echo yes || echo no)"
+rm -rf "$TMP9"
+
 if [[ "$FAILURES" -gt 0 ]]; then exit 1; fi
 echo "All copilot-session-review tests passed."
