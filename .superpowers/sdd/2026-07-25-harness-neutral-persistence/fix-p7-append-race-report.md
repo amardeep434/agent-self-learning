@@ -463,3 +463,170 @@ rather than skipping silently, and no PowerShell CI job was invented.
 - `curator-run.sh`'s read-only `jq` loops remain unlocked by design (P8.4); a
   report count can still be momentarily skewed by a concurrent review.
 - Nothing here touches the live Copilot CLI end-to-end check, still pending.
+
+---
+
+# Fix P9 — the two CI failures, and a correction about "unverifiable"
+
+CI run `30170096027` was red on all six cells. Both causes were found by the
+P8 tests doing their job. One was a real product bug; the other was **my
+checker**, not the code it accused.
+
+| SHA | Subject |
+|-----|---------|
+| `e890fd6` | fix: os.replace, not Path.rename, in skill-lifecycle.py's save_usage |
+| `5feb1b2` | fix: repair the PowerShell check, which was itself the parse error |
+| `a80f17a` | test: verify review-CLI flags against the real binaries |
+
+Suite: **41 suites, all green** (39 → 40 → 41). All 12 Python suites pass
+individually under `~/.pyenv/versions/3.9.24/bin/python3.9`. The full suite
+was also run with `pwsh` on PATH — i.e. in the configuration the ubuntu
+runner actually uses — and is green there too.
+
+## P9.1 Bug 1 — `Path.rename` is not atomic-replace on Windows
+
+```
+FileExistsError: [WinError 183] Cannot create a file when that file already
+exists: '...\learned-skills\.usage.json.tmp' -> '...\learned-skills\.usage.json'
+```
+
+`skill-lifecycle.py:127` was `tmp.rename(USAGE_FILE)`. `Path.rename` is
+POSIX `rename(2)` on Unix (atomic replace) but Windows `MoveFile`, which
+fails when the destination exists. `.usage.json` always exists after the
+first save, so **skill-lifecycle.py could never persist a single transition
+on Windows.** Pre-existing; it surfaced only because the P8 suite finally
+exercised that path on `windows-latest`.
+
+Fixed with `os.replace`. **Confirmed it is the only one**, two ways: `grep`
+across `scripts/`, `tests/`, `install.sh` and `uninstall.sh` finds
+`os.replace` in `persist-proposal.py`, `inject-agents-md.py` and
+`coach-signals.py` and this single `.rename(`; and an AST scan of all 16
+Python files under `scripts/` now runs as a test. The bash `mv` calls
+(`turn-counter.sh`, `session-review.sh`, `uninstall.sh`) are coreutils,
+which unlinks the destination first — and they have been green on Windows CI
+for several runs, which is evidence rather than reasoning.
+
+The new guard is **static and AST-based**, so it fails on any platform: the
+symptom needs a Windows runner, but the defect is readable anywhere, and the
+next straggler should not need a Windows cell to be caught. (Its first,
+textual version flagged the very docstrings explaining why not to use
+`rename` — parsed, not grepped, since.)
+
+Mutation F (restore `tmp.rename`): **killed**.
+
+## P9.2 Bug 2 — the parse errors were in the checker
+
+**Correction: the three `.ps1` files were never syntactically invalid.**
+
+Rather than keep reasoning about a tool I had declared unavailable, I
+downloaded a self-contained PowerShell 7.6.4 to `/tmp` and parse-checked the
+exact committed files:
+
+```
+PARSE-OK /tmp/ps-orig/install.ps1
+PARSE-OK /tmp/ps-orig/uninstall.ps1
+PARSE-OK /tmp/ps-orig/find-bash.ps1        rc=0
+```
+
+Then ran the old inline probe verbatim against a file just proven to parse:
+
+```
+InvalidOperation: [ref] cannot be applied to a variable that does not exist.
+old-probe rc=1
+```
+
+`[ref]$errs` on a never-initialised variable, under
+`$ErrorActionPreference='Stop'`, is a terminating error for *every* input
+file alike — which is exactly why all three failed identically despite
+having very different complexity. A Windows user running `.\install.ps1`
+would **not** have failed outright.
+
+What changed:
+
+- `tests/lib/ps-parse-check.ps1`, invoked with **`-File`**, never
+  `-Command`. That removes the entire bash-quoting ↔ PowerShell-parsing
+  interaction that hid the fault. It initialises its out-params and **prints
+  `file:line:column: message`** — "has a parse error" with no location is
+  indistinguishable from a broken checker, which is precisely what cost a CI
+  round trip.
+- `tests/lib/ps-wrapper-tests.ps1`: **behavioural** coverage, because
+  `pwsh` is on the ubuntu runners and parse-checking would never catch a
+  resolver that picks the wrong bash. It dot-sources `find-bash.ps1` and
+  exercises both branches — accept a bash that can see the script, refuse
+  one that cannot, and check the refusal names the path, names WSL, and
+  leaks nothing. What it still cannot cover, and I say so in the file: that
+  the bash found *first* on a **Windows** PATH is the WSL stub. The probe
+  mechanism is tested; the PATH ordering that makes it necessary is not.
+- `find-bash.ps1` rewritten without here-strings. This fixed a **real**
+  defect no parse check could ever have caught: `\$HOME` used a backslash,
+  which is not PowerShell's escape character (that is a backtick), so the
+  message expanded the caller's actual home. Verified against the old file:
+
+  ```
+  /mnt/<drive>/... there, and \/home/amardeep is the WSL user's home, ...
+  ```
+
+  Now built from single-quoted literals joined with a newline, and guarded
+  by a behavioural assertion.
+- The bash block around `pwsh` **aborted under `set -e`** before printing
+  the diagnostics it had just collected — a genuine parse failure would have
+  produced a truncated log instead of a report. Found by mutation-testing
+  this very block (the injected syntax error produced *no output at all*).
+  Fixed with `|| RC=$?`.
+
+Mutations, with real `pwsh`:
+
+| Mutation | Result |
+|----------|--------|
+| G — unclosed brace injected into `find-bash.ps1` | **killed**, with `find-bash.ps1:91:16: Missing closing '}' ...` |
+| H — resolver `Write-Output`s instead of `throw`ing on refusal | **killed** (3 behavioural checks fail) |
+
+## P9.3 The "unverifiable locally" claims, re-checked
+
+The coordinator's generalisation was the most valuable part of this round,
+and it was right. "Absent from this dev box" had been silently standing in
+for "unverifiable":
+
+| Claim | Re-check |
+|-------|----------|
+| PowerShell unverifiable — "no `pwsh`, no PowerShell CI job" | **Wrong twice.** `pwsh` is on GitHub's ubuntu runners, and a self-contained build installs into `/tmp` here in under a minute with no root. Now executed both places. |
+| `msvcrt.locking` never executed anywhere | Answered by CI on the first run (`backend=msvcrt releases_on_crash=yes`). Still unexecuted *here*; the import-time probe line is what reports it. |
+| Copilot CLI has no turn cap (carried from a handoff doc) | **Now verified against the installed binary**: `copilot --help` has no `max-turns` flag. `-p/--prompt`, `-s/--silent`, `--allow-tool`, `--model` all confirmed present. |
+| `claude --max-turns` (passed by `session-review.sh`) | **Not in `--help`** on 2.1.220 — but *accepted*, proven by control: an unknown flag errors `unknown option`, `--max-turns` does not. Absence from help text proves nothing either way. |
+
+`tests/test-review-cli-flags.sh` (new, 41st suite) pins all of that. **No
+model calls** — help parsing plus the control experiment, whose empty prompt
+is rejected before any model is contacted, so it costs no tokens. It is
+capability-probed: on CI, where neither CLI exists, it reports what it could
+not check rather than pretending to pass.
+
+This does **not** close the live-Copilot-end-to-end residual: a real session
+persisting a real file through a real model call is still unverified. What
+is now closed is the argv contract, which was the part being taken on trust.
+
+## P9.4 Three false positives in my own checks, in one round
+
+Worth recording as a pattern rather than three incidents. All three were
+checks that **grep source text for a construct whose own explanation
+contains that text**:
+
+1. The `.rename(` lint flagged the docstring explaining why not to use
+   `rename`. → parse the AST.
+2. The `--allow-tool write` check flagged the comment explaining why it is
+   never passed. → strip comments first.
+3. (Different mechanism, same result.) The PowerShell parse check reported
+   files as broken when the checker was broken. → print diagnostics, so a
+   failure is distinguishable from a broken check.
+
+A check that cannot tell you *where* it failed cannot be trusted when it
+says something failed.
+
+## P9.5 What still awaits CI
+
+- The next run is the first with both fixes. Expected to turn all six cells
+  green; nothing here has run on Windows or macOS.
+- The `[capability probe] store_lock backend=...` line will confirm
+  `msvcrt` again, now on a run where the lifecycle path can actually
+  complete on Windows.
+- Windows-specific PATH ordering (WSL stub first) remains untestable in CI —
+  there is no Windows PowerShell job, and inventing one is out of scope.
