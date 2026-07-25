@@ -1,5 +1,17 @@
 # Claude Self-Learning — Dev Instructions
 
+> **⚠️ WORK IN PROGRESS ON THIS BRANCH — read this first.**
+> Branch `harness-neutral-persistence` is mid-execution of a 10-task plan, 6 tasks complete.
+> **Before doing anything else, read:**
+> `docs/superpowers/HANDOFF-2026-07-25-harness-neutral-persistence.md`
+> It is written for a reader with zero context and contains the resume point (Task 7,
+> `BASE = a934cb3`), the loop protocol, prompt templates, rulings already made, and two
+> Important findings carried forward. Then reconcile it against `git log` and the ledger at
+> `.superpowers/sdd/2026-07-25-harness-neutral-persistence/progress.md` — the handoff records
+> state as of writing; git is the source of truth for what is actually there now.
+> Note: this repo is `amardeep434/agent-self-learning` on GitHub; the local folder name still
+> says `claude-self-learning`. Do not rename the folder — it would break the worktree link.
+
 ## Project Overview
 
 This project implements a Hermes-Agent-inspired self-learning system for Claude Code. The system adds background review, skill lifecycle, bounded memory, periodic curation, and cross-session search.
