@@ -105,7 +105,9 @@ done
 # obtained the same way config.sh obtains everything else: shelling out to
 # the single resolver, never recomputed here.
 SL_SCRIPTS_DIR=""
+_SL_PYTHON3_AVAILABLE=0
 if command -v python3 >/dev/null 2>&1; then
+    _SL_PYTHON3_AVAILABLE=1
     SL_SCRIPTS_DIR="$(python3 "${SCRIPT_DIR}/lib/paths.py" get scripts 2>/dev/null || true)"
 fi
 printf '  %-12s %s\n' "scripts" "${SL_SCRIPTS_DIR:-<unresolved: python3/paths.py unavailable>}"
@@ -127,6 +129,17 @@ echo
 
 # ---------------------------------------------------------------------------
 # 3. Detected harnesses -- presence + hook-config freshness.
+#
+# Round A finding: with python3 absent, SL_SCRIPTS_DIR resolves to "" (see
+# above), and sl_check_hook_fresh() (lib/config.sh) treats an empty
+# scripts_dir as "never fresh" -- so calling _sl_report_hooks() unguarded
+# reported EVERY hook, even a genuinely fresh one, as STALE. That is a wrong
+# diagnosis pinned on the hook config when the real blocker is a missing
+# dependency this script never named. Round A fixed this exact shape in
+# self-learning-health.sh; doctor.sh was out of that round's scope. Fail
+# loudly and specifically instead: one clear message naming python3 as the
+# cause, and skip the per-hook freshness checks entirely rather than emit
+# misleading verdicts for them.
 # ---------------------------------------------------------------------------
 echo "harnesses detected:"
 
@@ -134,7 +147,13 @@ if command -v claude >/dev/null 2>&1; then
     echo "  claude   present (Claude Code)"
     CLAUDE_SETTINGS="${HOME}/.claude/settings.json"
     echo "    hooks (~/.claude/settings.json):"
-    _sl_report_hooks "$CLAUDE_SETTINGS" turn-counter.sh session-review.sh index-session.sh
+    if [[ "$_SL_PYTHON3_AVAILABLE" -eq 0 ]]; then
+        echo "    cannot verify hook freshness -- python3 not found on PATH"
+        echo "    Fix: install python3 so scripts/lib/paths.py (this project's sole path resolver) can run"
+        STATUS=1
+    else
+        _sl_report_hooks "$CLAUDE_SETTINGS" turn-counter.sh session-review.sh index-session.sh
+    fi
 else
     echo "  claude   absent (normal on a Copilot-only or VS-Code-only machine)"
 fi
@@ -143,7 +162,13 @@ if command -v copilot >/dev/null 2>&1; then
     echo "  copilot  present (Copilot CLI)"
     COPILOT_HOOKS="${HOME}/.copilot/hooks/self-learning.json"
     echo "    hooks (~/.copilot/hooks/self-learning.json):"
-    _sl_report_hooks "$COPILOT_HOOKS" copilot-session-review.sh
+    if [[ "$_SL_PYTHON3_AVAILABLE" -eq 0 ]]; then
+        echo "    cannot verify hook freshness -- python3 not found on PATH"
+        echo "    Fix: install python3 so scripts/lib/paths.py (this project's sole path resolver) can run"
+        STATUS=1
+    else
+        _sl_report_hooks "$COPILOT_HOOKS" copilot-session-review.sh
+    fi
 else
     echo "  copilot  absent (normal on a Claude-Code-only or VS-Code-only machine)"
 fi
@@ -213,6 +238,60 @@ else
     echo "  most recent entries (bounded tail, last 5 of ${COUNT}):"
     tail -n 5 "$FAILURE_LOG" | sed 's/^/    /'
     STATUS=1
+fi
+echo
+
+# ---------------------------------------------------------------------------
+# 5b. persist.log outcomes -- I9. This project's original defect (a reviewer
+# whose output got wrapped by the harness so extraction broke) produces
+# exit 0, a persist.log line of exactly
+# {"written": [], "skipped": ["no-proposal"], "bytes": 0}, and NOTHING in
+# persist-failures.log -- byte-identical to "genuinely nothing worth
+# learning this cycle". persist-failures.log alone cannot distinguish the
+# two; only a PATTERN across runs can. A single no-proposal result is
+# unremarkable. A RUN of them, most recently, is not: SL_MEMORY_REVIEW_
+# INTERVAL and SL_SKILL_REVIEW_INTERVAL both default to 10 turns, so three
+# consecutive empty results mean the last three 10+-turn stretches of work
+# produced not one memory or skill entry -- for an actively used install,
+# that is far more consistent with broken extraction than with genuinely
+# nothing worth learning three cycles running. Threshold is 3, deliberately
+# small: false positives here just mean "look at review-stderr.log", while
+# false negatives mean this section is the same kind of blind spot
+# persist-failures.log alone already was.
+# ---------------------------------------------------------------------------
+PERSIST_LOG="${SL_LOG_DIR}/persist.log"
+PERSIST_LOG_TAIL_N=10
+NO_PROPOSAL_STREAK_THRESHOLD=3
+echo "persist.log outcomes (last ${PERSIST_LOG_TAIL_N} runs, ${PERSIST_LOG}):"
+if [[ ! -e "$PERSIST_LOG" ]]; then
+    echo "  ABSENT -- the review pipeline has never completed a persist-proposal.py run yet."
+elif [[ ! -s "$PERSIST_LOG" ]]; then
+    echo "  present, EMPTY."
+else
+    TAIL_LINES="$(tail -n "$PERSIST_LOG_TAIL_N" "$PERSIST_LOG")"
+    TOTAL_LINES="$(printf '%s\n' "$TAIL_LINES" | grep -c '' || echo 0)"
+    # Reverse (most-recent-first) with the classic POSIX sed idiom -- `tac`
+    # is GNU-only and stock macOS ships neither it nor GNU sed by default.
+    REVERSED="$(printf '%s\n' "$TAIL_LINES" | sed '1!G;h;$!d')"
+    STREAK=0
+    while IFS= read -r line; do
+        case "$line" in
+            *'"skipped": ["no-proposal"]'*) STREAK=$((STREAK + 1)) ;;
+            *) break ;;
+        esac
+    done <<< "$REVERSED"
+    echo "  ${TOTAL_LINES} run(s) examined; ${STREAK} consecutive no-proposal result(s) most recently."
+    if [[ "$STREAK" -ge "$NO_PROPOSAL_STREAK_THRESHOLD" ]]; then
+        echo "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+        echo "  !!! SUSPICIOUS: ${STREAK} consecutive no-proposal results. This is"
+        echo "  !!! byte-identical to the reviewer's output being wrapped in a way"
+        echo "  !!! persist-proposal.py cannot extract a proposal from -- the exact"
+        echo "  !!! defect class this project exists to eliminate. Check"
+        echo "  !!! \${SL_LOG_DIR}/reviews/*.log and review-stderr.log, and consider a"
+        echo "  !!! manual review run to confirm the reviewer is actually emitting JSON."
+        echo "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+        STATUS=1
+    fi
 fi
 echo
 

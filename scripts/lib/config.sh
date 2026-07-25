@@ -171,11 +171,25 @@ sl_check_hook_fresh() {
         echo "missing"
         return 0
     fi
-    if [[ -n "$scripts_dir" ]] && grep -qF -- "${scripts_dir%/}/${script_name}" "$file" 2>/dev/null; then
-        echo "fresh"
-    else
-        echo "stale"
+    # M13: grep -qF against "${scripts_dir}/${script_name}" alone is an
+    # UNANCHORED substring match, so a hook pointing at
+    # ".../turn-counter.sh.bak" (or any other filename that merely starts
+    # with the resolved scripts_dir/script_name string) read as "fresh" --
+    # the check never verified where the match ENDED. Require the match to
+    # be followed by a non-filename character (quote, whitespace, or end of
+    # line) so a longer filename sharing the same prefix cannot pass as an
+    # exact one. grep -E (not -F) is required for this, so the literal path
+    # is regex-escaped first.
+    if [[ -n "$scripts_dir" ]]; then
+        local full_path escaped
+        full_path="${scripts_dir%/}/${script_name}"
+        escaped="$(printf '%s' "$full_path" | sed 's/[.[\*^$()+?{|\\]/\\&/g')"
+        if grep -qE -- "${escaped}([^A-Za-z0-9_./-]|\$)" "$file" 2>/dev/null; then
+            echo "fresh"
+            return 0
+        fi
     fi
+    echo "stale"
 }
 
 # I7: the contract for this function is full ISO-8601: a 'Z' suffix, an

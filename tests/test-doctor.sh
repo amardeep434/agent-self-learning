@@ -109,7 +109,14 @@ OUT=$(env -i HOME="$TMP_HOME" PATH="$PATH" AGENT_LEARNING_HOME="${TMP_HOME}/stor
       SL_CONFIG_FILE="/nonexistent/x.conf" bash "${SCRIPT_DIR}/scripts/doctor.sh" 2>&1)
 RC=$?
 contains "empty persist-failures.log reported as EMPTY" "$OUT" "EMPTY"
-not_contains "empty log is not reported as ABSENT" "$OUT" "ABSENT"
+# Scoped to the persist-failures.log section specifically (not the whole
+# output): I9 added a SEPARATE persist.log summary further down that
+# legitimately prints "ABSENT" for persist.log (which this test never
+# seeds) even while persist-failures.log itself correctly reads EMPTY, not
+# ABSENT. A whole-output grep would collide with that unrelated, correct
+# signal.
+FAILURES_LOG_SECTION="$(printf '%s\n' "$OUT" | sed -n '/^persistence failures/,/^$/p')"
+not_contains "empty persist-failures.log section is not reported as ABSENT" "$FAILURES_LOG_SECTION" "ABSENT"
 check "empty persist-failures.log does not fail the run" "0" "$RC"
 rm -rf "$TMP_HOME"
 

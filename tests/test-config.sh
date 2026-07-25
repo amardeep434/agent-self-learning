@@ -251,5 +251,28 @@ OUT=$(env -i HOME="/tmp/sl-coach-rules-home" PATH="$PATH" SL_CONFIG_FILE="/nonex
 check "I5: SL_COACH_RULES_DIR matches install.sh's actual coach-rules destination" \
     "/tmp/sl-coach-rules-home/.local/share/agent-learning/scripts/coach-rules" "$OUT"
 
+# --- M13: sl_check_hook_fresh() used an unanchored `grep -qF` for the
+# "fresh" check, so a hook pointing at "<script>.bak" (or any other filename
+# that merely starts with the resolved scripts_dir/script_name string) read
+# as fresh -- the boundary check only looked for the substring, never for
+# where it ended. A hook genuinely pointing at the resolved script must
+# still read fresh; the fix must only reject the CONTINUATION case, not
+# break the real one.
+_sl_hookfresh_conf=$(mktemp)
+echo '{"command":"bash /store/scripts/turn-counter.sh.bak"}' > "$_sl_hookfresh_conf"
+OUT=$(bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; sl_check_hook_fresh '$_sl_hookfresh_conf' 'turn-counter.sh' '/store/scripts'")
+check "M13: a hook pointing at <script>.bak is NOT reported fresh" "stale" "$OUT"
+rm -f "$_sl_hookfresh_conf"
+
+echo '{"command":"bash /store/scripts/turn-counter.sh"}' > "$_sl_hookfresh_conf"
+OUT=$(bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; sl_check_hook_fresh '$_sl_hookfresh_conf' 'turn-counter.sh' '/store/scripts'")
+check "M13: an exact hook match still reports fresh" "fresh" "$OUT"
+rm -f "$_sl_hookfresh_conf"
+
+echo '{"command":"bash /store/scripts/turn-counter.sh --verbose"}' > "$_sl_hookfresh_conf"
+OUT=$(bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; sl_check_hook_fresh '$_sl_hookfresh_conf' 'turn-counter.sh' '/store/scripts'")
+check "M13: a hook match followed by a flag (space boundary) still reports fresh" "fresh" "$OUT"
+rm -f "$_sl_hookfresh_conf"
+
 if [[ "$FAILURES" -gt 0 ]]; then exit 1; fi
 echo "All config tests passed."

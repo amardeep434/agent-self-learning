@@ -208,7 +208,16 @@ for script in "${SCRIPTS[@]}"; do
         do_copy "$src" "${DEST_DIR}/${script}"
         do_chmod "${DEST_DIR}/${script}"
     else
-        echo "  [WARN] Script not found: $src"
+        # M14: this used to print a [WARN] and continue, exiting 0 -- a
+        # missing script (potentially the writer itself, or something it
+        # imports) became a warning buried in a long log plus a successful
+        # exit. A script named in this file's own SCRIPTS array that is
+        # missing from the source tree means the install is broken; report
+        # that as fatal, not cosmetic.
+        echo "  [FAIL] Script not found: $src" >&2
+        echo "Error: install.sh's SCRIPTS array names '${script}', but it does not exist" >&2
+        echo "at ${src}. This install is incomplete; refusing to continue." >&2
+        exit 1
     fi
 done
 

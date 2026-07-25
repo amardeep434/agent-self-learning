@@ -238,9 +238,37 @@ check "idempotent: scripts still present after 2nd run" "yes" \
 check "idempotent: copilot hook config still correct after 2nd run" "yes" \
     "$(grep -qF "${RESOLVED_SCRIPTS}/copilot-session-review.sh" "$COPILOT_HOOK" && echo yes || echo no)"
 
+## ============================================================
+## M14: a script listed in install.sh's own SCRIPTS array but missing from
+## the source tree used to print "[WARN] Script not found" and CONTINUE,
+## exiting 0 -- a genuinely broken install (the writer, or any other
+## required script, silently absent) reported success. Must now be fatal.
+## ============================================================
+MISSING_SCRIPT_SRC="$(mktemp -d)"
+cp -r "${SCRIPT_DIR}/install.sh" "${SCRIPT_DIR}/config" "${SCRIPT_DIR}/prompts" \
+      "${SCRIPT_DIR}/schema" "${SCRIPT_DIR}/scripts" "${SCRIPT_DIR}/vendor" \
+      "$MISSING_SCRIPT_SRC/" 2>/dev/null
+rm -f "${MISSING_SCRIPT_SRC}/scripts/persist-proposal.py"
+
+MISSING_TMP_HOME="$(mktemp -d)"
+MISSING_STATUS=0
+MISSING_OUT="$(env -i HOME="$MISSING_TMP_HOME" PATH="$MINIMAL_PATH" \
+    AGENT_LEARNING_HOME="${MISSING_TMP_HOME}/store" \
+    ${PYENV_ROOT:+PYENV_ROOT="$PYENV_ROOT"} \
+    bash "${MISSING_SCRIPT_SRC}/install.sh" </dev/null 2>&1)" || MISSING_STATUS=$?
+
+check "M14: install.sh with a missing SCRIPTS entry exits non-zero" "1" "$MISSING_STATUS"
+case "$MISSING_OUT" in
+    *"persist-proposal.py"*) echo "PASS: M14: install.sh names the missing script" ;;
+    *) echo "FAIL: M14: install.sh's fatal error does not name the missing script"; FAILURES=$((FAILURES+1)) ;;
+esac
+rm -rf "$MISSING_SCRIPT_SRC" "$MISSING_TMP_HOME"
+
 if [[ "$FAILURES" -gt 0 ]]; then
     echo "--- install.sh output (first run) for debugging ---"
     printf '%s\n' "$INSTALL_OUT"
+    echo "--- install.sh output (M14 missing-script run) for debugging ---"
+    printf '%s\n' "${MISSING_OUT:-}"
     exit 1
 fi
 echo "All install-paths tests passed."

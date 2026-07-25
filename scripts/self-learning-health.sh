@@ -85,6 +85,13 @@ done
 
 section "Scripts"
 
+# C3: this list omitted persist-proposal.py, lib/proposal_schema.py,
+# copilot-session-review.sh, and doctor.sh. A reviewer that copied a good
+# install and then deleted persist-proposal.py (the ONLY component that
+# writes memory/skills) and lib/proposal_schema.py (its own import) still
+# printed "Status: HEALTHY" -- install.sh tells every user to run this
+# exact command to verify their install, so a gap here is a gap in the
+# tool whose entire purpose is catching exactly this defect class.
 REQUIRED_SCRIPTS=(
     "turn-counter.sh"
     "session-review.sh"
@@ -94,6 +101,10 @@ REQUIRED_SCRIPTS=(
     "skill-lifecycle.py"
     "curator-run.sh"
     "self-learning-health.sh"
+    "persist-proposal.py"
+    "lib/proposal_schema.py"
+    "copilot-session-review.sh"
+    "doctor.sh"
 )
 
 for script in "${REQUIRED_SCRIPTS[@]}"; do
@@ -108,6 +119,57 @@ for script in "${REQUIRED_SCRIPTS[@]}"; do
         fail "$script missing" "Run install.sh"
     fi
 done
+
+# --- Check 2b: Persistence writer self-check ---
+# C3: a file-existence check alone cannot prove persist-proposal.py and its
+# import (lib/proposal_schema.py) actually WORK -- a corrupt or otherwise
+# unimportable proposal_schema.py would still pass every check above. This
+# actually EXERCISES the writer end-to-end via its existing --dry-run mode
+# (validates and plans a write, but performs none) against a canned,
+# schema-valid proposal, so a broken import or a broken write-plan path
+# fails loudly here instead of silently the first time a real reviewer
+# proposal comes through.
+#
+# Never touches the real store: AGENT_LEARNING_HOME is overridden to a
+# throwaway temp directory for this one subprocess call only, removed
+# immediately after, regardless of outcome.
+
+section "Persistence Writer Self-Check"
+
+WRITER_SCRIPT="${SCRIPT_DIR}/persist-proposal.py"
+if [[ ! -f "$WRITER_SCRIPT" ]]; then
+    fail "writer self-check skipped -- persist-proposal.py not present" "Run install.sh"
+elif ! command -v python3 >/dev/null 2>&1; then
+    fail "writer self-check skipped -- python3 not found on PATH" "Install python3"
+else
+    SELF_CHECK_HOME="$(mktemp -d 2>/dev/null || echo "")"
+    if [[ -z "$SELF_CHECK_HOME" ]]; then
+        fail "writer self-check could not create an isolated temp directory" "Check /tmp is writable"
+    else
+        CANNED_PROPOSAL='{"version": 1, "memory": [{"file": "MEMORY.md", "mode": "append", "content": "self-learning-health.sh writer self-check"}], "skills": []}'
+        # `|| SELF_CHECK_RC=$?` (not a trailing `; SELF_CHECK_RC=$?`) is
+        # required under this script's `set -e`: a bare failing command
+        # substitution assigned to a variable is a failing simple command,
+        # which set -e would abort the WHOLE health check on immediately --
+        # silently, before fail() ever ran -- exactly the kind of exit
+        # discipline this self-check exists to enforce on persist-proposal.py.
+        SELF_CHECK_RC=0
+        SELF_CHECK_OUT="$(printf '%s' "$CANNED_PROPOSAL" | \
+            AGENT_LEARNING_HOME="$SELF_CHECK_HOME" SL_CONFIG_FILE="/nonexistent/self-check.conf" \
+            python3 "$WRITER_SCRIPT" --dry-run 2>&1)" || SELF_CHECK_RC=$?
+        rm -rf "$SELF_CHECK_HOME"
+
+        if [[ "$SELF_CHECK_RC" -ne 0 ]]; then
+            fail "writer self-check failed (persist-proposal.py exited ${SELF_CHECK_RC})" \
+                "Inspect: ${SELF_CHECK_OUT}"
+        elif ! printf '%s' "$SELF_CHECK_OUT" | jq -e '.skipped | length == 1' >/dev/null 2>&1; then
+            fail "writer self-check produced unexpected output" \
+                "persist-proposal.py --dry-run did not return the expected plan: ${SELF_CHECK_OUT}"
+        else
+            pass "writer self-check: persist-proposal.py + lib/proposal_schema.py import and run correctly"
+        fi
+    fi
+fi
 
 # --- Check 3: Hooks registered in settings.json ---
 # This check is Claude-Code-specific: settings.json is Claude Code's own
@@ -167,6 +229,40 @@ elif [[ -f "$SETTINGS_FILE" ]]; then
     done
 else
     warn "settings.json not found (normal on a Copilot-only install -- Claude Code hooks live here, Copilot hooks are registered separately under ~/.copilot/hooks/)"
+fi
+
+# --- Check 3b: Hooks registered for Copilot CLI ---
+# Deferred minor 11: this tool -- the one install.sh tells every user to
+# run -- checked only Claude Code's hook registration. Only doctor.sh (a
+# secondary, opt-in diagnostic) checked Copilot's. A Copilot-only install
+# with a stale or missing hook registration got zero signal from the
+# command users are actually told to run. On a Claude-Code-only machine,
+# absence of ~/.copilot/hooks/self-learning.json is normal -- a WARN, never
+# a FAIL, mirroring the Claude Code section above.
+
+section "Hook Registration (Copilot CLI)"
+
+COPILOT_HOOKS_FILE="${HOME}/.copilot/hooks/self-learning.json"
+if ! command -v python3 >/dev/null 2>&1; then
+    fail "cannot verify Copilot hook freshness -- python3 not found on PATH" \
+        "Install python3 so scripts/lib/paths.py (this project's sole path resolver) can run"
+elif [[ -f "$COPILOT_HOOKS_FILE" ]]; then
+    state="$(sl_check_hook_fresh "$COPILOT_HOOKS_FILE" "copilot-session-review.sh" "$SL_SCRIPTS_DIR")"
+    case "$state" in
+        fresh)
+            pass "copilot-session-review.sh hook registered and points at the resolved scripts dir"
+            ;;
+        stale)
+            fail "copilot-session-review.sh hook registered but STALE -- does not point at ${SL_SCRIPTS_DIR}/copilot-session-review.sh" \
+                "Re-render the hook command in ~/.copilot/hooks/self-learning.json (e.g. re-run install.sh) so it points at ${SL_SCRIPTS_DIR}/copilot-session-review.sh"
+            ;;
+        missing)
+            fail "copilot-session-review.sh hook not found in ~/.copilot/hooks/self-learning.json" \
+                "Add the sessionEnd hook for copilot-session-review.sh to ~/.copilot/hooks/self-learning.json"
+            ;;
+    esac
+else
+    warn "~/.copilot/hooks/self-learning.json not found (normal on a Claude-Code-only or VS-Code-only install -- Copilot hooks live here, Claude Code hooks are registered separately in ~/.claude/settings.json)"
 fi
 
 # --- Check 4: Turn counter state ---

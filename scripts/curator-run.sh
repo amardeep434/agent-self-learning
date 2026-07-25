@@ -144,9 +144,16 @@ fi
 
 echo "$TRANSITION_LOG" >> "$REPORT_FILE"
 
-if [[ -z "$TRANSITION_LOG" ]]; then
-    echo "_No transitions this cycle._" >> "$REPORT_FILE"
-fi
+# Round B finding: the "$TRANSITION_LOG is empty" branch that used to be
+# here was dead code. Confirmed by execution: skill-lifecycle.py's
+# run_lifecycle() always appends either a "Lifecycle summary: checked=..."
+# line or, when no .usage.json exists at all, "No .usage.json found.
+# Nothing to do." -- print(output) therefore never emits an empty string,
+# and the [[ -f ... ]] else-branch above sets a non-empty "[WARN] No
+# skill-lifecycle script found" too. TRANSITION_LOG cannot be empty on any
+# reachable path, so the report's "_No transitions this cycle._" fallback
+# line could never actually print. Removed rather than "fixed", since the
+# condition it guarded was never real.
 
 # --- LLM consolidation pass (opt-in) ---
 

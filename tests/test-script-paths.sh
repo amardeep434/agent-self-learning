@@ -230,11 +230,12 @@ check "index-session indexed the session found via ~/.claude/projects" "1" \
 rm -rf "$IDX_SCRIPTS"
 
 ## ============================================================
-## Narrow source assertions — ONLY for the two legitimate exceptions.
+## Narrow source assertions — ONLY for the specific, individually-named
+## legitimate exceptions.
 ## A grep cannot be the primary assertion (see file header), but pinning
-## exactly these two known-legitimate lines means a future edit that
+## exactly these known-legitimate lines means a future edit that
 ## reintroduces a hardcoded FRAMEWORK path elsewhere is still caught, because
-## any such addition would push these counts above 1.
+## any such addition would push these counts above the pinned total.
 ## ============================================================
 
 check "curator-run.sh has zero ~/.claude references (no legitimate exception exists there)" "0" \
@@ -247,6 +248,87 @@ check "self-learning-health.sh has exactly one \${HOME}/.claude reference (SETTI
     "$(grep -c '\${HOME}/\.claude' "${SCRIPT_DIR}/scripts/self-learning-health.sh" || true)"
 check "self-learning-health.sh's lone \${HOME}/.claude reference is the SETTINGS_FILE line" "yes" \
     "$(grep -qF 'SETTINGS_FILE="${HOME}/.claude/settings.json"' "${SCRIPT_DIR}/scripts/self-learning-health.sh" && echo yes || echo no)"
+
+## ============================================================
+## I11: repo-wide guard over ALL of scripts/**, not just the three files
+## above. Python scripts were never in scope before this -- exactly how C2
+## (skill-lifecycle.py hardcoding ~/.claude/learned-skills) and the
+## inject-agents-md.py fallback both survived to the final review despite
+## this exact test file existing. Every legitimate hit is named and
+## justified individually, in the style of test-install-paths.sh's
+## INSTALL_EXEMPTIONS -- an un-exempted new hit anywhere under scripts/
+## fails this test, forcing a conscious decision instead of a silent
+## reintroduction.
+##
+## Two separate, precise (not merely substring) patterns, one per language,
+## chosen so ordinary prose in comments/docstrings that merely DISCUSSES
+## ~/.claude (there is a lot of it, by design -- this whole file's premise
+## is documenting why code must not go there) does not itself count as a
+## "hit":
+##   bash:   ${HOME}/.claude   -- the actual variable-expansion syntax code
+##           would use to build a path; comments describing the rule use
+##           the tilde form ("~/.claude"), which this pattern does not match.
+##   python: ".claude"          -- a quoted path-segment string literal, as
+##           real code constructing a Path/os.path.join argument would use.
+##
+## No associative arrays or namerefs (bash 3.2 on stock macOS lacks both) --
+## "path|reason" pairs in plain indexed arrays, same convention as
+## test-install-paths.sh's INSTALL_EXEMPTIONS.
+## ============================================================
+
+BASH_CLAUDE_EXEMPTIONS=(
+    "scripts/index-session.sh|SESSIONS_DIR: Claude Code's own transcript source (~/.claude/projects), read-only, never the framework's own store"
+    "scripts/self-learning-health.sh|SETTINGS_FILE: Claude Code's own hook-registration file (~/.claude/settings.json), read-only diagnostic input"
+    "scripts/doctor.sh|CLAUDE_SETTINGS: same as self-learning-health.sh's SETTINGS_FILE -- Claude Code's own hook-registration file, read-only, gated behind 'command -v claude'"
+)
+PY_CLAUDE_EXEMPTIONS=(
+    "scripts/lib/paths.py|legacy_home(): DETECT ONLY the pre-neutral ~/.claude store so doctor.sh can tell the user it exists and how to migrate; never read from or written to as the framework's own store"
+)
+
+bash_claude_exempt_reason() {
+    local name="$1" entry
+    for entry in "${BASH_CLAUDE_EXEMPTIONS[@]}"; do
+        case "$entry" in
+            "${name}|"*) printf '%s' "${entry#*|}"; return 0 ;;
+        esac
+    done
+    return 1
+}
+py_claude_exempt_reason() {
+    local name="$1" entry
+    for entry in "${PY_CLAUDE_EXEMPTIONS[@]}"; do
+        case "$entry" in
+            "${name}|"*) printf '%s' "${entry#*|}"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+for f in $(find "${SCRIPT_DIR}/scripts" -name '*.sh' | sort); do
+    rel="scripts/$(printf '%s' "$f" | sed "s|^${SCRIPT_DIR}/scripts/||")"
+    count="$(grep -c '\${HOME}/\.claude' "$f" || true)"
+    if [[ "$count" -eq 0 ]]; then
+        echo "PASS: $rel has no \${HOME}/.claude reference"
+    elif reason="$(bash_claude_exempt_reason "$rel")"; then
+        echo "PASS: $rel has a \${HOME}/.claude reference, exempted ($reason)"
+    else
+        echo "FAIL: $rel has an un-exempted \${HOME}/.claude reference -- add it to BASH_CLAUDE_EXEMPTIONS in this test with a reason, or fix it"
+        FAILURES=$((FAILURES+1))
+    fi
+done
+
+for f in $(find "${SCRIPT_DIR}/scripts" -name '*.py' -not -path '*/__pycache__/*' | sort); do
+    rel="scripts/$(printf '%s' "$f" | sed "s|^${SCRIPT_DIR}/scripts/||")"
+    count="$(grep -c '"\.claude"' "$f" || true)"
+    if [[ "$count" -eq 0 ]]; then
+        echo "PASS: $rel has no quoted \".claude\" path-segment literal"
+    elif reason="$(py_claude_exempt_reason "$rel")"; then
+        echo "PASS: $rel has a quoted \".claude\" literal, exempted ($reason)"
+    else
+        echo "FAIL: $rel has an un-exempted quoted \".claude\" literal -- add it to PY_CLAUDE_EXEMPTIONS in this test with a reason, or fix it"
+        FAILURES=$((FAILURES+1))
+    fi
+done
 
 if [[ "$FAILURES" -gt 0 ]]; then
     echo "--- self-learning-health.sh output (seeded store, no ~/.claude) ---"

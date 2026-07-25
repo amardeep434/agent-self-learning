@@ -24,6 +24,28 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
+
+def _paths_defaults():
+    """Fall back to the single vendor-neutral path resolver, never a
+    hardcoded ~/.claude literal.
+
+    In real operation every SL_* env var this module reads is already set
+    by scripts/lib/config.sh before this script runs (both session-review.sh
+    and copilot-session-review.sh source it first), so these defaults are
+    never actually exercised on that path. But this file used to hardcode
+    a dot-claude path segment as the fallback for exactly the
+    Copilot/VS-Code-reachable code this project's global constraint forbids
+    that store in -- a latent bug of the same shape the rest of this round
+    fixes, just never triggered because the caller always sets the env var
+    first. A caller invoking this script standalone (e.g. a test, or a
+    future harness adapter that does not source config.sh) must still never
+    default into that legacy, Claude-Code-only location.
+    """
+    sys.path.insert(0, str(SCRIPT_DIR / "lib"))
+    import paths  # noqa: E402  (stdlib-only default path, import deferred)
+
+    return paths.resolve_all()
+
 _SAFE_CHARS = re.compile(r"[^A-Za-z0-9 .,:;()\[\]/_-]")
 
 
@@ -58,12 +80,21 @@ def run_route(argv):
 
 
 def main():
-    home = str(Path.home())
     rules_enabled = flag("SL_COACH_RULES_ENABLED")
     export_enabled = flag("SL_COACH_EXPORT_ENABLED")
-    signals_file = Path(os.environ.get(
-        "SL_COACH_SIGNALS_FILE",
-        os.path.join(home, ".claude", "state", "self-learning", "coach-signals.json")))
+
+    # Env vars are always set by lib/config.sh in real operation; only a
+    # standalone invocation with an incomplete environment ever reaches
+    # _paths_defaults(). Computed at most once, on demand.
+    resolved = {}
+
+    def default_path(key):
+        if not resolved:
+            resolved.update(_paths_defaults())
+        return resolved[key]
+
+    env_signals_file = os.environ.get("SL_COACH_SIGNALS_FILE")
+    signals_file = Path(env_signals_file) if env_signals_file else default_path("state") / "coach-signals.json"
 
     if not rules_enabled and not export_enabled:
         if signals_file.is_file():
@@ -73,11 +104,8 @@ def main():
     merged = {}
 
     if rules_enabled:
-        rules_dir = os.environ.get(
-            "SL_COACH_RULES_DIR",
-            os.path.join(home, ".claude", "scripts", "self-learning", "coach-rules"))
-        db_path = os.environ.get(
-            "SL_SEARCH_DB", os.path.join(home, ".claude", "sessions", "search.db"))
+        rules_dir = os.environ.get("SL_COACH_RULES_DIR") or str(default_path("scripts") / "coach-rules")
+        db_path = os.environ.get("SL_SEARCH_DB") or str(default_path("sessions_db"))
         for sig in run_route([sys.executable, str(SCRIPT_DIR / "coach-rules-eval.py"),
                               rules_dir, db_path]):
             merged[sanitize_text(sig["id"])] = {
@@ -90,7 +118,7 @@ def main():
 
     if export_enabled:
         export_path = os.environ.get(
-            "SL_COACH_EXPORT_PATH", os.path.join(home, ".aiec", "summary-latest.json"))
+            "SL_COACH_EXPORT_PATH", str(Path.home() / ".aiec" / "summary-latest.json"))
         for sig in run_route([sys.executable, str(SCRIPT_DIR / "coach-export-read.py"),
                               export_path]):
             # export runs second: wins dedupe by design
