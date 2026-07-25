@@ -21,7 +21,29 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/lib/config.sh"
 
+# --strict: opt-in, additionally fails (nonzero exit) on a stale hook config
+# -- a hook registered in settings.json/self-learning.json that points at a
+# scripts dir which is no longer the resolved one. Default (no flag)
+# behaviour is UNCHANGED: a stale hook is still printed loudly (see
+# _sl_report_hooks below) but never flips STATUS on its own, matching every
+# doctor.sh run before this item. Without --strict, a CI job or wrapper
+# script checking doctor's exit code can pass with genuinely broken hook
+# wiring -- silent success on a broken state is exactly the pattern this
+# project exists to eliminate, hence this flag.
+#
+# Deliberate exception, carried over unchanged: a detected LEGACY ~/.claude
+# store (section 4 below) is never fatal, even under --strict. Every
+# upgraded machine would go permanently red otherwise, and operators would
+# learn to ignore the exit code entirely -- worse than not having --strict.
+STRICT=0
+for _arg in "$@"; do
+    if [[ "$_arg" == "--strict" ]]; then
+        STRICT=1
+    fi
+done
+
 STATUS=0
+STALE_HOOKS_FOUND=0
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -79,7 +101,8 @@ _sl_report_hooks() {
         case "$state" in
             absent)  echo "    ${script_name}: not installed" ;;
             missing) echo "    ${script_name}: MISSING -- not registered in ${file}" ;;
-            stale)   echo "    ${script_name}: STALE -- registered but does not point at ${SL_SCRIPTS_DIR}/${script_name}" ;;
+            stale)   echo "    ${script_name}: STALE -- registered but does not point at ${SL_SCRIPTS_DIR}/${script_name}"
+                     STALE_HOOKS_FOUND=1 ;;
             fresh)   echo "    ${script_name}: registered, points at resolved scripts dir" ;;
         esac
     done
@@ -339,10 +362,16 @@ echo
 echo "review enabled: ${SL_REVIEW_ENABLED}"
 echo
 
+if [[ "$STRICT" -eq 1 && "$STALE_HOOKS_FOUND" -eq 1 ]]; then
+    echo "--strict: at least one STALE hook found above -- failing (default-mode doctor would still exit 0 for this alone)"
+    STATUS=1
+fi
+echo
+
 if [[ "$STATUS" -eq 0 ]]; then
     echo "overall: HEALTHY"
 else
-    echo "overall: UNHEALTHY -- see NOT WRITABLE and/or persistence failures above"
+    echo "overall: UNHEALTHY -- see NOT WRITABLE, persistence failures, and/or --strict hook-staleness above"
 fi
 
 exit "$STATUS"

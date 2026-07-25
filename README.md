@@ -144,6 +144,18 @@ only mechanism that replaces that missing signal. If you want to know whether
 background learning is actually persisting anything, run `doctor.sh`; do not
 infer health from "the hook didn't error."
 
+By default, `doctor.sh` exits non-zero only for a non-writable resolved path
+or a non-empty `persist-failures.log`; a `stale` hook (see above) is printed
+loudly but does not affect the exit code, so a plain `doctor.sh` run can
+report `overall: HEALTHY` while a hook config still points at an old scripts
+directory. Run `bash scripts/doctor.sh --strict` to additionally fail (exit
+1) when any hook is `stale` — use this in CI or any wrapper that gates on
+doctor's exit code, so broken hook wiring cannot pass silently. `--strict` is
+opt-in; default behaviour is unchanged. One exception applies in both modes:
+a detected legacy `~/.claude` store is never fatal, even under `--strict` —
+every machine upgraded from a pre-vendor-neutral install would otherwise fail
+`doctor.sh` forever, training operators to ignore its exit code entirely.
+
 ## Uninstall (single command)
 
 ```bash
