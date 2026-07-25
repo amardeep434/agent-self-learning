@@ -87,12 +87,30 @@ chmod +x "${NOFTS5_BIN}/python3"
 # Sanity check on the simulation itself before trusting results below: the
 # probe must actually observe UNAVAILABLE through this shim, or the rest of
 # this test would be silently testing nothing.
-PROBE_RESULT="$(PATH="${NOFTS5_BIN}:${PATH}" "${NOFTS5_BIN}/python3" -c "
+#
+# fix-p6 (Windows CI): this used to be an inline `python3 -c "..."` script
+# with the lib directory path hand-embedded as a bash-interpolated STRING
+# LITERAL inside the Python source (`sys.path.insert(0, '${IDX_SCRIPTS}/lib')`).
+# Git Bash only auto-translates POSIX-style paths to Windows form when they
+# appear as their own argv token passed to a native Windows executable --
+# not when they're baked into the middle of a larger quoted `-c` string, so
+# the untranslated path failed to resolve on Windows ("ModuleNotFoundError:
+# No module named 'session_db'") even though index-session.sh itself (which
+# never does this) passes on Windows. Fixed the way the shipped scripts
+# already do it: a real .py FILE, invoked with its path as a normal argv
+# token (so Git Bash's translation applies the same way it already does for
+# every other python3 invocation in this suite), which derives its own
+# sys.path from `Path(__file__).resolve().parent` -- platform-agnostic,
+# no manually constructed path string anywhere.
+cat > "${IDX_SCRIPTS}/lib/_probe_fts5_sanity.py" <<'PYEOF'
 import sys
-sys.path.insert(0, '${IDX_SCRIPTS}/lib')
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import session_db
 print('available' if session_db.probe_fts5() else 'unavailable')
-")"
+PYEOF
+
+PROBE_RESULT="$(PATH="${NOFTS5_BIN}:${PATH}" "${NOFTS5_BIN}/python3" "${IDX_SCRIPTS}/lib/_probe_fts5_sanity.py")"
 check "simulation sanity: probe_fts5() reports unavailable through the shim" "unavailable" "$PROBE_RESULT"
 
 STORE="${TMP_HOME}/store"
