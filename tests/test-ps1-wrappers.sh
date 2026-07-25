@@ -70,24 +70,59 @@ check "probe idiom: exits 0 for a path this bash can see" "0" "$VISIBLE_RC"
 check "probe idiom: exits non-zero for a path it cannot" "yes" \
     "$([[ "$INVISIBLE_RC" -ne 0 ]] && echo yes || echo no)"
 
+# --- PowerShell, wherever it exists ---------------------------------------
+#
+# fix-p9. This block previously assembled an inline `pwsh -NoProfile
+# -Command` string in bash, and it was WRONG: it referenced a $errs variable
+# it never initialised, under $ErrorActionPreference='Stop', which is a
+# terminating error for every input file alike. The first CI run that had
+# pwsh available duly reported all three wrappers as having parse errors --
+# a false positive from the check, not a fault in the files. Two lessons,
+# both applied here:
+#
+#   * Invoke via `-File`, never `-Command`. That removes the entire
+#     bash-quoting/PowerShell-parsing interaction, which is what made the
+#     broken check hard to see in the first place.
+#   * PRINT the diagnostics. "has a parse error" with no line, column or
+#     message is indistinguishable from a broken checker -- exactly the
+#     ambiguity that cost a CI round trip.
+#
+# And a correction of record: this suite used to state that PowerShell was
+# unverifiable because there is no PowerShell CI job. That was wrong.
+# GitHub's ubuntu runners ship pwsh, so both the parse check AND the
+# behavioural test below run on every push -- they just never ran on the
+# dev box, which has no pwsh. "Absent locally" is not "absent in CI".
 if command -v pwsh >/dev/null 2>&1; then
-    echo "[capability probe] pwsh: AVAILABLE -- syntax-checking the wrappers"
-    for f in "${SCRIPT_DIR}/install.ps1" "${SCRIPT_DIR}/uninstall.ps1" "$HELPER"; do
-        if pwsh -NoProfile -Command "
-\$ErrorActionPreference='Stop'
-\$null = [System.Management.Automation.Language.Parser]::ParseFile('$f', [ref]\$null, [ref]\$errs)
-if (\$errs) { exit 1 }" >/dev/null 2>&1; then
-            echo "PASS: $(basename "$f") parses"
-        else
-            echo "FAIL: $(basename "$f") has a PowerShell parse error"
-            FAILURES=$((FAILURES+1))
-        fi
-    done
+    echo "[capability probe] pwsh: AVAILABLE ($(pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' 2>/dev/null || echo 'version unknown'))"
+
+    # `VAR="$(cmd)"` under `set -e` ABORTS the script when cmd fails, so a
+    # genuine parse error would kill this suite before it could print the
+    # diagnostics it just collected -- silently turning a reportable failure
+    # into a truncated log. `|| RC=$?` keeps the failure reportable. (Found
+    # by mutation-testing this very block: the injected syntax error
+    # produced no output at all until this was fixed.)
+    PARSE_RC=0
+    PARSE_OUT="$(pwsh -NoProfile -File "${SCRIPT_DIR}/tests/lib/ps-parse-check.ps1" \
+        "${SCRIPT_DIR}/install.ps1" "${SCRIPT_DIR}/uninstall.ps1" "$HELPER" \
+        "${SCRIPT_DIR}/tests/lib/ps-parse-check.ps1" "${SCRIPT_DIR}/tests/lib/ps-wrapper-tests.ps1" 2>&1)" \
+        || PARSE_RC=$?
+    printf '%s\n' "$PARSE_OUT" | sed 's/^/  /'
+    check "every shipped .ps1 file parses" "0" "$PARSE_RC"
+
+    # Behaviour, not just syntax: a resolver that parses but picks the wrong
+    # bash would sail through a parse check. Both branches of
+    # Resolve-DelegableBash are platform-independent, so running them here
+    # exercises the real code rather than a simulation of it.
+    BEHAVIOUR_RC=0
+    BEHAVIOUR_OUT="$(pwsh -NoProfile -File "${SCRIPT_DIR}/tests/lib/ps-wrapper-tests.ps1" \
+        "${SCRIPT_DIR}" 2>&1)" || BEHAVIOUR_RC=$?
+    printf '%s\n' "$BEHAVIOUR_OUT" | sed 's/^/  /'
+    check "find-bash.ps1 resolver behaves correctly (accept + refuse)" "0" "$BEHAVIOUR_RC"
 else
-    echo "[capability probe] pwsh: NOT AVAILABLE -- PowerShell parse/behaviour of the"
-    echo "  wrappers is UNVERIFIED here (structural checks above still ran). This is"
-    echo "  reported, not skipped silently: nothing in this repo has ever executed"
-    echo "  install.ps1 on Windows."
+    echo "[capability probe] pwsh: NOT AVAILABLE -- the PowerShell parse check and the"
+    echo "  find-bash.ps1 behaviour test did NOT run here (the structural checks above"
+    echo "  still did). Reported, not skipped silently. Note this is a property of THIS"
+    echo "  machine, not of CI: GitHub's ubuntu runners ship pwsh and do run both."
 fi
 
 if [[ "$FAILURES" -gt 0 ]]; then exit 1; fi
