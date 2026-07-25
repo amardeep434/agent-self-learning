@@ -35,9 +35,10 @@
 
 ---
 
-## 3. Status: 6 of 10 tasks implemented (Task 6 review in progress)
+## 3. Status: 6 of 10 tasks COMPLETE — flow deliberately halted here
 
-Branch HEAD: **`f0fdebc`** (docs) — last code commit **`a934cb3`** (Task 6). Commits (oldest first):
+Last code commit **`a934cb3`** (Task 6, reviewed clean). Branch is pushed to `origin/harness-neutral-persistence`.
+**The flow was stopped intentionally after Task 6's review — Task 7 was never dispatched.** Resume at Task 7. Commits (oldest first):
 
 ```
 646e967 docs(plan): harness-neutral persistence implementation plan
@@ -65,7 +66,7 @@ f0fdebc docs(handoff): operating detail appendix
 | 3 | Proposal schema (`scripts/lib/proposal_schema.py`) | ✅ complete (2 fix rounds) |
 | 4 | Secure writer (`scripts/persist-proposal.py`) | ✅ complete (1 fix round) |
 | 5 | Invert Claude Code reviewer (`scripts/session-review.sh`) | ✅ complete (1 fix round) |
-| 6 | Invert Copilot reviewer (`scripts/copilot-session-review.sh`) | ✅ implemented `a934cb3` (12 checks) — **review in progress, see §4** |
+| 6 | Invert Copilot reviewer (`scripts/copilot-session-review.sh`) | ✅ complete `a934cb3` — review clean, zero findings |
 | 7 | Claude-absent regression guard (`tests/test-claude-absent.sh`) | ⬜ not started |
 | 8 | Test runner + 3-OS CI (`tests/run-all.sh`, `.github/workflows/ci.yml`) | ⬜ not started |
 | 9 | `doctor` (`scripts/doctor.sh`) | ⬜ not started |
@@ -75,16 +76,23 @@ Current test counts: 8 shell suites + 5 Python suites (90 Python cases), all gre
 
 ---
 
-## 4. Task 6 — implemented, review pending
+## 4. Resume point: Task 7
 
-Task 6 committed at **`a934cb3`** (12 checks pass; RED confirmed before implementation). A task review was dispatched with review package
-`<workspace>/review-88476ca..a934cb3.diff` (BASE is `88476ca`, the parent of `a934cb3` — the two docs commits are deliberately excluded as noise).
+Task 6 is **complete and reviewed clean** (Spec ✅, Approved, zero findings; mutation confirmed 7 of 12 checks fail when the spawn is neutered; full suite 14/14). No fix round was needed and none is pending.
 
-**On resume:**
-1. If the review result is unknown, **re-dispatch the task review** using the reviewer template in §14 and that diff path. Do not skip it and do not re-run the implementer.
-2. Then run the fix loop if there are findings, ledger `Task 6: complete`, and proceed to Task 7.
+**Start here on resume: Task 7** (Claude-absent regression guard). Follow §5 with `BASE = a934cb3`. Nothing is half-finished; there is no in-flight agent.
 
-**Open question the reviewer was asked to adjudicate:** `copilot --help` and `copilot help limits` confirm Copilot CLI has **no turn/step cap** for headless `-p` runs (`--max-autopilot-continues` is interactive-only). The only cost knob is `--max-ai-credits` (soft, credit-based, minimum 30). The implementer deliberately did **not** map `SL_REVIEW_MAX_TURNS` onto it, judging the unit conversion meaningless, and flagged it rather than omitting silently — the right instinct. **Consequence to resolve: the Copilot reviewer currently has no hard bound on its model loop**, while the equivalent Claude Code path does. Given the framework's cost-efficiency premise and that agent/sub-agent turns measured 84% of spend, a separate credit-based knob (e.g. `SL_COPILOT_REVIEW_MAX_CREDITS` → `--max-ai-credits`, default unset) is the likely correct follow-up. Treat it as a new feature for the final review to triage, not a defect in Task 6.
+### Two Important findings carried forward — read before Task 7
+
+**(a) The Copilot reviewer has no cost ceiling.** Verified via `copilot help limits`: `--max-ai-credits` **does** apply to non-interactive `-p` runs, while `--max-autopilot-continues` is interactive-only. The implementer correctly refused to fabricate a turns→credits conversion, but zero bound is the wrong resting point for a framework whose premise is cost efficiency (background agent turns measured at 84% of spend). Follow-up: add a distinct knob `SL_COPILOT_MAX_AI_CREDITS` wired to `--max-ai-credits`, defaulting to the CLI minimum of 30. **Do not reuse `SL_REVIEW_MAX_TURNS`** — the units do not correspond.
+
+**(b) NEW — the plan does not cover install paths, and Task 7's guard will not catch it.** `config/copilot-hooks.json` (and the copy installed at `~/.copilot/hooks/self-learning.json`) invokes:
+```
+bash ~/.claude/scripts/self-learning/copilot-session-review.sh
+```
+This plan removed `~/.claude` from the **store** and from **script contents**, but the Copilot adapter's **script install location is still Claude-namespaced**. A Copilot-only install therefore still creates and depends on `~/.claude`, which contradicts the plan's own global constraint. Task 7's guard invokes the script directly from the repo, so it will go **green while the real installed configuration still violates the constraint** — a false pass.
+
+Follow-up task needed: relocate installed scripts to a harness-neutral location (e.g. under the resolved store or an XDG bin path) and update `config/copilot-hooks.json`, `install.sh`, and `install.ps1` together. Consider extending Task 7 to assert on the *shipped hook config* as well as the script, so the guard cannot pass vacuously.
 
 ## 5. The loop protocol (repeat per task, 7 → 10)
 
