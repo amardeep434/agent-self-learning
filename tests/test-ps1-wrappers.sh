@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 # tests/test-ps1-wrappers.sh
 #
-# install.ps1/uninstall.ps1 cannot be executed here: this repo's CI has no
-# PowerShell job and the development host has no pwsh (probed below and
-# reported, never silently skipped). What CAN be pinned without PowerShell:
+# install.ps1/uninstall.ps1 cannot be executed on a host with no pwsh (probed
+# below and reported, never silently skipped). That is a property of the
+# DEVELOPMENT machine only. CI runs the PowerShell half on ubuntu-latest AND
+# on both windows-latest cells -- GitHub documents pwsh as the default shell
+# on Windows runners, and run 30177841369 printed "[capability probe] pwsh:
+# AVAILABLE (7.6.3)" on windows-latest before passing. A dedicated
+# `shell: pwsh` job was considered and NOT added: it would be a seventh CI
+# cell duplicating coverage that already runs. See tests/lib/
+# ps-wrapper-tests.ps1's correction-of-record header.
+#
+# What CAN be pinned without PowerShell:
 #
 #  1. The structural contract — both wrappers must resolve bash through the
 #     shared scripts/lib/find-bash.ps1 probe rather than invoking the first
