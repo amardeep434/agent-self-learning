@@ -18,8 +18,10 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+from isotime import now_iso  # noqa: E402  (fix round D: shared with skill-lifecycle.py, persist-proposal.py, coach-signals.py)
 
 
 def parse_session(jsonl_path: str) -> dict:
@@ -104,7 +106,7 @@ def parse_session(jsonl_path: str) -> dict:
                 'timestamp': timestamp,
             })
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = now_iso()
     return {
         'title': title or '(untitled session)',
         'started_at': session_start or now,
@@ -146,7 +148,7 @@ def index_session(jsonl_path: str, db_path: str, project_path: str) -> None:
     parent_id = detect_parent_session(jsonl_path)
 
     conn = sqlite3.connect(db_path)
-    now = datetime.now(timezone.utc).isoformat()
+    now = now_iso()
 
     try:
         conn.execute(

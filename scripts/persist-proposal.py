@@ -33,12 +33,12 @@ import json
 import os
 import sys
 import tempfile
-from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 
 import paths  # noqa: E402
+from isotime import now_iso as _now_iso  # noqa: E402  (fix round D: shared with skill-lifecycle.py, index-session.py, coach-signals.py)
 from proposal_schema import ValidationError, extract_proposal, validate_proposal  # noqa: E402
 
 # Bounds the *accumulated* size of a memory file across repeated append-mode
@@ -209,10 +209,6 @@ def _cleanup_tmp(tmp_name: str) -> None:
         pass  # already renamed, or never created -- either way, nothing to do
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def _load_usage_dict(skills_dir: Path) -> dict:
     """Read the shared `.usage.json`, symlink/hardlink/UTF-8 safe, "{}" if absent.
 
@@ -276,10 +272,29 @@ def _plan(proposal: dict, memory_dir: Path, skills_dir: Path) -> list[tuple[tupl
     (`(skills_dir, skill_dir)`) since each skill now gets its own directory.
     """
     planned: list[tuple[tuple[Path, ...], Path, str, str]] = []
+
+    # "Also in scope" fix (fix round D): _write_all() symlink-checks every
+    # directory in a write's chain (memory_dir / skills_dir included) before
+    # touching anything -- but with a symlinked skills_dir, _load_usage_dict
+    # below reads `<target>/.usage.json` *before* _write_all ever runs, since
+    # planning (this function) happens first. That let a symlinked skills_dir
+    # leak a boolean "is .usage.json valid JSON?" signal (via PersistError's
+    # message vs. success) from outside the store, before the write path's
+    # own confinement checks got a chance to refuse it. No content disclosure
+    # was achievable this way and nothing was ever written, but the read
+    # itself should never happen at all -- hoisting the same symlink check
+    # _write_all already performs to the top of planning closes that read
+    # window without weakening any other check (root-relative confinement,
+    # O_NOFOLLOW, hardlink rejection, etc. are all untouched and still run at
+    # write time exactly as before).
+    if proposal["memory"]:
+        _reject_if_symlink(memory_dir, "store directory")
     for entry in proposal["memory"]:
         planned.append(((memory_dir,), memory_dir / entry["file"], entry["mode"], entry["content"]))
 
     skill_names = [entry["name"] for entry in proposal["skills"]]
+    if skill_names:
+        _reject_if_symlink(skills_dir, "store directory")
     for entry in proposal["skills"]:
         skill_dir = skills_dir / entry["name"]
         planned.append(((skills_dir, skill_dir), skill_dir / SKILL_CONTENT_FILENAME,

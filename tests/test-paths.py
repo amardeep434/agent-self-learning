@@ -100,6 +100,48 @@ class TestCliFormatting(unittest.TestCase):
         p = Path("/home/u/.local/share/agent-learning")
         self.assertEqual(paths._to_cli_string(p), "/home/u/.local/share/agent-learning")
 
+    def test_msys_branch_emits_cygdrive_form(self):
+        # Fix round D, blocker (b): inside an actual Git Bash / MSYS2 shell
+        # (os.name == "nt" AND MSYSTEM set), the CLI must emit '/c/Users/x'
+        # -- the form MSYS's own tools (and bash's own path comparisons)
+        # expect -- not the plain 'C:/Users/x' from C1's .as_posix() fix,
+        # which round A's diagnosis stopped at.
+        p = PureWindowsPath(r"C:\Users\runneradmin\.local\share\agent-learning")
+        rendered = paths._to_cli_string(p, is_windows=True, msystem="MINGW64")
+        self.assertEqual(rendered, "/c/Users/runneradmin/.local/share/agent-learning")
+        self.assertNotIn("\\", rendered)
+        self.assertNotIn(":", rendered)
+
+    def test_native_windows_without_msystem_keeps_as_posix_form(self):
+        # Native cmd.exe / PowerShell never set MSYSTEM. That caller must
+        # keep getting the plain .as_posix() form -- switching everyone to
+        # cygdrive form unconditionally would break native Windows tools,
+        # which do not understand '/c/Users/x'.
+        p = PureWindowsPath(r"C:\Users\runneradmin\.local\share\agent-learning")
+        rendered = paths._to_cli_string(p, is_windows=True, msystem=None)
+        self.assertEqual(rendered, "C:/Users/runneradmin/.local/share/agent-learning")
+
+    def test_non_windows_ignores_msystem(self):
+        # A POSIX platform must never take the MSYS branch even if MSYSTEM
+        # somehow ended up in the environment (it should not, but
+        # is_windows is the gating condition, not msystem alone).
+        p = Path("/home/u/.local/share/agent-learning")
+        rendered = paths._to_cli_string(p, is_windows=False, msystem="MINGW64")
+        self.assertEqual(rendered, "/home/u/.local/share/agent-learning")
+
+    def test_msys_branch_driveless_path_falls_back_to_as_posix(self):
+        p = PureWindowsPath(r"\\server\share\agent-learning")
+        rendered = paths._to_cli_string(p, is_windows=True, msystem="MINGW64")
+        self.assertEqual(rendered, p.as_posix())
+
+    def test_to_msys_path_direct(self):
+        p = PureWindowsPath(r"C:\Users\u\AppData\Local\agent-learning")
+        self.assertEqual(paths._to_msys_path(p), "/c/Users/u/AppData/Local/agent-learning")
+
+    def test_to_msys_path_drive_root_only(self):
+        p = PureWindowsPath("C:\\")
+        self.assertEqual(paths._to_msys_path(p), "/c")
+
     def test_main_all_emits_no_backslashes_for_a_windows_style_env(self):
         # Simulate what _main's "all" branch would print for a Windows
         # resolution by monkeypatching resolve_all's underlying platform via

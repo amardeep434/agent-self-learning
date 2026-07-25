@@ -30,9 +30,29 @@ case "$OUT" in
 esac
 
 # Explicit override wins over platform default
+#
+# Fix round D, blocker (b): on Git Bash / MSYS2, /tmp is itself remapped to
+# %TEMP% by the MSYS runtime, so 'AGENT_LEARNING_HOME=/tmp/al' and the path
+# python.exe resolves for it can be the SAME directory on disk while being
+# spelled completely differently as strings ('/tmp/al/memory' vs.
+# 'C:/Users/RUNNER~1/AppData/Local/Temp/al/memory', or -- after paths.py's
+# MSYS-form fix -- '/c/Users/.../Temp/al/memory'). A plain string `==`
+# assertion is therefore not portable even once paths.py is doing the right
+# thing; comparing with `-ef` (same underlying file/inode) is. `-ef` requires
+# both sides to already exist, so both are created first. This still catches
+# a real regression: if SL_MEMORY_DIR resolved to any OTHER directory, `-ef`
+# against the expected one would correctly fail.
+_sl_expected_memory_dir="/tmp/al/memory"
+mkdir -p "$_sl_expected_memory_dir"
 OUT=$(env -i HOME="$HOME" PATH="$PATH" AGENT_LEARNING_HOME="/tmp/al" SL_CONFIG_FILE="/nonexistent/x.conf" \
     bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; echo \"\$SL_MEMORY_DIR\"")
-check "AGENT_LEARNING_HOME drives SL_MEMORY_DIR" "/tmp/al/memory" "$OUT"
+mkdir -p "$OUT" 2>/dev/null || true
+if [[ -d "$_sl_expected_memory_dir" && -d "$OUT" && "$_sl_expected_memory_dir" -ef "$OUT" ]]; then
+    echo "PASS: AGENT_LEARNING_HOME drives SL_MEMORY_DIR (${OUT} -ef ${_sl_expected_memory_dir})"
+else
+    echo "FAIL: AGENT_LEARNING_HOME drives SL_MEMORY_DIR (expected an equivalent directory to '${_sl_expected_memory_dir}', got '${OUT}')"
+    FAILURES=$((FAILURES+1))
+fi
 
 # New review flag defaults on
 OUT=$(env -i HOME="$HOME" PATH="$PATH" SL_CONFIG_FILE="/nonexistent/x.conf" \
@@ -70,15 +90,34 @@ check "pre-set SL_CONFIG_FILE overrides paths.py default" "/nonexistent/x.conf" 
 # given, so bash must be reachable there too) so python3 cannot be found,
 # without relying on any GNU-only tool.
 #
-# `cp`, not `ln -s`: symlink creation can silently fail or require elevated
+# Not `ln -s`: symlink creation can silently fail or require elevated
 # privileges on Windows (no admin / no Developer Mode), which would abort
 # this script under `set -e` with a confusing, environment-dependent error
-# far from the real assertion. `cp` needs no special privilege on any
-# platform and preserves the source basename (incl. a `.exe` suffix, so
-# Windows' implicit PATHEXT-style resolution still finds it).
+# far from the real assertion.
+#
+# Not `cp` either, as of fix round D, blocker (b): round A used `cp` here
+# specifically to dodge the `ln -s` privilege problem above, but on Git
+# Bash/MSYS2 that trade turned out to (unconfirmed, but the strongest
+# hypothesis for a `tests/test-config.sh exit 127` CI failure that survived
+# round A's other Windows fixes) make things WORSE. Copying bash.exe/
+# dirname.exe into an isolated, otherwise-empty directory separates the
+# binary from the msys-2.0.dll (and friends) the Windows loader resolves
+# relative to the EXECUTABLE'S OWN DIRECTORY -- not via PATH. With the DLL
+# missing from that directory, the loader fails and the shell reports exit
+# 127 ("command not found"), which is indistinguishable from "tool truly
+# absent" without inspecting the failure directly on a Windows box (this
+# repo cannot; there is no Windows CI evidence yet confirming this diagnosis
+# the way blocker (b)'s AGENT_LEARNING_HOME finding was CI-confirmed).
+#
+# A forwarder script has no DLL dependency of its own -- it is a text file
+# whose shebang execs the ORIGINAL absolute path, right next to its real
+# siblings, every time. Identical behavior on POSIX and Git Bash. `command
+# -v python3` still correctly reports "not found" for the no-python3 tests
+# below, since no forwarder is ever created for python3.
 _sl_link_or_copy() {
     local src="$1" dst="$2"
-    cp "$src" "$dst"
+    printf '#!/bin/sh\nexec "%s" "$@"\n' "$src" > "$dst"
+    chmod +x "$dst"
 }
 _sl_no_python_dir=$(mktemp -d)
 _sl_link_or_copy "$(command -v dirname)" "$_sl_no_python_dir/dirname"

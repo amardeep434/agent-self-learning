@@ -141,6 +141,7 @@ EXPECTED_FILES=(
     "persist-proposal.py"
     "lib/paths.py"
     "lib/proposal_schema.py"
+    "lib/isotime.py"
     "lib/config.sh"
     "session-review.sh"
     "copilot-session-review.sh"

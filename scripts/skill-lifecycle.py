@@ -28,6 +28,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+from isotime import parse_iso  # noqa: E402  (fix round D blocker (a): shared parser, see lib/isotime.py)
+
 # ---------------------------------------------------------------------------
 # Configuration (overridable via environment variables)
 # ---------------------------------------------------------------------------
@@ -79,15 +82,35 @@ STALE_DAYS = int(os.environ.get("CLAUDE_SKILL_STALE_DAYS", "30"))
 ARCHIVE_DAYS = int(os.environ.get("CLAUDE_SKILL_ARCHIVE_DAYS", "90"))
 
 
+class UsageCorruptError(Exception):
+    """`.usage.json` exists but is not valid JSON (or not a JSON object).
+
+    "Also in scope" fix (fix round D): this used to be indistinguishable
+    from "no .usage.json at all" -- load_usage() silently returned {} for
+    both, and run_lifecycle() then printed "No .usage.json found. Nothing
+    to do." and exited 0 for a file that DOES exist, just corrupt. That is
+    the exit-0-while-doing-nothing shape this project exists to eliminate,
+    and it directly contradicted persist-proposal.py's policy for the exact
+    same file: persist-proposal.py refuses (exit 2) rather than silently
+    treating a corrupt .usage.json as empty, because silently discarding it
+    would itself be a quiet destructive action. This makes the two agree:
+    skill-lifecycle.py now refuses too, instead of proceeding as if nothing
+    were there.
+    """
+
+
 def load_usage() -> dict:
-    """Load .usage.json, returning empty dict if missing or corrupt."""
+    """Load .usage.json. Empty dict if missing; raises if present but corrupt."""
     if not USAGE_FILE.exists():
         return {}
     try:
         with open(USAGE_FILE, "r") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return {}
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        raise UsageCorruptError(f"{USAGE_FILE} exists but is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise UsageCorruptError(f"{USAGE_FILE} does not contain a JSON object")
+    return data
 
 
 def save_usage(data: dict) -> None:
@@ -98,24 +121,13 @@ def save_usage(data: dict) -> None:
     tmp.rename(USAGE_FILE)
 
 
-def iso_to_epoch(iso_str: str) -> int | None:
-    """Parse an ISO 8601 timestamp to Unix epoch seconds."""
-    if not iso_str:
-        return None
-    try:
-        dt = datetime.fromisoformat(iso_str)
-        return int(dt.timestamp())
-    except (ValueError, TypeError):
-        return None
-
-
 def compute_activity_anchor(record: dict) -> int | None:
     """Find the most recent activity timestamp across all activity fields."""
     anchor: int | None = None
     for field in ("last_used_at", "last_viewed_at", "last_patched_at"):
         val = record.get(field)
         if val:
-            epoch = iso_to_epoch(val)
+            epoch = parse_iso(val)
             if epoch is not None and (anchor is None or epoch > anchor):
                 anchor = epoch
 
@@ -123,7 +135,7 @@ def compute_activity_anchor(record: dict) -> int | None:
         # Fall back to created_at
         created = record.get("created_at")
         if created:
-            anchor = iso_to_epoch(created)
+            anchor = parse_iso(created)
 
     return anchor
 
@@ -240,7 +252,13 @@ def main() -> int:
         print(__doc__.strip())
         return 0
 
-    output = run_lifecycle(dry_run=dry_run)
+    try:
+        output = run_lifecycle(dry_run=dry_run)
+    except UsageCorruptError as exc:
+        # Matches persist-proposal.py's policy for the same file: refuse
+        # rather than silently treat corrupt-but-present as absent-and-empty.
+        print(f"skill-lifecycle: refusing to proceed: {exc}", file=sys.stderr)
+        return 2
     print(output)
     return 0
 

@@ -26,7 +26,9 @@ done
 # because SL_CONFIG_FILE (needed before we can even source the config file)
 # must come from the same resolver as everything else — it may not default
 # into ~/.claude any more than SL_HOME may.
-_sl_paths_py="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/paths.py"
+_sl_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_sl_paths_py="${_sl_lib_dir}/paths.py"
+_sl_isotime_py="${_sl_lib_dir}/isotime.py"
 _sl_pp_home="" _sl_pp_state="" _sl_pp_skills="" _sl_pp_memory="" _sl_pp_logs=""
 _sl_pp_sessions_db="" _sl_pp_config_file="" _sl_pp_scripts=""
 if [[ -f "$_sl_paths_py" ]]; then
@@ -205,15 +207,22 @@ sl_check_hook_fresh() {
 # macOS, only for timestamps some code path had bothered to write with an
 # explicit offset instead of always normalizing to Z.
 #
-# The python3 fallback now does a real ISO-8601 parse via
-# datetime.fromisoformat, which is stdlib-only (no new dependency) and
-# correctly preserves the sign of a negative offset (deferred minor 7: a
-# prior strptime-based approach could not represent an offset at all, and a
-# naive hand-rolled parser is exactly the kind of code that silently flips
-# "-05:00" to "+05:00"; fromisoformat parses the sign itself, so there is no
-# such step to get wrong). Python 3.9 (this project's oldest supported CI
-# target) does not accept a trailing "Z" in fromisoformat, so it is swapped
-# for the equivalent "+00:00" first.
+# The python3 fallback now shells out to lib/isotime.py's `parse` subcommand
+# (fix round D, blocker (a)) rather than embedding its own inline `python3
+# -c '...'` copy of the same parser. skill-lifecycle.py used to carry an
+# independent third copy of exactly this logic, missing both the "Z" swap
+# (Python 3.9's fromisoformat rejects a trailing "Z" outright, so every
+# shell-producer timestamp -- always written with "Z" -- silently failed to
+# parse under 3.9) and the naive-datetime-as-UTC guard (a tz-naive timestamp
+# would otherwise be interpreted in the interpreter's local time, silently
+# shifting the result). lib/isotime.py is now the single place either fix
+# may live; a second inline copy here would be exactly how that defect
+# happened the first time. isotime.py's parse_iso() correctly preserves the
+# sign of a negative offset (deferred minor 7: a prior strptime-based
+# approach could not represent an offset at all, and a naive hand-rolled
+# parser is exactly the kind of code that silently flips "-05:00" to
+# "+05:00"; fromisoformat parses the sign itself, so there is no such step
+# to get wrong).
 sl_iso_to_epoch() {
     local ts="$1" epoch
     if [[ -z "$ts" ]]; then
@@ -222,18 +231,6 @@ sl_iso_to_epoch() {
     fi
     epoch=$(date -u -d "$ts" +%s 2>/dev/null) && [[ -n "$epoch" ]] && { echo "$epoch"; return 0; }
     epoch=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$ts" +%s 2>/dev/null) && [[ -n "$epoch" ]] && { echo "$epoch"; return 0; }
-    epoch=$(python3 -c '
-import datetime, sys
-ts = sys.argv[1]
-if ts.endswith("Z"):
-    ts = ts[:-1] + "+00:00"
-try:
-    dt = datetime.datetime.fromisoformat(ts)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=datetime.timezone.utc)
-    print(int(dt.timestamp()))
-except Exception:
-    print(0)
-' "$ts" 2>/dev/null) && [[ -n "$epoch" ]] && { echo "$epoch"; return 0; }
+    epoch=$(python3 "$_sl_isotime_py" parse "$ts" 2>/dev/null) && [[ -n "$epoch" ]] && { echo "$epoch"; return 0; }
     echo 0
 }

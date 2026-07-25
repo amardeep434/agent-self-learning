@@ -19,10 +19,11 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR / "lib"))
+from isotime import now_iso  # noqa: E402  (fix round D: shared with skill-lifecycle.py, persist-proposal.py, index-session.py)
 
 
 def _paths_defaults():
@@ -131,7 +132,7 @@ def main():
             }
 
     payload = {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": now_iso(),
         "signals": sorted(merged.values(), key=lambda s: s["id"]),
     }
 

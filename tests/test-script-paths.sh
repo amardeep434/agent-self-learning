@@ -194,7 +194,8 @@ check "curator output never mentions ~/.claude" "0" \
 IDX_SCRIPTS="$(mktemp -d)"
 mkdir -p "${IDX_SCRIPTS}/lib"
 cp "${SCRIPT_DIR}/scripts/index-session.sh" "${SCRIPT_DIR}/scripts/index-session.py" "$IDX_SCRIPTS/"
-cp "${SCRIPT_DIR}/scripts/lib/config.sh" "${SCRIPT_DIR}/scripts/lib/paths.py" "${IDX_SCRIPTS}/lib/"
+cp "${SCRIPT_DIR}/scripts/lib/config.sh" "${SCRIPT_DIR}/scripts/lib/paths.py" \
+   "${SCRIPT_DIR}/scripts/lib/isotime.py" "${IDX_SCRIPTS}/lib/"
 cp "${SCRIPT_DIR}/schema/session-search-schema.sql" "$IDX_SCRIPTS/"
 chmod +x "${IDX_SCRIPTS}/index-session.sh"
 
@@ -260,16 +261,24 @@ check "self-learning-health.sh's lone \${HOME}/.claude reference is the SETTINGS
 ## fails this test, forcing a conscious decision instead of a silent
 ## reintroduction.
 ##
-## Two separate, precise (not merely substring) patterns, one per language,
-## chosen so ordinary prose in comments/docstrings that merely DISCUSSES
-## ~/.claude (there is a lot of it, by design -- this whole file's premise
-## is documenting why code must not go there) does not itself count as a
-## "hit":
-##   bash:   ${HOME}/.claude   -- the actual variable-expansion syntax code
-##           would use to build a path; comments describing the rule use
-##           the tilde form ("~/.claude"), which this pattern does not match.
-##   python: ".claude"          -- a quoted path-segment string literal, as
-##           real code constructing a Path/os.path.join argument would use.
+## Two patterns, one per language. Fix round D, blocker (c): the ORIGINAL
+## patterns here (bash: literal `${HOME}/.claude`; python: literal `".claude"`
+## in double quotes) were mutation-tested against six representative
+## real-world-shaped injections and MISSED THREE of them, including one that
+## is VERBATIM the pre-fix C2 line (`os.path.expanduser("~/.claude/...")`,
+## `git show f11a870:scripts/skill-lifecycle.py` line 37) -- a guard that
+## would not have caught the bug it exists for is not a guard. Widened to:
+##   python: \.claude           -- ANY literal ".claude" path segment,
+##           single- or double-quoted, bare or inside expanduser/join/etc.
+##           Prose false positives (there is a lot of it, by design -- this
+##           whole file's premise is documenting why code must not go there)
+##           are handled the same way a real legitimate hit is: named and
+##           justified in PY_CLAUDE_EXEMPTIONS below, not filtered out by a
+##           narrower regex that can also filter out a real bug.
+##   bash:   \$\{?HOME\}?/\.claude   (braced OR unbraced $HOME/.claude) PLUS
+##           a bare ~/.claude on any line that is not ENTIRELY a comment
+##           (so `# see ~/.claude for details` is not flagged, but
+##           `BAD=~/.claude/x` -- real code, no leading #      -- is).
 ##
 ## No associative arrays or namerefs (bash 3.2 on stock macOS lacks both) --
 ## "path|reason" pairs in plain indexed arrays, same convention as
@@ -278,11 +287,15 @@ check "self-learning-health.sh's lone \${HOME}/.claude reference is the SETTINGS
 
 BASH_CLAUDE_EXEMPTIONS=(
     "scripts/index-session.sh|SESSIONS_DIR: Claude Code's own transcript source (~/.claude/projects), read-only, never the framework's own store"
-    "scripts/self-learning-health.sh|SETTINGS_FILE: Claude Code's own hook-registration file (~/.claude/settings.json), read-only diagnostic input"
-    "scripts/doctor.sh|CLAUDE_SETTINGS: same as self-learning-health.sh's SETTINGS_FILE -- Claude Code's own hook-registration file, read-only, gated behind 'command -v claude'"
+    "scripts/self-learning-health.sh|SETTINGS_FILE: Claude Code's own hook-registration file (~/.claude/settings.json), read-only diagnostic input; remaining hits are prose (warning/help text) describing that same legitimate reference, not additional store paths"
+    "scripts/doctor.sh|CLAUDE_SETTINGS: same as self-learning-health.sh's SETTINGS_FILE -- Claude Code's own hook-registration file, read-only, gated behind 'command -v claude'; remaining hits are prose (the file's own no-~/.claude rule statement, legacy-store detection messages) describing that rule and the read-only legacy_home() detection below, not additional store paths"
+    "scripts/lib/config.sh|prose only (two comments stating the vendor-neutral-defaults rule itself: 'may not point inside ~/.claude', 'never reintroducing ~/.claude'); no code path in this file constructs a ~/.claude path"
 )
 PY_CLAUDE_EXEMPTIONS=(
-    "scripts/lib/paths.py|legacy_home(): DETECT ONLY the pre-neutral ~/.claude store so doctor.sh can tell the user it exists and how to migrate; never read from or written to as the framework's own store"
+    "scripts/lib/paths.py|legacy_home(): DETECT ONLY the pre-neutral ~/.claude store so doctor.sh can tell the user it exists and how to migrate; never read from or written to as the framework's own store. Remaining hits are prose (module/function docstrings stating the same never-default-into-~/.claude rule)"
+    "scripts/coach-signals.py|prose only (a docstring describing a fallback that must NOT default into ~/.claude); no code path in this file constructs a ~/.claude path"
+    "scripts/inject-agents-md.py|prose only (comments describing why this file must not hardcode ~/.claude and does not have one); no code path in this file constructs a ~/.claude path"
+    "scripts/skill-lifecycle.py|prose only (docstring for _default_skills_dir describing the pre-fix C2 bug this function replaced, entirely in the past tense); the function itself resolves via SL_SKILLS_DIR/CLAUDE_LEARNED_SKILLS_DIR/paths.py, never a literal ~/.claude"
 )
 
 bash_claude_exempt_reason() {
@@ -306,26 +319,32 @@ py_claude_exempt_reason() {
 
 for f in $(find "${SCRIPT_DIR}/scripts" -name '*.sh' | sort); do
     rel="scripts/$(printf '%s' "$f" | sed "s|^${SCRIPT_DIR}/scripts/||")"
-    count="$(grep -c '\${HOME}/\.claude' "$f" || true)"
+    home_count="$(grep -cE '\$\{?HOME\}?/\.claude' "$f" || true)"
+    # Bare-tilde form used as a real path expression somewhere in this
+    # file's CODE, not merely in a comment. Excludes only lines that are
+    # ENTIRELY a comment (first non-whitespace char is '#'); a bare-tilde
+    # hit on a real code line is a hit regardless of any trailing comment.
+    tilde_count="$(grep -vE '^[[:space:]]*#' "$f" | grep -cE '~/\.claude' || true)"
+    count=$((home_count + tilde_count))
     if [[ "$count" -eq 0 ]]; then
-        echo "PASS: $rel has no \${HOME}/.claude reference"
+        echo "PASS: $rel has no \${HOME}/.claude or bare ~/.claude code reference"
     elif reason="$(bash_claude_exempt_reason "$rel")"; then
-        echo "PASS: $rel has a \${HOME}/.claude reference, exempted ($reason)"
+        echo "PASS: $rel has a \${HOME}/.claude or ~/.claude reference, exempted ($reason)"
     else
-        echo "FAIL: $rel has an un-exempted \${HOME}/.claude reference -- add it to BASH_CLAUDE_EXEMPTIONS in this test with a reason, or fix it"
+        echo "FAIL: $rel has an un-exempted \${HOME}/.claude or ~/.claude reference -- add it to BASH_CLAUDE_EXEMPTIONS in this test with a reason, or fix it"
         FAILURES=$((FAILURES+1))
     fi
 done
 
 for f in $(find "${SCRIPT_DIR}/scripts" -name '*.py' -not -path '*/__pycache__/*' | sort); do
     rel="scripts/$(printf '%s' "$f" | sed "s|^${SCRIPT_DIR}/scripts/||")"
-    count="$(grep -c '"\.claude"' "$f" || true)"
+    count="$(grep -c '\.claude' "$f" || true)"
     if [[ "$count" -eq 0 ]]; then
-        echo "PASS: $rel has no quoted \".claude\" path-segment literal"
+        echo "PASS: $rel has no \".claude\" reference"
     elif reason="$(py_claude_exempt_reason "$rel")"; then
-        echo "PASS: $rel has a quoted \".claude\" literal, exempted ($reason)"
+        echo "PASS: $rel has a \".claude\" reference, exempted ($reason)"
     else
-        echo "FAIL: $rel has an un-exempted quoted \".claude\" literal -- add it to PY_CLAUDE_EXEMPTIONS in this test with a reason, or fix it"
+        echo "FAIL: $rel has an un-exempted \".claude\" reference -- add it to PY_CLAUDE_EXEMPTIONS in this test with a reason, or fix it"
         FAILURES=$((FAILURES+1))
     fi
 done

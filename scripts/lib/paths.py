@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path, PurePath
+from pathlib import Path, PurePath, PureWindowsPath
 
 APP_DIR_NAME = "agent-learning"
 
@@ -93,7 +93,24 @@ def legacy_home(env: dict | None = None) -> Path | None:
     return None
 
 
-def _to_cli_string(p: PurePath) -> str:
+def _to_msys_path(p: PureWindowsPath) -> str:
+    """Render a WindowsPath in MSYS/cygdrive form: 'C:/Users/x' -> '/c/Users/x'.
+
+    Pure Python, derived from `.drive` and `.parts` -- deliberately NOT a
+    `cygpath` subprocess call (see `_to_cli_string`'s docstring for why).
+    Falls back to plain `.as_posix()` for a driveless path or a UNC share
+    (e.g. '\\\\server\\share\\x'), neither of which has a single-drive-letter
+    cygdrive-form equivalent to convert to.
+    """
+    drive = p.drive
+    if len(drive) == 2 and drive[1] == ":":
+        letter = drive[0].lower()
+        rest = "/".join(p.parts[1:])
+        return f"/{letter}/{rest}" if rest else f"/{letter}"
+    return p.as_posix()
+
+
+def _to_cli_string(p: PurePath, *, is_windows: bool | None = None, msystem: str | None = None) -> str:
     """Render a path for the CLI (i.e. for bash consumers) as forward-slash text.
 
     The Python API (resolve_home/resolve_all) keeps returning real Path
@@ -104,19 +121,52 @@ def _to_cli_string(p: PurePath) -> str:
     (config.sh, install.sh, uninstall.sh) then treats those backslashes as
     escape characters, corrupting the path -- this was C1, proven by CI:
     `paths.py all` on windows-latest produced literal backslashes that broke
-    every downstream `[[ -f ]]`/`mkdir -p`/string comparison.
+    every downstream `[[ -f ]]`/`mkdir -p`/string comparison. C1's fix
+    (.as_posix(), unconditionally) is necessary but was not sufficient --
+    see below.
 
-    .as_posix() turns 'C:\\Users\\x' into 'C:/Users/x'. That is NOT the
-    cygdrive form Git Bash's own tools print ('/c/Users/x'), but MSYS/Git
-    Bash and native Windows tools both accept 'C:/Users/x' directly without
-    a cygpath translation step -- forward slashes are simply not special to
-    Win32 path parsing. .as_posix() alone is therefore sufficient here; a
-    cygpath round-trip is unnecessary complexity this module (which must
-    stay usable from both real Windows Python and any MSYS Python) should
-    not add. This is verified in tests/test-paths.py using a PureWindowsPath
-    so the assertion runs identically on every OS, since a real WindowsPath
-    cannot be constructed on Linux.
+    Fix round D, blocker (b): round A's diagnosis of the SUBSEQUENT Windows
+    CI failure was wrong. The actual failure was not an escaping bug at all:
+        FAIL: AGENT_LEARNING_HOME drives SL_MEMORY_DIR
+          (expected '/tmp/al/memory', got 'C:/Users/RUNNER~1/AppData/Local/Temp/al/memory')
+    MSYS2 (Git Bash) auto-converts POSIX-looking env values into Win32 form
+    BEFORE native python.exe ever sees them: `AGENT_LEARNING_HOME=/tmp/al`
+    arrives inside Python already as `C:\\Users\\...\\Temp\\al`.
+    `.as_posix()` then faithfully echoes that Win32-flavoured path back out
+    -- correct behavior for .as_posix() itself, but a round-trip FLAVOUR
+    mismatch against what bash originally passed in, not a fixable
+    escaping/quoting bug.
+
+    The fix is conditional: only inside an actual MSYS2/Git-Bash shell (the
+    one environment that performed that conversion, and the one whose own
+    tools expect cygdrive-form paths back) do we emit '/c/Users/...' MSYS
+    form. Detected via `os.name == "nt"` (this is a real Windows Python,
+    native or MSYS-launched) AND `MSYSTEM` being set in the environment --
+    Git Bash / MSYS2 always sets MSYSTEM (e.g. "MINGW64"); native cmd.exe
+    and PowerShell never do. Outside that combination (native Windows
+    Python invoked from cmd/PowerShell, or any POSIX platform) the plain
+    `.as_posix()` form from C1 is kept unchanged -- native Windows tools and
+    MSYS/Git Bash tools both accept 'C:/Users/x' directly, without a cygpath
+    translation step, so nothing regresses for that caller.
+
+    Deliberately NOT implemented via a `cygpath` subprocess call: that would
+    add a PATH dependency and a subprocess spawn to the hot hook path for
+    every single resolved path. `_to_msys_path` derives the same result in
+    pure Python from `PureWindowsPath.drive` + `.parts`.
+
+    Both branches are unit-tested in tests/test-paths.py using
+    PureWindowsPath (with `is_windows=`/`msystem=` passed explicitly) so
+    both run identically on Linux, macOS, and Windows -- a real WindowsPath
+    cannot be constructed on a non-Windows OS, but PureWindowsPath can be,
+    on any OS, and the optional keyword args let a test force either branch
+    without needing to monkeypatch os.name/os.environ globally.
     """
+    if is_windows is None:
+        is_windows = os.name == "nt"
+    if msystem is None:
+        msystem = os.environ.get("MSYSTEM")
+    if is_windows and msystem:
+        return _to_msys_path(PureWindowsPath(str(p)))
     return p.as_posix()
 
 

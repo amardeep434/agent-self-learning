@@ -10,7 +10,7 @@ Adapted from Hermes Agent's `_AUTHORING_STANDARDS` (96 lines of strict rules).
 
 | Rule | Constraint | Example (Good) | Example (Bad) |
 |------|-----------|----------------|---------------|
-| Format | `^[a-z0-9][a-z0-9._-]*$` | `kotlin-testing-patterns` | `Kotlin Testing` |
+| Format | `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$` (matches `scripts/lib/proposal_schema.py`'s `SKILL_NAME_RE`; no dots — a prior version of this table used a dot-inclusive pattern that contradicted the enforced schema) | `kotlin-testing-patterns` | `Kotlin Testing` |
 | Length | Max 64 characters | `android-compose-navigation` | `how-to-set-up-jetpack-compose-navigation-with-material-3-bottom-bar-in-android-15` |
 | Class-level | Name must describe a class of tasks, not a specific task | `gradle-build-debugging` | `fix-pr-1234-build-failure` |
 | No session artifacts | Must make sense outside the current session | `error-handling-patterns` | `debug-login-today` |

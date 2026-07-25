@@ -110,5 +110,23 @@ check "no env vars: paths.py fallback processed the resolved store" "yes" \
 check "no env vars: legacy ~/.claude/learned-skills left untouched (no destructive wrong-dir write)" "yes" \
     "$([[ -d "${FALLBACK_HOME}/.claude/learned-skills/old-skill" && ! -d "${FALLBACK_HOME}/.claude/learned-skills/.archive/old-skill" ]] && echo yes || echo no)"
 
+# --- 5) Corrupt .usage.json: must refuse (non-zero exit), never silently
+#        report "No .usage.json found. Nothing to do." for a file that
+#        DOES exist -- that message is only true when the file is absent.
+#        This is the "also in scope" fix: skill-lifecycle.py's policy for a
+#        present-but-corrupt .usage.json must agree with
+#        persist-proposal.py's (refuse, don't silently treat as empty). ---
+CORRUPT_STORE="${TMP}/corrupt-store"
+mkdir -p "$CORRUPT_STORE"
+echo '{not valid json' > "${CORRUPT_STORE}/.usage.json"
+
+CORRUPT_STATUS=0
+CORRUPT_OUT=$(env -i HOME="${TMP}/no-claude-home4" PATH="$PATH" SL_SKILLS_DIR="$CORRUPT_STORE" \
+    python3 "${SCRIPT_DIR}/scripts/skill-lifecycle.py" 2>&1) || CORRUPT_STATUS=$?
+check "corrupt .usage.json: exits non-zero (refuses, does not silently no-op)" "yes" \
+    "$([[ "$CORRUPT_STATUS" -ne 0 ]] && echo yes || echo no)"
+check "corrupt .usage.json: does NOT report 'Nothing to do' for a file that exists" "no" \
+    "$(printf '%s' "$CORRUPT_OUT" | grep -qi 'nothing to do' && echo yes || echo no)"
+
 if [[ "$FAILURES" -gt 0 ]]; then exit 1; fi
 echo "All skill-lifecycle tests passed."
