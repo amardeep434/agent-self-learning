@@ -57,9 +57,12 @@ check "no reference to nonexistent rolling-transcript.sh" "0" "$ROLLING"
 # 5) Reviewer output is persisted by the writer, not by the agent.
 TMP_HOME="$(mktemp -d)"
 FAKE_BIN="$(mktemp -d)"
+ARGV_LOG="${TMP_HOME}/claude-argv.log"
 cat > "${FAKE_BIN}/claude" <<'FAKE'
 #!/usr/bin/env bash
-# Ignore all arguments; emit a valid proposal on stdout and write nothing.
+# Record our own argv so the test can assert the turn cap was passed, then
+# ignore all arguments; emit a valid proposal on stdout and write nothing.
+echo "$*" >> "${FAKE_CLAUDE_ARGV_LOG}"
 cat <<'JSON'
 ```json
 {"version": 1, "memory": [{"file": "MEMORY.md", "mode": "replace", "content": "persisted-by-writer"}]}
@@ -77,12 +80,21 @@ echo '{"session_id":"s5","total_turns_this_session":9,"memory_turns":0,"skill_it
 env -i HOME="$TMP_HOME" PATH="${FAKE_BIN}:${PATH}" \
     AGENT_LEARNING_HOME="${TMP_HOME}/store" \
     SL_CONFIG_FILE="/nonexistent/x.conf" \
+    FAKE_CLAUDE_ARGV_LOG="${ARGV_LOG}" \
     bash "${SCRIPT_DIR}/scripts/session-review.sh" </dev/null >/dev/null 2>&1 || true
 
 for _ in $(seq 1 50); do
     [[ -f "${TMP_HOME}/store/memory/MEMORY.md" ]] && break
     sleep 0.2
 done
+
+# Turn cap must reach the backgrounded reviewer: an unbounded background
+# model loop is exactly the cost regression this framework exists to avoid.
+# Default SL_REVIEW_MAX_TURNS (no config file, no env override here) is 16.
+check "spawn passes turn cap" "yes" \
+    "$(grep -q -- '--max-turns 16' "${ARGV_LOG}" 2>/dev/null && echo yes || echo no)"
+check "spawn passes plain-text output format" "yes" \
+    "$(grep -q -- '--output-format text' "${ARGV_LOG}" 2>/dev/null && echo yes || echo no)"
 
 if [[ -f "${TMP_HOME}/store/memory/MEMORY.md" ]]; then
     check "reviewer proposal persisted" "persisted-by-writer" "$(cat "${TMP_HOME}/store/memory/MEMORY.md")"

@@ -139,9 +139,17 @@ fi
 
 if command -v claude &>/dev/null; then
     mkdir -p "${SL_LOG_DIR}"
+    # --max-turns bounds the background reviewer's own tool-call loop (this
+    # framework exists for cost efficiency; an unbounded background model
+    # loop would be exactly the wrong thing to ship). --output-format text
+    # is required, not cosmetic: it makes the reviewer emit its plain final
+    # message (the fenced json block persist-proposal.py's extract_proposal
+    # scans for) rather than a JSON envelope wrapping the response, which
+    # would nest the proposal inside another JSON structure and break
+    # extraction. Both are passed positionally, same as everything else here.
     SL_REVIEW_ACTIVE=1 nohup bash -c '
         set -o pipefail
-        "$1" -p "$2" 2>>"$3/review-stderr.log" \
+        "$1" -p "$2" --max-turns "$5" --output-format text 2>>"$3/review-stderr.log" \
             | python3 "$4" >>"$3/persist.log" 2>&1
         status=$?
         if [[ $status -ne 0 ]]; then
@@ -149,6 +157,7 @@ if command -v claude &>/dev/null; then
                 "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$status" >>"$3/persist-failures.log"
         fi
     ' _ claude "$REVIEW_PROMPT" "$SL_LOG_DIR" "${SCRIPT_DIR}/persist-proposal.py" \
+        "${SL_REVIEW_MAX_TURNS}" \
         >/dev/null 2>&1 &
     disown 2>/dev/null || true
 fi
