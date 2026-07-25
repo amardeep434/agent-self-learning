@@ -1,6 +1,6 @@
 # Claude Self-Learning
 
-A self-learning system for Claude Code, adapted from NousResearch's Hermes Agent architecture. Claude Code sessions learn from every interaction, accumulating reusable skills, refined memories, and searchable session history -- without requiring the user to manually curate any of it. The system runs entirely in the background via hooks and subagents, writing to disk-backed stores that persist across sessions and are loaded as frozen snapshots at session start.
+A cross-harness self-learning system, adapted from NousResearch's Hermes Agent architecture. It serves Claude Code, GitHub Copilot CLI, and (planned) VS Code Copilot Chat as peers -- Claude Code is one adapter among them, and no shared code path (storage, review pipeline, skill/memory schema) may depend on it. Sessions learn from every interaction, accumulating reusable skills, refined memories, and searchable session history -- without requiring the user to manually curate any of it. The system runs entirely in the background via hooks and subagents, writing to a shared, vendor-neutral disk-backed store (see "Storage locations" below) that persists across sessions and is loaded as a frozen snapshot at session start.
 
 ## Architecture
 
@@ -24,11 +24,11 @@ SESSION START
          | every N turns (default 10)
          v
 +--------+----------+
-| Background Review |     Subagent (Agent tool)
-| - Memory review   |---> writes MEMORY.md, USER.md
-| - Skill review    |---> writes learned-skills/
-| - Combined review |     (max 16 tool uses)
-+--------+----------+
+| Background Review |     Detached headless reviewer (Claude Code subagent
+| - Memory review   |---> or Copilot CLI, per harness) proposes a single JSON
+| - Skill review    |     object on stdout; scripts/persist-proposal.py
+| - Combined review |     validates it and performs every write, confined
++--------+----------+     to the resolved store (max 16 tool uses)
          |
          v
 +--------+----------+
@@ -79,6 +79,71 @@ Then register the Claude Code hooks by merging `config/settings-hooks.json` into
 hook is installed automatically to `~/.copilot/hooks/self-learning.json` when
 `~/.copilot` exists.
 
+## Storage locations
+
+All framework state (memory, learned skills, session index, logs, installed
+scripts) lives under one vendor-neutral store, resolved by
+`scripts/lib/paths.py` and shared by every bash script via `scripts/lib/config.sh`.
+No default points inside `~/.claude` — that was the previous default, and it
+is exactly what broke Copilot CLI persistence (Copilot's path allow-list
+refuses writes outside its own namespace). Resolution order, first hit wins:
+
+1. `$AGENT_LEARNING_HOME` — explicit override, mainly for testing/debugging
+2. `$XDG_DATA_HOME/agent-learning`
+3. Windows only: `%LOCALAPPDATA%\agent-learning`
+4. `~/.local/share/agent-learning` (Linux and macOS default)
+
+Run `scripts/lib/paths.py all` to print every resolved path, or `paths.py get <key>`
+for one. The keys are: `home`, `state`, `skills` (`learned-skills/`), `memory`,
+`logs`, `sessions_db` (`sessions/search.db`), `config_file`
+(`self-learning.conf`), and `scripts` (installed copies of everything under
+`scripts/`).
+
+Harness-owned config files are a deliberate exception and stay where each
+harness owns them: Claude Code's `~/.claude/settings.json` and Copilot CLI's
+`~/.copilot/hooks/self-learning.json` are not moved into the store — only the
+script paths those configs invoke are resolved through the neutral store.
+
+### Migrating from an existing `~/.claude` install
+
+Nothing is moved automatically, on install or otherwise. If you have an older
+install that wrote memory/skills under `~/.claude`, run `bash scripts/doctor.sh`:
+it detects a populated `~/.claude/memory` or `~/.claude/learned-skills` and
+reports it under "legacy store" without touching it. To migrate deliberately,
+copy the data yourself into the path doctor reports as the new store's `home`,
+e.g.:
+
+```bash
+cp -r ~/.claude/memory ~/.claude/learned-skills "$(python3 scripts/lib/paths.py get home)/"
+```
+
+### `CLAUDE_REVIEW_ENABLED` is deprecated
+
+Use `SL_REVIEW_ENABLED` instead. The old name is still honored for one
+release for upgrade safety — if `SL_REVIEW_ENABLED` is unset and
+`CLAUDE_REVIEW_ENABLED` is set, its value is used and a deprecation warning is
+printed to stderr — but it will be removed. `SL_REVIEW_ENABLED` defaults to `true`.
+
+## Diagnostics: `scripts/doctor.sh`
+
+Run `bash scripts/doctor.sh` any time to see: every resolved path and which
+override in the resolution chain produced it; whether each is actually
+writable (a real create+remove temp-file test, not a permission-bit guess);
+which harnesses (`claude`, `copilot`, `code`) are detected on this machine and
+whether their hook configs point at the current resolved scripts directory
+(`fresh`) or a stale one left over from a previous install layout (`stale`);
+whether a legacy `~/.claude` store exists (detected, never touched); and,
+most importantly, the contents of `${SL_LOG_DIR}/persist-failures.log`.
+
+**That log deserves special attention.** The background review pipeline runs
+fully detached (`nohup ... &`) so the calling hook can return immediately;
+this means a review that fails — bad model output, a validation rejection in
+`persist-proposal.py`, a write outside the store — can **never surface as a
+non-zero hook exit code**. `doctor.sh` reading `persist-failures.log` is the
+only mechanism that replaces that missing signal. If you want to know whether
+background learning is actually persisting anything, run `doctor.sh`; do not
+infer health from "the hook didn't error."
+
 ## Uninstall (single command)
 
 ```bash
@@ -103,21 +168,28 @@ and removes `~/.copilot/hooks/self-learning.json`.
 
 ## Agent compatibility
 
+Only rows backed by a suite in `tests/run-all.sh` are marked supported. VS
+Code Copilot Chat has no adapter or hooks in this release (tracked as a
+follow-up plan) and no row below claims otherwise.
+
 | Capability | Claude Code | GitHub Copilot CLI | Notes |
 |------------|-------------|--------------------|-------|
-| Learned memory + skills stores | ✅ | ✅ | shared files, agent-agnostic |
-| AGENTS.md learned-context injection | ✅ | ✅ | Copilot also reads CLAUDE.md |
-| Session-end background review | ✅ Stop hook | ✅ sessionEnd hook | both spawn a headless reviewer |
-| Mid-session turn counting | ✅ PostToolUse hook | ❌ not wired | deliberate: session-end loop is the portable core |
-| Session search indexing | ✅ (Claude JSONL) | ❌ planned | Copilot session-state parser is a follow-up plan |
-| Coach signals (Routes A/B) | ✅ | ✅ | consumed by both reviewers |
-| Windows | ✅ via Git Bash/WSL | ✅ via Git Bash/WSL | Copilot hooks additionally need PowerShell 7+ |
+| Learned memory + skills stores | ✅ | ✅ | shared files, agent-agnostic; covered by `test-persist-proposal.py`, `test-proposal-schema.py` |
+| AGENTS.md learned-context injection | ✅ | ✅ | Copilot also reads CLAUDE.md; covered by `test-inject-agents-md.sh` |
+| Session-end background review | ✅ Stop hook | ✅ sessionEnd hook | both spawn a headless reviewer; covered by `test-session-review.sh` (Claude) and `test-copilot-session-review.sh` (Copilot) |
+| Mid-session turn counting | ✅ PostToolUse hook | ❌ not wired | deliberate: session-end loop is the portable core; covered by `test-turn-counter.sh` |
+| Copilot path independent of Claude Code | — | ✅ | `test-claude-absent.sh` runs the full Copilot review path with no `claude` binary or `~/.claude` present |
+| Session search indexing | ✅ (Claude JSONL) | ❌ planned | Copilot session-state parser is a follow-up plan; not yet exercised by run-all.sh beyond schema tests |
+| Coach signals (Routes A/B) | ✅ | ✅ | consumed by both reviewers; covered by `test-coach-signals.py`, `test-coach-rules-eval.py` |
+| Windows | reasoned-about, not observed | reasoned-about, not observed | CI declares an `ubuntu-latest, macos-latest, windows-latest` × Python `3.9, 3.13` matrix (`.github/workflows/ci.yml`), but no CI run has ever executed on this branch — treat multi-OS behaviour as unverified until a run is green |
+| Copilot CLI live end-to-end (real session, real file on disk) | n/a | ⏳ pending manual verification | the specific failure this project's harness-neutral persistence work exists to fix; not yet confirmed with a live session |
 
 ## AI Engineering Coach integration (optional)
 
 Two independent, off-by-default integrations with
 [microsoft/AI-Engineering-Coach](https://github.com/microsoft/AI-Engineering-Coach).
-Enable either or both in `~/.claude/self-learning.conf`:
+Enable either or both in the resolved store's `self-learning.conf` (see
+"Storage locations" and "Configuration reference" above):
 
 | Flag | Route | What it does | Requires |
 |------|-------|--------------|----------|
@@ -134,13 +206,18 @@ rules are skipped and logged, never guessed at. Re-vendor rules with
 
 ## Roadmap
 
-| Phase | Name | Timeframe | Status |
-|-------|------|-----------|--------|
-| 1 | Foundation (turn counter, hooks, signal mechanism) | Week 1-2 | Planned |
-| 2 | Background Review (review prompts, memory/skill writes) | Week 3-4 | Planned |
-| 3 | Skill Lifecycle (telemetry, state machine, authoring standards) | Week 5-6 | Planned |
-| 4 | Curator + Session Search (consolidation, FTS5 index) | Week 7-8 | Planned |
-| 5 | Integration + Polish (config, caching, install, health check) | Week 9-10 | Planned |
+| Phase | Name | Status |
+|-------|------|--------|
+| 1 | Foundation (turn counter, hooks, signal mechanism) | Done |
+| 2 | Background Review (review prompts, memory/skill writes) | Done — reviewer proposes JSON on stdout, `scripts/persist-proposal.py` validates and writes, confined to the resolved store |
+| 3 | Skill Lifecycle (telemetry, state machine, authoring standards) | Done |
+| 4 | Curator + Session Search (consolidation, FTS5 index) | Done |
+| 5 | Integration + Polish (config, caching, install, health check) | Done for Claude Code + Copilot CLI; VS Code Copilot Chat adapter not started (tracked separately); no CI run has executed yet (see Agent compatibility) |
+
+See "Storage locations" above for the harness-neutral persistence work that
+followed the original 5-phase plan: a shared, vendor-neutral store plus a
+`doctor.sh` diagnostic, so Claude Code, Copilot CLI, and (eventually) VS Code
+Copilot Chat consume the same files as peers.
 
 ## Project Structure
 
@@ -158,8 +235,8 @@ claude-self-learning/
     authoring-standards.md      # Skill authoring standards reference
   schema/
     session-search-schema.sql   # SQLite FTS5 schema for session search
-  scripts/                      # (implementation scripts, future phases)
-  tests/                        # (test suite, future phases)
+  scripts/                      # Hook, review, curator, install/uninstall, and doctor scripts (bash + Python)
+  tests/                        # 18 test suites (13 shell, 5 Python) run by tests/run-all.sh
   docs/
     research/                   # 15 research documents (~789KB)
 ```
@@ -190,12 +267,16 @@ The `docs/research/` directory contains the full analysis of NousResearch's Herm
 
 ## Configuration reference
 
-All settings live in `~/.claude/self-learning.conf` (shell syntax, `VAR=value`).
-Environment variables with the same names override the file.
+All settings live in the resolved store's `config_file`
+(`self-learning.conf`, shell syntax, `VAR=value`) — see "Storage locations"
+above for how that path is resolved; it defaults to
+`~/.local/share/agent-learning/self-learning.conf` and is never `~/.claude`
+by default. Environment variables with the same names override the file.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `SL_HOME` | `~/.claude` | Root for all state |
+| `SL_HOME` | resolved store root (see "Storage locations") | Root for all state |
+| `SL_REVIEW_ENABLED` | `true` | Enable/disable the background review pipeline; supersedes deprecated `CLAUDE_REVIEW_ENABLED` |
 | `SL_COACH_RULES_ENABLED` | `false` | Coach Route A (rule evaluation) |
 | `SL_COACH_EXPORT_ENABLED` | `false` | Coach Route B (fork auto-export) |
 | `SL_COACH_EXPORT_PATH` | `~/.aiec/summary-latest.json` | Route B input file |
