@@ -166,3 +166,117 @@ Delete the workspace only after the final review is clean and merged.
 ## 11. Wider context (out of scope for this plan)
 
 This plan is the first shippable unit of a larger framework. **Not** in scope here, planned separately: session-source adapters (Copilot `session-store.db`, Claude JSONL) · VS Code hook spike and adapter · Copilot `postToolUse` turn counting · measurement (usage reader over `assistant_usage_events`, continuous holdout, CI-labelled reporting) · failure-triggered review · install UX, install manifest, manifest-driven uninstall · deep security audit · and all `graphify-offline` work (XML, BeanShell, offline structured PDF extraction) in the separate repo `amardeep434/graphify-offline` (branch `v8`).
+
+---
+
+# APPENDIX — operating detail for identical resumption
+
+Sections 1–11 give state. These give the *how*, so a resumed loop behaves the same rather than merely reaching the same files.
+
+## 12. Baseline suite inventory (regression detector)
+
+Measured at `1085b6a`. Any deviation on resume means something regressed before you touched it.
+
+```
+tests/test-config.sh                  PASS      tests/test-coach-rules-eval.py    4 cases PASS
+tests/test-copilot-hooks-json.sh      PASS      tests/test-coach-signals.py       7 cases PASS
+tests/test-copilot-session-review.sh  PASS      tests/test-paths.py              10 cases PASS
+tests/test-hook-input.sh              PASS      tests/test-persist-proposal.py   16 cases PASS
+tests/test-inject-agents-md.sh        PASS      tests/test-proposal-schema.py    53 cases PASS
+tests/test-session-review.sh          PASS (9 checks)
+tests/test-skillopt-run.sh            PASS
+tests/test-turn-counter.sh            PASS
+tests/test-uninstall.sh               PASS
+```
+9 shell suites, 5 Python suites, 90 Python cases. No runner exists yet — Task 8 adds `tests/run-all.sh`.
+
+## 13. Model selection actually used
+
+| Task | Implementer | Reviewer | Rationale |
+|---|---|---|---|
+| 1 paths | cheapest | mid | plan carried complete code = transcription |
+| 2 config | mid | mid | surgical edits to existing file, precedence semantics |
+| 3 schema | cheapest | **strongest** | complete code to transcribe, but security boundary to review |
+| 4 writer | mid | **strongest** | filesystem security, implementer needed judgement to deviate |
+| 5 Claude reviewer | mid | mid → cheapest for the small re-review | shell integration |
+| 6 Copilot reviewer | mid | mid (suggested) | shell integration, mirrors Task 5 |
+| 7 guard, 8 CI, 9 doctor, 10 docs | mid or cheapest | mid | lower risk; do not spend strongest here |
+| **final whole-branch review** | — | **strongest** | required by the skill |
+
+Always name the model explicitly in a dispatch; omitting it inherits the session model and silently defeats this.
+
+## 14. Dispatch templates (reproduce this structure)
+
+**Implementer** — sections in this order:
+1. One line: what the framework is and where this task fits.
+2. `WORKING DIRECTORY: <worktree>` + branch + "work only there, do NOT switch branches".
+3. `READ THIS FIRST — it is your requirements, with the exact values to use verbatim: <brief path>`
+4. "Follow the brief's TDD step order: write the failing test, run it and confirm it fails, implement, run and confirm it passes, commit."
+5. *Why this task exists* — the real-world failure it addresses. This measurably improved judgement.
+6. **For Tasks 3+ include verbatim:** "THE PLAN'S CODE IS A STARTING POINT, NOT GOSPEL. An adversarial review found eight real security bypasses in code from this same plan. Assume this task's plan code may have similar holes. You are explicitly authorised to strengthen a check beyond what the brief specifies — never to weaken one. If you deviate, say so clearly with your reasoning."
+7. Threat model, where relevant.
+8. `GLOBAL CONSTRAINTS` copied verbatim from the plan.
+9. `INTERFACES FROM EARLIER TASKS (committed; use, do not modify)` — exact signatures and guarantees. **Never paste prior-task narrative history.**
+10. `CONTEXT THE BRIEF CANNOT KNOW` — stale facts corrected, line-number drift warnings, which files already exist.
+11. Report-file path + contents contract.
+12. `RETURN TO ME (short): status (DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED), commit SHA, one-line test summary, concerns.`
+13. "If anything in the brief is ambiguous or appears wrong, ask me before implementing rather than guessing."
+
+**Reviewer** — sections in this order:
+1. "Produce two verdicts: spec compliance and task quality. Review the code, not the implementer's claims."
+2. Three paths: brief, report, review package.
+3. `GLOBAL CONSTRAINTS binding this task` verbatim.
+4. Threat model for security tasks.
+5. `VERIFY SPECIFICALLY` — a numbered list of concrete hypotheses, each demanding evidence. **State attacks as executable commands and say "EXECUTE — do not reason".** This is what caught the ReDoS and the newline bypass.
+6. **Mutation testing instruction**: "comment out each protection one at a time, run the suite, confirm at least one test fails, restore. Report killed/survived. Confirm `git status --porcelain` is empty when you finish."
+7. Output format: `Spec compliance: ✅/❌`, `Task quality: Approved/Changes requested` with Critical/Important/Minor + file:line + concrete fix, `⚠️ Cannot verify from diff`.
+8. "Concluding the code is correct is a fine outcome — do not invent problems. But prefer flagging a plausible bypass over silence." (security tasks only)
+9. "Return findings directly; do not write files."
+
+**Never** tell a reviewer what not to flag. If a prompt contains "do not flag", "at most Minor", or "the plan chose" — that is pre-judging; delete it and adjudicate the finding afterwards instead.
+
+**Fix round** (via `SendMessage` to the original implementer, rounds 1–3): open findings verbatim with severity labels, **exact replacement code** for each, the required regression tests, an explicit "verify before reporting" step, and any finding you adjudicated in their favour (say so — it prevents wasted work).
+
+**Scoped re-review**: findings list, brief, report, and `review-package <plan> FIX_BASE HEAD` where FIX_BASE is the head the previous review saw. Instruct: verdict each finding ADDRESSED/NOT ADDRESSED, flag new breakage **in the fix diff only**, out-of-scope observations become deferred notes, never new loop rounds.
+
+## 15. Controller decision heuristics applied
+
+- **DONE_WITH_CONCERNS**: read concerns first. Correctness/scope concerns → dispatch a fix *before* review. Observations → note and proceed to review.
+- **⚠️ Cannot verify from diff**: the controller resolves these, not the reviewer. Most were "does a later task cover this?" — resolved against Tasks 8 and 9. If genuinely uncovered, it becomes a failed spec review and enters the fix loop.
+- **Severity may be upgraded with reasoning.** The dropped `--max-turns` was labelled Minor by the reviewer; upgraded to Important and fixed, because an uncapped background model loop contradicts the project's cost-efficiency premise. Record the reasoning in the ledger.
+- **Severity may be accepted as Minor and deferred.** The surviving UTF-8-decode mutant was left deferred: behaviour is correct via a redundant broader catch, so another full fix+re-review cycle was disproportionate.
+- **Fix the plan when pre-flight finds a defect**, before dispatching. Three were fixed pre-flight (synchronous pipeline vs 15s hook timeout, prompt interpolation into `bash -c`, missing failure-log visibility) and committed as `b3f758a`.
+- **Never fix findings in the controller session** — it pollutes context and skips review.
+- **Never dispatch implementers in parallel.**
+
+## 16. Verbatim Task 6 dispatch (in flight — reuse if re-dispatch is needed)
+
+Sent to a mid-tier implementer. Reproduce faithfully, adding: "READ THIS FIRST … `<workspace>/task-6-brief.md`", the report path `<workspace>/task-6-report.md`, and the standard short-contract return clause.
+
+Distinctive content beyond the standard template:
+- *"WHY THIS TASK IS THE POINT OF THE WHOLE PLAN"* — the Copilot allow-list refusal, loop burning a model call and persisting nothing, evidence in the repo's verification log.
+- *"CARRY-OVER LESSON FROM TASK 5 — do not repeat this mistake"*: Task 5's plan snippet silently dropped the reviewer's turn cap. **Run `copilot --help`** (installed at `/home/amardeep/.local/bin/copilot`, v1.0.73) and verify what Copilot actually supports — do not assume Claude Code's flags exist. Wire `SL_REVIEW_MAX_TURNS` if there is an equivalent; **state explicitly in the report if there is none** rather than silently omitting cost control. `SL_COPILOT_REVIEW_MODEL` regex validation must be preserved exactly — it guards `--model` against argument injection.
+- Six critical design points: `--allow-tool write` **gone** (`read` stays); whole pipeline backgrounded `nohup … &`; `set -o pipefail` inside it; failures appended to `${SL_LOG_DIR}/persist-failures.log`; args **positional** into `bash -c` (**note `COPILOT_ARGS` expands last, shifting positions**); test must **poll** with a bounded timeout.
+- Constraint: **no `~/.claude`, no `claude` binary, no `CLAUDE.md` anywhere in this file** — Task 7 enforces it.
+- Interfaces block for `config.sh`, `persist-proposal.py`, `proposal_schema.py`, plus: *"read `scripts/session-review.sh` (Task 5) as the reference implementation for spawn shape, OUTPUT CONTRACT prompt text, and the argv-recording test technique. Keep the two scripts structurally parallel."*
+- Context: the argv-recording fake-binary shim is the reliable way to assert on a spawned command line (proven in Task 5). `tests/test-copilot-session-review.sh` already exists and passes — **append, do not rewrite**.
+
+## 17. Project-level decisions from the wider session (shape future plans)
+
+- **Two repos, never merged.** `agent-self-learning` is the spine (harness adapters, hooks, install, instruction-file injection, session index). `graphify-offline` is an optional tool. Merging would kill the upstream-contribution path and force a permanent fork burden. Integration surface is exactly three contracts: instruction files (spine is sole owner, marker-delimited), one telemetry sink, and feature detection (spine injects graph commands only if `graphify` is on PATH).
+- **`llmwiki` is retired** — superseded except as the reference spec for PDF extraction algorithms, to be *reimplemented* on `pdfplumber` (MIT) because llmwiki's implementation uses `pymupdf` (AGPL, incompatible with graphify's Apache-2.0/MIT). Its artifacts were removed from `/home/amardeep/RioIAM`.
+- **VS Code Copilot Chat is must-ship**, accepting that its hooks are Preview. Mitigate with `doctor` self-checks and pinned tested harness versions.
+- **MCP is optional, not excluded** — blocked in the org but under review. Keep graphify's `--mcp` intact and adapters shaped so an MCP adapter can slot in. Feature-detect, never depend. Zero build now.
+- **Measurement**: Copilot's local `~/.copilot/session-store.db` table `assistant_usage_events` gives **per-turn, per-model, per-`initiator`** cost (`input_tokens`, `output_tokens`, `cache_read_tokens`, `total_nano_aiu`, `request_multiplier`) — far better than the Billing API's per-user daily totals, and `initiator` separates framework overhead from user-driven spend. Pair with a **continuous ~10% holdout** rather than a staged A/B (accumulated memory contaminates a simple off-switch). Report savings with 95% CI and a `measured`/`estimated` label.
+- **Cost reality measured on this machine**: agent + sub-agent turns were 84% of spend. Background loops, not human prompting, are the cost centre — which is why the reviewer's turn cap and cheap-model selection matter.
+- **Cache**: measured 95–96% `cache_read/input` ratio with the framework live. No bust today because writes happen post-session. Preserve as an invariant: injected blocks append at end, never reorder, and **no volatile content (counts, timestamps) in always-loaded files**.
+- **Store path decision**: `$AGENT_LEARNING_HOME` → `$XDG_DATA_HOME/agent-learning` → Windows `%LOCALAPPDATA%\agent-learning` → `~/.local/share/agent-learning`. Override-first exists to make testing and debugging trivial.
+- **Env vars**: `SL_*` is already vendor-neutral and stays. Only `CLAUDE_REVIEW_ENABLED` was live; it is honoured as deprecated for one release.
+
+## 18. Sibling repo `graphify-offline` — state and pending action
+
+Created and pushed: `amardeep434/graphify-offline`, **private**, default branch **`v8`** (upstream's active branch, not `main`), 1,241 commits. Local clone `/home/amardeep/graphify-fork-new`, HEAD `2fa6cd3`, remotes: `origin` → the fork, `upstream` → `Graphify-Labs/graphify`.
+
+**⚠️ PENDING AND UNDONE — do this before any other graphify work:** the fork inherited `.github/workflows/publish.yml` from upstream, which would attempt a **PyPI publish of `graphifyy`**. Disable it on the fork. Also pending in that same hygiene step: fork attribution in the README, and the branch convention `lang/xml`, `lang/beanshell`, `feat/offline-docs` (upstream's convention is **one language per PR**, which keeps XML and BeanShell separately upstreamable).
+
+Spike results already established, do not re-run: `tree-sitter-xml` 0.7.0 resolves inside graphify's `tree-sitter<0.26` pin and exposes `CDSect`/`CData`; `tree-sitter-java` 0.23.5 parses BeanShell with **zero ERROR nodes** (no custom grammar needed); bare `.xml` is currently in neither `CODE_EXTENSIONS` nor `DOC_EXTENSIONS`, so `classify_file` returns `None` and the file is **silently ignored entirely**. Reuse graphify's existing `_project_xml_is_safe` / `_PROJECT_XML_MAX_BYTES` (XXE + entity-expansion + 2MiB cap). PDF stack decided: `pdfplumber` required; `rapidocr-onnxruntime`, `camelot-py`, `pikepdf` optional extras; **`pymupdf` banned (AGPL)**.
