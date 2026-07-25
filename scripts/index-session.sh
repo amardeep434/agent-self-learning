@@ -47,28 +47,28 @@ fi
 
 # On a first run (DB just created above), there is no meaningful "newer than
 # the DB" comparison -- index whatever transcripts already exist, bounded to
-# the most recent 20 by find's own mtime-sort so a large pre-existing history
-# cannot make a Stop hook run unboundedly long. On every subsequent run, keep
-# the original -newer filter: only the session(s) modified since the last
-# index pass.
+# the most recent 20 by mtime so a large pre-existing history cannot make a
+# Stop hook run unboundedly long. On every subsequent run, only the
+# session(s) modified since the last index pass.
+#
+# fix-p6: this used to be a hand-rolled `find | stat | sort` shell pipeline
+# (GNU `stat -c` vs. BSD/macOS `stat -f`, plus `find -newer`'s own
+# filesystem-timestamp comparator for the subsequent-run case) -- three
+# independently platform-varying pieces in one line, one of which produced
+# a real macOS-only false negative in CI (tests/test-index-session-first-run.sh
+# passed on Linux, failed on macOS: the pre-existing transcript was silently
+# excluded from the listing). list-transcripts.py replaces all three with a
+# single `os.path.getmtime()` call per file and one Python-side numeric
+# comparison -- same syscall on every platform Python supports, no CLI text
+# parsing, no second comparator to disagree with the first. python3 is
+# already a hard dependency of this project (config.sh shells out to it on
+# every hook invocation via lib/paths.py), so this adds no new dependency.
 if [[ "$DB_EXISTED" -eq 0 ]]; then
-    # GNU `stat -c %Y`, falling back to BSD/macOS `stat -f %m` -- the same
-    # two-way fallback self-learning-health.sh already uses for a lock-file
-    # mtime, so no third mtime-reading convention is introduced here.
-    # Deliberately not `date -r <file>`: GNU date -r reads a file's mtime,
-    # but BSD/macOS date -r treats its argument as a Unix epoch INTEGER, not
-    # a filename -- silently sorting by a garbage value on macOS rather than
-    # failing loudly, exactly the kind of measured-on-one-platform mistake
-    # this project's cross-platform rules exist to prevent.
-    LATEST_SESSION=$(find "$SESSIONS_DIR" -name "*.jsonl" -type f 2>/dev/null \
-        | while IFS= read -r _f; do
-              _mtime=$(stat -c %Y "$_f" 2>/dev/null || stat -f %m "$_f" 2>/dev/null || echo 0)
-              printf '%s\t%s\n' "$_mtime" "$_f"
-          done \
-        | sort -rn | cut -f2- | head -20)
+    LATEST_SESSION=$(python3 "${SCRIPT_DIR}/lib/list-transcripts.py" "$SESSIONS_DIR" --limit 20)
 else
-    LATEST_SESSION=$(find "$SESSIONS_DIR" -name "*.jsonl" -newer "$DB_PATH" \
-        -type f 2>/dev/null | head -20)
+    DB_MTIME=$(python3 -c "import os, sys; print(os.path.getmtime(sys.argv[1]))" "$DB_PATH")
+    LATEST_SESSION=$(python3 "${SCRIPT_DIR}/lib/list-transcripts.py" "$SESSIONS_DIR" \
+        --since-mtime "$DB_MTIME" --limit 20)
 fi
 
 if [[ -z "$LATEST_SESSION" ]]; then
