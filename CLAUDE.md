@@ -14,10 +14,22 @@
 > write-path security tests (symlink/hardlink/`O_NOFOLLOW`) and 3 shell assertions skip there,
 > each printed with its reason and gated on a probe that verifies the limitation rather than
 > assuming it from the platform name.
-> **Not yet done:** the live Copilot CLI end-to-end check — a real session, with a real model
-> call, persisting a real file under the resolved memory directory — is still pending manual
-> verification. Every end-to-end run so far used a fake `copilot` shim, and this is the exact
-> failure the branch exists to fix, so it should gate the PR leaving draft regardless of CI.
+> **Live Copilot CLI check: DONE (2026-07-25), with one residual.** Run against a real
+> `copilot` 1.0.73 with a real (paid) model call, real `$HOME` for auth, and
+> `AGENT_LEARNING_HOME` pointed at a throwaway store. Two parts:
+> (1) `scripts/copilot-session-review.sh` invoked for real end-to-end — the detached pipeline
+> completed and `persist-proposal.py` accepted a valid, well-formed **empty** proposal
+> (`{"written": [], "skipped": [], "bytes": 0}`). Correct: headless `copilot -p` has no session
+> transcript, so there was genuinely nothing to learn.
+> (2) The same OUTPUT CONTRACT with a synthetic transcript, piped into the real writer —
+> the model emitted a conforming fenced JSON proposal and **real content was persisted** to
+> `<store>/memory/MEMORY.md`, append mode preserving the existing entry, mode 0600, nothing
+> written outside the store. This is the exact loop that previously burned a model call and
+> persisted nothing.
+> **Residual:** no genuine *interactive* Copilot session has yet fired the `sessionEnd` hook
+> with real conversation history in the payload. Parts (1) and (2) together cover hook script +
+> real model + writer, and contract + real model + real content; what remains unexercised is
+> Copilot's own session transcript reaching the prompt. That needs ordinary day-to-day use.
 > Note: this repo is `amardeep434/agent-self-learning` on GitHub; the local folder name still
 > says `claude-self-learning`. Do not rename the folder — it would break the worktree link.
 
