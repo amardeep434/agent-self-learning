@@ -354,9 +354,20 @@ def _write_all(planned: list[tuple[tuple[Path, ...], Path, str, str]]) -> tuple[
         for dirs, target, mode, content in planned:
             parent: Path | None = None
             for directory in dirs:
-                directory.mkdir(parents=True, exist_ok=True)
+                # Confinement is checked *before* mkdir, not after: an
+                # attacker-controlled name that yields an absolute Path
+                # (e.g. a raw "/tmp/evilpwn" reaching _plan/_write_all
+                # directly, bypassing proposal_schema's slash-free regex --
+                # see the confinement-backstop sweep in
+                # tests/test-adversarial-sweep.py) makes pathlib's `/`
+                # operator discard the left operand entirely, so `directory`
+                # can be a path outside the store on the very first mkdir
+                # call. Checking first means that mkdir is never reached for
+                # such a path, so no stray directory is left behind on disk
+                # even though the write is correctly refused either way.
                 if parent is not None:
                     _assert_inside(parent, directory)
+                directory.mkdir(parents=True, exist_ok=True)
                 _reject_if_symlink(directory, "store directory")
                 parent = directory
             stage_dir = dirs[-1]

@@ -21,6 +21,63 @@ def run(stdin_text, home, extra_args=()):
                           input=stdin_text, capture_output=True, text=True, env=env)
 
 
+# ---------------------------------------------------------------------------
+# Capability probes, not platform-name assumptions.
+#
+# These tests used to skip on `sys.platform.startswith("win")` on the theory
+# that symlink/hardlink creation requires elevated privilege on Windows.
+# That's often true for a plain user session, but GitHub Actions'
+# windows-latest runner frequently runs as (or equivalent to) an
+# administrator, and Developer Mode can also unlock unprivileged symlink
+# creation -- so the platform name alone does not tell you whether the
+# attack surface these tests exercise is actually reachable on a given
+# runner. Measuring it directly (the same discipline already used in
+# tests/test-path-compare-lib.sh's `[[ -L ]]` probe after `ln -s`, and
+# tests/test-doctor.sh's real write attempt after `chmod 500`) means: if
+# windows-latest CAN create symlinks, these security tests actually run
+# there instead of silently reporting green while testing nothing.
+# ---------------------------------------------------------------------------
+
+def _can_symlink():
+    with tempfile.TemporaryDirectory() as d:
+        target = Path(d) / "target"
+        target.write_text("x")
+        link = Path(d) / "link"
+        try:
+            link.symlink_to(target)
+        except OSError:
+            return False
+        return True
+
+
+def _can_hardlink():
+    with tempfile.TemporaryDirectory() as d:
+        target = Path(d) / "target"
+        target.write_text("x")
+        link = Path(d) / "link"
+        try:
+            os.link(target, link)
+        except OSError:
+            return False
+        return True
+
+
+CAN_SYMLINK = _can_symlink()
+CAN_HARDLINK = _can_hardlink()
+# os.O_NOFOLLOW is a genuinely POSIX-only primitive (absent from the os
+# module's namespace entirely on native Windows) -- this one *is* a
+# structural platform fact, not something to probe by attempting an action,
+# so checking for the attribute is the correct probe for it.
+HAS_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0) != 0
+
+print(f"[capability probe] symlink creation: {'AVAILABLE' if CAN_SYMLINK else 'UNAVAILABLE (probed, not platform-assumed)'}",
+      file=sys.stderr)
+print(f"[capability probe] hardlink creation: {'AVAILABLE' if CAN_HARDLINK else 'UNAVAILABLE (probed, not platform-assumed)'}",
+      file=sys.stderr)
+print(f"[capability probe] O_NOFOLLOW: {'AVAILABLE' if HAS_O_NOFOLLOW else 'UNAVAILABLE (POSIX-only primitive)'}",
+      file=sys.stderr)
+
+
 class TestWrites(unittest.TestCase):
     def test_writes_memory_and_skill(self):
         """C4: skills must land as <name>/SKILL.md (a directory), not a flat
@@ -178,8 +235,8 @@ class TestRejects(unittest.TestCase):
             self.assertFalse((home / "memory" / "MEMORY.md").exists())
 
     def test_symlinked_target_is_refused(self):
-        if sys.platform.startswith("win"):
-            self.skipTest("symlink creation requires privilege on Windows")
+        if not CAN_SYMLINK:
+            self.skipTest("symlink creation probed and unavailable on this runner")
         with tempfile.TemporaryDirectory() as d:
             home = Path(d) / "store"
             (home / "memory").mkdir(parents=True)
@@ -202,8 +259,8 @@ class TestFixRound1Regressions(unittest.TestCase):
     """
 
     def test_symlinked_root_directory_is_refused(self):
-        if sys.platform.startswith("win"):
-            self.skipTest("symlink creation requires privilege on Windows")
+        if not CAN_SYMLINK:
+            self.skipTest("symlink creation probed and unavailable on this runner")
         with tempfile.TemporaryDirectory() as d:
             home = Path(d) / "store"
             home.mkdir()
@@ -247,8 +304,8 @@ class TestFixRound1Regressions(unittest.TestCase):
         *directory*, not a flat file. An attacker who can plant
         learned-skills/<name> as a symlink before the proposal runs must not
         be able to redirect the write anywhere outside the store."""
-        if sys.platform.startswith("win"):
-            self.skipTest("symlink creation requires privilege on Windows")
+        if not CAN_SYMLINK:
+            self.skipTest("symlink creation probed and unavailable on this runner")
         with tempfile.TemporaryDirectory() as d:
             home = Path(d) / "store"
             (home / "learned-skills").mkdir(parents=True)
@@ -273,8 +330,8 @@ class TestFixRound1Regressions(unittest.TestCase):
             self.assertEqual(r.returncode, 1)  # rejected by proposal_schema's regex
 
     def test_append_through_symlinked_existing_file_is_refused(self):
-        if sys.platform.startswith("win"):
-            self.skipTest("symlink creation requires privilege on Windows")
+        if not CAN_SYMLINK:
+            self.skipTest("symlink creation probed and unavailable on this runner")
         with tempfile.TemporaryDirectory() as d:
             home = Path(d) / "store"
             (home / "memory").mkdir(parents=True)
@@ -288,8 +345,8 @@ class TestFixRound1Regressions(unittest.TestCase):
             self.assertEqual(outside.read_text(), "original")
 
     def test_append_through_hardlinked_existing_file_is_refused(self):
-        if sys.platform.startswith("win"):
-            self.skipTest("hardlink creation semantics differ on Windows")
+        if not CAN_HARDLINK:
+            self.skipTest("hardlink creation probed and unavailable on this runner")
         with tempfile.TemporaryDirectory() as d:
             home = Path(d) / "store"
             (home / "memory").mkdir(parents=True)
@@ -341,8 +398,10 @@ class TestInternalGuardsUnreachableThroughSchema(unittest.TestCase):
                 self.mod._assert_inside(root, outside)
 
     def test_open_nofollow_fd_rejects_symlink(self):
-        if sys.platform.startswith("win"):
-            self.skipTest("O_NOFOLLOW is POSIX-only")
+        if not HAS_O_NOFOLLOW:
+            self.skipTest("O_NOFOLLOW probed and unavailable (POSIX-only primitive)")
+        if not CAN_SYMLINK:
+            self.skipTest("symlink creation probed and unavailable on this runner")
         with tempfile.TemporaryDirectory() as d:
             outside = Path(d) / "outside.md"
             outside.write_text("data")
@@ -359,8 +418,9 @@ class TestInternalGuardsUnreachableThroughSchema(unittest.TestCase):
         if the explicit check -- the sole protection on that platform --
         is actually still there.
         """
-        if sys.platform.startswith("win"):
-            self.skipTest("this test simulates Windows by removing O_NOFOLLOW")
+        if not CAN_SYMLINK:
+            self.skipTest("symlink creation probed and unavailable on this runner "
+                          "-- cannot construct the symlink this test needs")
         with tempfile.TemporaryDirectory() as d:
             outside = Path(d) / "outside.md"
             outside.write_text("data")
