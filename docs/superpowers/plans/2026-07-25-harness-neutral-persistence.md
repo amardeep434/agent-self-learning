@@ -1,5 +1,24 @@
 # Harness-Neutral Persistence Implementation Plan
 
+> ## ⚠️ READ THIS BEFORE IMPLEMENTING ANYTHING FROM THIS FILE
+>
+> **This plan is a historical record of what was agreed, not a description of the tree.**
+> It was executed, and the tree then moved on through eleven post-plan fix rounds that were
+> never written back into it. Several passages below are now **actively wrong**: implementing
+> Task 4's skill layout as written, or copying Task 3's regex, reintroduces defects that were
+> found and fixed on this branch.
+>
+> Passages that reality has overtaken are flagged in place with a `> **SUPERSEDED**` callout
+> naming what replaced them. Nothing has been deleted or rewritten — the value of this file is
+> in showing where the plan and reality diverged, and why.
+>
+> - **What actually landed:** `git log` is the only source of truth. Then
+>   [`.superpowers/sdd/2026-07-25-harness-neutral-persistence/progress.md`](../../../.superpowers/sdd/2026-07-25-harness-neutral-persistence/progress.md)
+>   (the execution ledger) and the per-round reports beside it.
+> - **Plan-vs-tree, item by item:**
+>   [`plan-vs-delivered-audit.md`](../../../.superpowers/sdd/2026-07-25-harness-neutral-persistence/plan-vs-delivered-audit.md).
+> - **Summary of the post-plan rounds:** see [Appendix A](#appendix-a--post-plan-rounds-not-part-of-the-agreed-plan) at the end of this file.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make the learning loop actually persist on every harness — with a vendor-neutral store, a script-owned write path that no agent can abuse, and a test that proves it works with Claude Code absent.
@@ -14,7 +33,18 @@
 - Bash: must run under `bash` on Linux, macOS, and Windows Git Bash. No GNU-only flags (`sed -i` without suffix, `readlink -f`, `stat -c` are forbidden — use portable equivalents).
 - **No code path used by Copilot CLI or VS Code may reference `~/.claude`, the `claude` binary, or `CLAUDE.md`.** Claude Code is one adapter among peers, never a dependency.
 - Paths are computed in **exactly one place** (`scripts/lib/paths.py`). Bash obtains paths by calling it. Never reimplement resolution in bash.
+  > **SUPERSEDED (partially).** Two bash sites now know something about resolution order:
+  > `lib/config.sh`'s `_sl_fallback_home()` (used **only** when `python3` is unavailable, where
+  > the strict reading would resolve `SL_HOME` to the empty string — the exact silent-wrong-location
+  > failure this plan exists to eliminate) and `doctor.sh`, which re-reads the env vars only to
+  > *print* which override is in effect. Known residual: on a Windows box with no `python3`, bash
+  > and Python can disagree, because the fallback deliberately omits the `LOCALAPPDATA` branch.
 - The reviewer agent **must not be granted file-write tools** for persistence purposes. All persistence is done by `scripts/persist-proposal.py`.
+  > **NOTE.** Met on the Copilot path from Task 6 (`--allow-tool read`). **Not** met on the Claude
+  > Code path until the final closeout round, because this plan's own Task 5 spawn snippet passes
+  > no tool restriction — enforcement was prompt text only. Now
+  > `--allowedTools Read,Glob,Grep --disallowedTools Write,Edit,NotebookEdit`, asserted in
+  > `tests/test-session-review.sh` and probed against the real binary in `tests/test-review-cli-flags.sh`.
 - Existing test style is authoritative: standalone executable scripts in `tests/`, `check()` helper, `FAILURES` counter, `env -i` isolation, `exit 1` on failure.
 - Backward compatibility: existing installs whose store is `~/.claude` must keep working and must be told how to migrate. Never silently relocate a user's data.
 - Every task ends with a commit. Conventional-commit prefixes (`feat:`, `fix:`, `test:`, `ci:`, `docs:`).
@@ -43,6 +73,11 @@
 - `config/settings-hooks.json` — remove the 8 dead `CLAUDE_REVIEW_*` env entries, keep behavior via `SL_*`.
 
 **Unchanged but load-bearing:** `scripts/lib/hook-input.sh` (Claude-shaped payload parsing; the Copilot branch is a later plan), `scripts/coach-signals.py`.
+
+> **SUPERSEDED.** Both changed. `hook-input.sh` gained shared `stdin-safe.sh` handling;
+> `coach-signals.py` was modified by the Coach widening (round P5). The plan asserted a
+> stability it did not get, so neither change was reviewed against a section that said they
+> would not move.
 
 ---
 
@@ -525,6 +560,13 @@ SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
+# >>> SUPERSEDED: this regex has quadratic backtracking (measured 26.1s on an
+# >>> adversarial input, vs. 0.00078s after the fix). Replaced in the tree by a
+# >>> linear `str.find` fence scanner bounded by _MAX_FENCE_CANDIDATES.
+# >>> Separately, SKILL_NAME_RE below uses `^...$`, which permits a
+# >>> trailing-newline bypass; the tree uses `\A...\Z`. Do not copy either from
+# >>> here. See scripts/lib/proposal_schema.py.
+
 
 class ValidationError(Exception):
     pass
@@ -662,6 +704,17 @@ class TestWrites(unittest.TestCase):
             self.assertEqual((home / "memory" / "MEMORY.md").read_text(), "remembered")
             self.assertEqual((home / "learned-skills" / "alpha.md").read_text(), "# Alpha")
 
+            # >>> SUPERSEDED — DO NOT IMPLEMENT THIS LAYOUT. The tree writes
+            # >>> learned-skills/<name>/SKILL.md plus a shared .usage.json,
+            # >>> single-sourced in scripts/lib/skill_layout.py. Every reader in
+            # >>> this repo (skill-lifecycle.py, inject-agents-md.py,
+            # >>> curator-run.sh, self-learning-health.sh) requires that layout,
+            # >>> so the flat <name>.md form specified here would burn a paid
+            # >>> model call, write a file, and produce something nothing
+            # >>> downstream can ever see. This is the single most consequential
+            # >>> correction on the branch; re-implementing from the plan text
+            # >>> reintroduces a Critical. Pinned by tests/test-skill-layout-pinning.sh.
+
     def test_append_mode_appends(self):
         with tempfile.TemporaryDirectory() as d:
             home = Path(d)
@@ -762,6 +815,11 @@ from proposal_schema import ValidationError, extract_proposal, validate_proposal
 
 
 def _assert_inside(root: Path, target: Path) -> None:
+    # >>> SUPERSEDED: resolve-then-open is a textbook TOCTOU. The tree anchors
+    # >>> every write on dir_fd with O_NOFOLLOW, holds a cross-process store
+    # >>> lock, uses os.replace (not Path.rename), and writes mode 0600.
+    # >>> Residual, disclosed: dir_fd/O_NOFOLLOW are POSIX-only, so Windows
+    # >>> still runs the weaker path-based writer. See persist-proposal.py.
     """Refuse anything that resolves outside the store, including via symlink.
 
     The schema already forbids traversal syntactically; this is the second,
@@ -1044,6 +1102,11 @@ disown 2>/dev/null || true
 ```
 
 The Task 6 test must poll for the file rather than assert immediately, exactly as in Task 5:
+
+> **SUPERSEDED.** Polling for the target file races the detached pipeline (it means a write
+> *started*, not that the pipeline finished) and tore down trees under a still-running writer on
+> macOS CI. The tree uses an explicit `.review-complete` marker written as the pipeline's last
+> unconditional statement; tests wait on it via `tests/lib/wait-for-review.sh`.
 
 ```bash
 for _ in $(seq 1 50); do
@@ -1608,4 +1671,54 @@ git commit -m "docs: storage locations, migration, deprecation, corrected roadma
 
 ## Out of Scope (subsequent plans)
 
+> **SUPERSEDED in two places.** *Session-source adapters* were untenable as a deferral: both
+> reviewers were being spawned with no transcript at all, so every review before `7cf4782` was a
+> paid model call that could not, by construction, learn anything. Fixing it (round P0/P0b)
+> required exactly the adapters deferred here — `scripts/lib/transcript.py`. *Deep security
+> audit* was also built anyway, as `tests/test-adversarial-sweep.py`. The remaining six
+> deferrals are correctly absent from the tree.
+
 Session-source adapters (Copilot `session-store.db`, Claude JSONL) · VS Code hook spike and adapter · Copilot `postToolUse` turn counting · measurement (usage reader, continuous holdout, reporting norms) · failure-triggered review · install UX, install manifest, manifest-driven uninstall · deep security audit · all `graphify-offline` work (XML, BeanShell, PDF extraction).
+
+
+---
+
+## Appendix A — post-plan rounds (NOT part of the agreed plan)
+
+Tasks 7b and 7c were appended to this file mid-execution, before being worked, which was the
+right precedent. **That precedent then lapsed.** Roughly 1,700 lines of production code and
+5,000 lines of tests entered the branch through the rounds below without this file ever being
+amended — so for most of the branch's life, the plan was an incomplete record of it. This
+appendix exists to close that gap.
+
+It is a **pointer, not a duplicate.** The ledger and the per-round reports in
+`.superpowers/sdd/2026-07-25-harness-neutral-persistence/` are tracked in git and are the fuller
+record; `git log` is the source of truth over both.
+
+| Round | What it delivered | Where the detail lives |
+|---|---|---|
+| **P0 / P0b** | The largest defect on the branch: both reviewers were spawned with **no session transcript**. `copilot-session-review.sh` never read stdin (so the hook knew only a session id) and the Claude path had the identical defect. New `scripts/lib/transcript.py` + `list-transcripts.py` parse each harness's on-disk session format, redact secrets, and bound the digest. Failures are logged, never silent. | `fix-p0-*` report; commit `7cf4782` |
+| **P1 / P2** | Verification-gap round; produced `tests/test-adversarial-sweep.py` (the codified adversarial sweep). Its case-fold finding was left open here and closed in the final closeout round. | `fix-p1-p2-report.md` |
+| **P3–P6** | Hook-freshness verdicts unified between `doctor.sh` and `self-learning-health.sh`; Windows path handling inside `python3 -c` strings; LF-only stdout from `paths.py`; `pty` probing instead of a `termios` import crash; PowerShell wrapper delegation guards; macOS teardown races (the `.review-complete` marker). The **P5 Coach widening** (`coach-rules-eval.py` +645 lines, adapted rule coverage 1/45 → 11/45) also landed here — good work, but unrelated to harness-neutral persistence and arguably in the wrong branch. | round reports; `progress.md` |
+| **P7** | A lost-update race in concurrent appends. Introduced `scripts/lib/store_lock.py` + `store-lock.sh`: cross-process serialisation, `flock` on POSIX and `msvcrt` on Windows. | `fix-p7-append-race` report |
+| **P8** | Extended that lock so `skill-lifecycle.py` and `curator-run.sh` take the *same* lock as the writer — a lock only serialises processes that pick the same path. | commit `186f7d9` |
+| **P9** | `os.replace` instead of `Path.rename` (portability); and a repaired PowerShell syntax checker **that had itself been the parse error** — the files it condemned were valid. Added `tests/test-review-cli-flags.sh`, which checks our argv against the real installed CLIs with no model calls. | `d8b263b`, `5feb1b2`, `e890fd6` |
+| **Fix rounds A–F** | Wrong-location and broken-platform fixes, verification-gate cluster, the skill-directory persistence contract (`4432883` — see the Task 4 callout above), a flaky clock-tick round-trip window, and documentation-honesty corrections. | `progress.md` and the reports beside it |
+| **Final closeout** | Global Constraint 5 enforced mechanically on the Claude path; an opt-in Copilot cost ceiling (`SL_COPILOT_MAX_AI_CREDITS`, verified against the installed CLI rather than assumed); the case-fold skill collision refused rather than silently destroying content; this appendix; and a documentation pass. | `fix-final-closeout-report.md` |
+
+### Also delivered beyond the plan
+
+New production modules the plan never named: `scripts/lib/session_db.py` (replaces `sqlite3`-CLI
+schema init, which had no FTS5 on macOS runners — `sqlite3` is consequently no longer a runtime
+dependency), `skill_layout.py` + `skill-layout.sh`, `isotime.py`, `copilot-hook-input.sh`,
+`stdin-safe.sh`, `find-bash.ps1`. Plus ~21 test suites that were never in the plan.
+
+### Known residuals, stated rather than closed
+
+- `dir_fd` + `O_NOFOLLOW` are POSIX-only, so the TOCTOU hardening does not cover Windows.
+- `transcript.py` parses two undocumented, unversioned third-party on-disk formats. It fails
+  loudly into `persist-failures.log` on any shape it cannot read, which is the mitigation; it
+  cannot be made immune to a vendor changing the format.
+- The bash/Python resolution divergence on a `python3`-less Windows box (see the GC4 callout).
+- No genuine interactive Copilot session has yet fired `sessionEnd` with real conversation
+  history in the payload. Only day-to-day use closes that one.
