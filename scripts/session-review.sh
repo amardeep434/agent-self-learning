@@ -184,6 +184,17 @@ if command -v claude &>/dev/null; then
             printf "%s session-review: pipeline failed (status %s)\n" \
                 "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$status" >>"$3/persist-failures.log"
         fi
+        # fix-p6: unconditional (success or failure) completion marker, the
+        # LAST statement of this detached pipeline. Nothing here previously
+        # signaled "the async work behind this hook invocation is actually
+        # finished" -- only "a write started" (a target file appearing).
+        # Tests polling for a target file and then tearing down the tree
+        # immediately raced this pipeline (macOS CI: `rm -rf` on a directory
+        # a still-running writer touched a moment later,
+        # tests/test-e2e-skill-visibility.sh). date -u for a stable,
+        # portable timestamp -- consumers only need existence/freshness, not
+        # a parsed value.
+        printf "%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$3/.review-complete"
     ' _ claude "$REVIEW_PROMPT" "$SL_LOG_DIR" "${SCRIPT_DIR}/persist-proposal.py" \
         "${SL_REVIEW_MAX_TURNS}" \
         >/dev/null 2>&1 &

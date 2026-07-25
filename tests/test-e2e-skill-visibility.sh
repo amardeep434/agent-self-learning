@@ -23,10 +23,15 @@ FAILURES=0
 check() { if [[ "$2" == "$3" ]]; then echo "PASS: $1"; else echo "FAIL: $1 (expected '$2', got '$3')"; FAILURES=$((FAILURES+1)); fi; }
 contains() { if [[ "$2" == *"$3"* ]]; then echo "PASS: $1"; else echo "FAIL: $1 (did not find '$3')"; FAILURES=$((FAILURES+1)); fi; }
 not_contains() { if [[ "$2" != *"$3"* ]]; then echo "PASS: $1"; else echo "FAIL: $1 (unexpectedly found '$3')"; FAILURES=$((FAILURES+1)); fi; }
+# shellcheck source=tests/lib/wait-for-review.sh
+source "${SCRIPT_DIR}/tests/lib/wait-for-review.sh"
 
 TMP_HOME="$(mktemp -d)"
 FAKE_BIN="$(mktemp -d)"
-trap 'rm -rf "$TMP_HOME" "$FAKE_BIN"' EXIT
+# fix-p6: sl_rm_rf_retry, not a bare `rm -rf`, on the trap path too --
+# defense in depth alongside waiting for the pipeline below (see
+# tests/lib/wait-for-review.sh for why both layers exist).
+trap 'sl_rm_rf_retry "$TMP_HOME"; sl_rm_rf_retry "$FAKE_BIN"' EXIT
 
 SKILLS_DIR="${TMP_HOME}/store/learned-skills"
 MEMORY_DIR="${TMP_HOME}/store/memory"
@@ -56,35 +61,22 @@ chmod +x "${FAKE_BIN}/copilot"
 # --- Step 1: drive the real end-to-end pipeline (fake copilot -> the real
 #     copilot-session-review.sh -> the real persist-proposal.py), against a
 #     sandboxed store. Never point AGENT_LEARNING_HOME/HOME at the real one.
+#
+# fix-p6: clear any stale completion marker before launching (there is none
+# yet in a fresh TMP_HOME, but sl_clear_review_marker is cheap and keeps
+# this correct if that ever changes), then WAIT for the detached pipeline's
+# own completion marker rather than only polling for a file the pipeline's
+# OUTPUT happens to produce -- the marker appears strictly after every
+# write this run makes, output file included, so waiting for it also
+# subsumes the old "did SKILL.md appear" check timing-wise (still asserted
+# explicitly below, now against fully-settled state).
+sl_clear_review_marker "${TMP_HOME}/store/logs"
 env -i HOME="$TMP_HOME" PATH="${FAKE_BIN}:${PATH}" \
     AGENT_LEARNING_HOME="${TMP_HOME}/store" \
     SL_CONFIG_FILE="/nonexistent/x.conf" \
     bash "${SCRIPT_DIR}/scripts/copilot-session-review.sh" </dev/null >/dev/null 2>&1 || true
 
-# Fix round E: this poll budget used to be 50*0.2s = 10s. copilot-session-review.sh
-# runs fully detached (nohup + disown), so the parent returns almost
-# immediately and the actual work (spawning the fake copilot, then
-# persist-proposal.py) happens asynchronously. Process-spawn overhead on
-# windows-latest GitHub Actions runners is well documented as substantially
-# higher than Linux/macOS (multiple bash.exe/python.exe launches through
-# this one pipeline); 10s is plausible to be too tight there even though
-# nothing is actually broken. This is a hypothesis, not confirmed without a
-# live Windows run -- widened to 30s and made loud on timeout (a full
-# directory listing) so a genuine hang is still visible rather than just
-# "the file wasn't there", which looked identical to the timing failure
-# from a bare CI log.
-_sl_e2e_seeded=0
-for _ in $(seq 1 150); do
-    if [[ -f "${SKILLS_DIR}/e2e-copilot-skill/SKILL.md" ]]; then
-        _sl_e2e_seeded=1
-        break
-    fi
-    sleep 0.2
-done
-if [[ "$_sl_e2e_seeded" -eq 0 ]]; then
-    echo "--- timed out waiting for ${SKILLS_DIR}/e2e-copilot-skill/SKILL.md ---"
-    find "${TMP_HOME}/store" 2>&1 || echo "(store not even created)"
-fi
+sl_wait_for_review_complete "${TMP_HOME}/store/logs" || true
 
 check "pipeline wrote the skill as a directory" "yes" \
     "$([[ -f "${SKILLS_DIR}/e2e-copilot-skill/SKILL.md" ]] && echo yes || echo no)"
@@ -149,30 +141,27 @@ JSON
 FAKE
 chmod +x "${FAKE_BIN}/copilot"
 
+# fix-p6: this is the scenario that actually failed in CI -- the check
+# immediately below used to run right after the poll for persist-failures.log
+# detected its FIRST byte, with `rm -rf "$TMP_HOME2"` on the very next line.
+# persist-proposal.py can still be writing (e.g. flushing/closing the log
+# file, or writing other rejected-proposal bookkeeping) after that first
+# byte lands. Waiting for the completion marker instead means the pipeline
+# has unconditionally finished -- success or failure -- before either the
+# assertions or the delete below ever run.
+sl_clear_review_marker "${TMP_HOME2}/store/logs"
 env -i HOME="$TMP_HOME2" PATH="${FAKE_BIN}:${PATH}" \
     AGENT_LEARNING_HOME="${TMP_HOME2}/store" \
     SL_CONFIG_FILE="/nonexistent/x.conf" \
     bash "${SCRIPT_DIR}/scripts/copilot-session-review.sh" </dev/null >/dev/null 2>&1 || true
 
-# See the widened-timeout rationale above.
-_sl_e2e_logged=0
-for _ in $(seq 1 150); do
-    if [[ -f "${TMP_HOME2}/store/logs/persist-failures.log" ]]; then
-        _sl_e2e_logged=1
-        break
-    fi
-    sleep 0.2
-done
-if [[ "$_sl_e2e_logged" -eq 0 ]]; then
-    echo "--- timed out waiting for ${TMP_HOME2}/store/logs/persist-failures.log ---"
-    find "${TMP_HOME2}/store" 2>&1 || echo "(store not even created)"
-fi
+sl_wait_for_review_complete "${TMP_HOME2}/store/logs" || true
 
 check "dotted skill name: memory NOT persisted despite being valid" "no" \
     "$([[ -f "${TMP_HOME2}/store/memory/MEMORY.md" ]] && echo yes || echo no)"
 check "dotted skill name: failure logged to persist-failures.log (not a silent no-op)" "yes" \
     "$([[ -s "${TMP_HOME2}/store/logs/persist-failures.log" ]] && echo yes || echo no)"
-rm -rf "$TMP_HOME2"
+sl_rm_rf_retry "$TMP_HOME2"
 
 if [[ "$FAILURES" -gt 0 ]]; then exit 1; fi
 echo "All e2e skill-visibility tests passed."

@@ -9,11 +9,16 @@ TMP=$(mktemp -d)
 # One EXIT trap covering every temp dir this script ever creates, via
 # ${VAR:-} so it's safe to register before the later variables are set (the
 # trap body is expanded when EXIT fires, not when trap is registered).
-trap 'rm -rf "$TMP" "${TMP_HOME:-}" "${FAKE_BIN:-}" "${TMP8:-}" "${FAKE_BIN8:-}" "${TMP9:-}"' EXIT
+# fix-p6: sl_rm_rf_retry, not a bare `rm -rf`, on this trap -- defense in
+# depth alongside sl_wait_for_review_complete used below (see
+# tests/lib/wait-for-review.sh for why both layers exist).
+trap 'sl_rm_rf_retry "$TMP"; sl_rm_rf_retry "${TMP_HOME:-}"; sl_rm_rf_retry "${FAKE_BIN:-}"; sl_rm_rf_retry "${TMP8:-}"; sl_rm_rf_retry "${FAKE_BIN8:-}"; sl_rm_rf_retry "${TMP9:-}"' EXIT
 export SL_HOME="$TMP" SL_STATE_DIR="$TMP/state" SL_LOG_DIR="$TMP/logs" SL_CONFIG_FILE="/nonexistent"
 mkdir -p "$TMP/state" "$TMP/bin"
 FAILURES=0
 check() { if [[ "$2" == "$3" ]]; then echo "PASS: $1"; else echo "FAIL: $1 (expected '$2', got '$3')"; FAILURES=$((FAILURES+1)); fi; }
+# shellcheck source=tests/lib/wait-for-review.sh
+source "${SCRIPT_DIR}/tests/lib/wait-for-review.sh"
 
 cat > "$TMP/bin/copilot" <<'EOF'
 #!/usr/bin/env bash
@@ -83,10 +88,15 @@ printf '{"version": 1, "memory": [{"file": "MEMORY.md", "mode": "replace", "cont
 FAKE
 chmod +x "${FAKE_BIN}/copilot"
 
+# fix-p6: wait for the detached pipeline's own completion marker (see
+# tests/lib/wait-for-review.sh), not only for MEMORY.md to appear.
+sl_clear_review_marker "${TMP_HOME}/store/logs"
 env -i HOME="$TMP_HOME" PATH="${FAKE_BIN}:${PATH}" \
     AGENT_LEARNING_HOME="${TMP_HOME}/store" \
     SL_CONFIG_FILE="/nonexistent/x.conf" \
     bash "${SCRIPT_DIR}/scripts/copilot-session-review.sh" </dev/null >/dev/null 2>&1 || true
+
+sl_wait_for_review_complete "${TMP_HOME}/store/logs" || true
 
 for _ in $(seq 1 50); do
     [[ -f "${TMP_HOME}/store/memory/MEMORY.md" ]] && break
@@ -136,11 +146,14 @@ EOF
 
 FAKE_COPILOT_PROMPT_FILE="${TMP8}/prompt.txt"
 export FAKE_COPILOT_PROMPT_FILE
+sl_clear_review_marker "${TMP8}/store/logs"
 echo "{\"sessionId\":\"${SESSION_ID}\",\"timestamp\":1784982920820,\"cwd\":\"/tmp\",\"reason\":\"complete\"}" \
     | env -i HOME="$TMP8" PATH="${FAKE_BIN8}:${PATH}" \
         AGENT_LEARNING_HOME="${TMP8}/store" SL_CONFIG_FILE="/nonexistent/x.conf" \
         FAKE_COPILOT_PROMPT_FILE="$FAKE_COPILOT_PROMPT_FILE" \
         bash "${SCRIPT_DIR}/scripts/copilot-session-review.sh" >/dev/null 2>&1 || true
+
+sl_wait_for_review_complete "${TMP8}/store/logs" || true
 
 for _ in $(seq 1 50); do
     [[ -s "$FAKE_COPILOT_PROMPT_FILE" ]] && break

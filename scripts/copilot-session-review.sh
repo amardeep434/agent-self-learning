@@ -131,6 +131,10 @@ if command -v copilot &>/dev/null; then
             printf "%s copilot-session-review: pipeline failed (status %s)\n" \
                 "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$status" >>"$logdir/persist-failures.log"
         fi
+        # fix-p6: unconditional (success or failure) completion marker, the
+        # LAST statement of this detached pipeline -- see session-review.sh
+        # for the full rationale (same fix, same reason, both review paths).
+        printf "%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$logdir/.review-complete"
     ' _ "$REVIEW_PROMPT" "$SL_LOG_DIR" "${SCRIPT_DIR}/persist-proposal.py" \
         "${COPILOT_ARGS[@]}" >/dev/null 2>&1 &
     disown 2>/dev/null || true

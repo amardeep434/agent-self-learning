@@ -7,6 +7,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FAILURES=0
 check() { if [[ "$2" == "$3" ]]; then echo "PASS: $1"; else echo "FAIL: $1 (expected '$2', got '$3')"; FAILURES=$((FAILURES+1)); fi; }
+# shellcheck source=tests/lib/wait-for-review.sh
+source "${SCRIPT_DIR}/tests/lib/wait-for-review.sh"
 
 TMP_HOME="$(mktemp -d)"
 FAKE_BIN="$(mktemp -d)"
@@ -14,7 +16,10 @@ FAKE_BIN="$(mktemp -d)"
 # file only ran on the success path -- an early `exit 1` (e.g. from `set -e`
 # tripping on an unexpected command failure) leaked both temp dirs. A trap
 # runs on every exit path, not just the fall-through one.
-trap 'rm -rf "$TMP_HOME" "$FAKE_BIN"' EXIT
+#
+# fix-p6: sl_rm_rf_retry, not a bare `rm -rf` -- defense in depth alongside
+# waiting for the detached pipeline below (tests/lib/wait-for-review.sh).
+trap 'sl_rm_rf_retry "$TMP_HOME"; sl_rm_rf_retry "$FAKE_BIN"' EXIT
 
 # A PATH containing copilot and the system basics, but deliberately no `claude`.
 cat > "${FAKE_BIN}/copilot" <<'FAKE'
@@ -55,6 +60,12 @@ else
     echo "PASS: claude is absent from PATH"
 fi
 
+# fix-p6: wait for the detached pipeline's own completion marker (see
+# tests/lib/wait-for-review.sh), not only for the target file to appear --
+# the marker signals every write this run makes is done, output file
+# included, closing the same class of race that broke
+# tests/test-e2e-skill-visibility.sh on macOS CI.
+sl_clear_review_marker "${TMP_HOME}/store/logs"
 env -i HOME="$TMP_HOME" PATH="$MINIMAL_PATH" \
     AGENT_LEARNING_HOME="${TMP_HOME}/store" \
     SL_CONFIG_FILE="/nonexistent/x.conf" \
@@ -65,10 +76,7 @@ env -i HOME="$TMP_HOME" PATH="$MINIMAL_PATH" \
 # instant the script returns. Poll with a bounded timeout instead of a bare
 # sleep; the same idiom used in test-session-review.sh and
 # test-copilot-session-review.sh.
-for _ in $(seq 1 50); do
-    [[ -f "${TMP_HOME}/store/memory/MEMORY.md" ]] && break
-    sleep 0.2
-done
+sl_wait_for_review_complete "${TMP_HOME}/store/logs" || true
 
 if [[ -f "${TMP_HOME}/store/memory/MEMORY.md" ]]; then
     check "persisted without claude" "no-claude-needed" "$(cat "${TMP_HOME}/store/memory/MEMORY.md")"

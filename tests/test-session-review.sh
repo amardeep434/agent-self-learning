@@ -9,12 +9,17 @@ TMP=$(mktemp -d)
 # trap covering every temp dir this script ever creates, referencing the
 # later variables via ${VAR:-} so it's safe to register before they're set
 # (the trap body is expanded when EXIT fires, not when trap is registered).
-trap 'rm -rf "$TMP" "${TMP_HOME:-}" "${FAKE_BIN:-}" "${TMP6:-}"' EXIT
+# fix-p6: sl_rm_rf_retry, not a bare `rm -rf`, on this trap -- defense in
+# depth alongside sl_wait_for_review_complete used below (see
+# tests/lib/wait-for-review.sh for why both layers exist).
+trap 'sl_rm_rf_retry "$TMP"; sl_rm_rf_retry "${TMP_HOME:-}"; sl_rm_rf_retry "${FAKE_BIN:-}"; sl_rm_rf_retry "${TMP6:-}"' EXIT
 export SL_HOME="$TMP" SL_STATE_DIR="$TMP/state" SL_LOG_DIR="$TMP/logs" SL_CONFIG_FILE="/nonexistent"
 export SL_COACH_SIGNALS_FILE="$TMP/state/coach-signals.json"
 mkdir -p "$TMP/state" "$TMP/bin"
 FAILURES=0
 check() { if [[ "$2" == "$3" ]]; then echo "PASS: $1"; else echo "FAIL: $1 (expected '$2', got '$3')"; FAILURES=$((FAILURES+1)); fi; }
+# shellcheck source=tests/lib/wait-for-review.sh
+source "${SCRIPT_DIR}/tests/lib/wait-for-review.sh"
 
 # Fake `claude` binary that records its argv and env
 cat > "$TMP/bin/claude" <<'EOF'
@@ -84,11 +89,16 @@ mkdir -p "${TMP_HOME}/store/state"
 echo '{"session_id":"s5","total_turns_this_session":9,"memory_turns":0,"skill_iterations":0}' \
     > "${TMP_HOME}/store/state/turn_counter.json"
 
+# fix-p6: wait for the detached pipeline's own completion marker (see
+# tests/lib/wait-for-review.sh), not only for MEMORY.md to appear.
+sl_clear_review_marker "${TMP_HOME}/store/logs"
 env -i HOME="$TMP_HOME" PATH="${FAKE_BIN}:${PATH}" \
     AGENT_LEARNING_HOME="${TMP_HOME}/store" \
     SL_CONFIG_FILE="/nonexistent/x.conf" \
     FAKE_CLAUDE_ARGV_LOG="${ARGV_LOG}" \
     bash "${SCRIPT_DIR}/scripts/session-review.sh" </dev/null >/dev/null 2>&1 || true
+
+sl_wait_for_review_complete "${TMP_HOME}/store/logs" || true
 
 for _ in $(seq 1 50); do
     [[ -f "${TMP_HOME}/store/memory/MEMORY.md" ]] && break
