@@ -307,6 +307,7 @@ PY_CLAUDE_EXEMPTIONS=(
     "scripts/coach-signals.py|prose only (a docstring describing a fallback that must NOT default into ~/.claude); no code path in this file constructs a ~/.claude path"
     "scripts/inject-agents-md.py|prose only (comments describing why this file must not hardcode ~/.claude and does not have one); no code path in this file constructs a ~/.claude path"
     "scripts/skill-lifecycle.py|prose only (docstring for _default_skills_dir describing the pre-fix C2 bug this function replaced, entirely in the past tense); the function itself resolves via SL_SKILLS_DIR/CLAUDE_LEARNED_SKILLS_DIR/paths.py, never a literal ~/.claude"
+    "scripts/lib/transcript.py|P0b module docstring documents Claude Code's OWN transcript location (~/.claude/projects/<project-slug>/<sessionId>.jsonl) as background for build_claude_session_digest(); no code path in this file constructs that path itself -- session-review.sh hands transcript_path in directly from the Stop hook payload (same read-only, hook-supplied category as index-session.sh's SESSIONS_DIR), and this module never resolves it, defaults into it, or writes to it"
 )
 
 bash_claude_exempt_reason() {

@@ -115,5 +115,49 @@ check "prompt no longer states the dot-inclusive contradiction" "no" \
 check "prompt no longer instructs the model to write .usage.json itself" "no" \
     "$(grep -qi 'set created_by.*\.usage\.json' "${SCRIPT_DIR}/scripts/session-review.sh" && echo yes || echo no)"
 
+# 6) P0b fix: a real Stop-hook payload's transcript_path + a seeded Claude
+# Code transcript JSONL actually reaches the reviewer's prompt. Same
+# argv-recording shim technique as case 1, but now the payload carries a
+# real transcript_path pointing at a fixture built from the REAL Claude
+# Code schema (verified against ~/.claude/projects/*/*.jsonl -- see
+# scripts/lib/transcript.py's module docstring and
+# tests/test-transcript.py's fixtures).
+TMP6="$(mktemp -d)"
+echo '{"session_id":"s6","total_turns_this_session":9,"memory_turns":0,"skill_iterations":0}' \
+    > "$TMP/state/turn_counter.json"
+TRANSCRIPT_FILE="${TMP6}/transcript.jsonl"
+cat > "$TRANSCRIPT_FILE" <<'EOF'
+{"parentUuid":null,"isSidechain":false,"type":"system","uuid":"u0","timestamp":"2026-07-25T12:00:00.000Z","sessionId":"s6","subtype":"stop_hook_summary"}
+{"parentUuid":"u0","isSidechain":false,"type":"user","uuid":"u1","timestamp":"2026-07-25T12:00:01.000Z","sessionId":"s6","message":{"role":"user","content":"UNIQUE_MARKER_USER_TURN_CASE6"}}
+{"parentUuid":"u1","isSidechain":false,"type":"assistant","uuid":"u2","timestamp":"2026-07-25T12:00:02.000Z","sessionId":"s6","message":{"role":"assistant","content":[{"type":"thinking","thinking":"internal, must not reach the prompt"},{"type":"text","text":"UNIQUE_MARKER_ASSISTANT_TURN_CASE6"}]}}
+{"parentUuid":"u2","isSidechain":false,"type":"user","uuid":"u3","timestamp":"2026-07-25T12:00:03.000Z","sessionId":"s6","message":{"role":"user","content":"Continue from where you left off."},"isMeta":true}
+EOF
+: > "$FAKE_CLAUDE_LOG"
+echo "{\"session_id\":\"s6\",\"hook_event_name\":\"Stop\",\"transcript_path\":\"${TRANSCRIPT_FILE}\"}" \
+    | bash "${SCRIPT_DIR}/scripts/session-review.sh"
+sleep 0.3
+check "transcript user turn reached the prompt" "yes" \
+    "$(grep -q 'UNIQUE_MARKER_USER_TURN_CASE6' "$FAKE_CLAUDE_LOG" && echo yes || echo no)"
+check "transcript assistant text reached the prompt" "yes" \
+    "$(grep -q 'UNIQUE_MARKER_ASSISTANT_TURN_CASE6' "$FAKE_CLAUDE_LOG" && echo yes || echo no)"
+check "thinking block did NOT reach the prompt" "no" \
+    "$(grep -q 'internal, must not reach the prompt' "$FAKE_CLAUDE_LOG" && echo yes || echo no)"
+check "isMeta turn did NOT reach the prompt" "no" \
+    "$(grep -q 'Continue from where you left off' "$FAKE_CLAUDE_LOG" && echo yes || echo no)"
+check "transcript section framed as untrusted data" "yes" \
+    "$(grep -q 'untrusted conversation data' "$FAKE_CLAUDE_LOG" && echo yes || echo no)"
+rm -rf "$TMP6"
+
+# 7) Missing transcript_path is logged visibly to persist-failures.log,
+# never a silent empty review.
+echo '{"session_id":"s1","total_turns_this_session":9,"memory_turns":0,"skill_iterations":0}' \
+    > "$TMP/state/turn_counter.json"
+rm -f "${TMP}/logs/persist-failures.log"
+: > "$FAKE_CLAUDE_LOG"
+echo '{"session_id":"s1","hook_event_name":"Stop"}' | bash "${SCRIPT_DIR}/scripts/session-review.sh"
+sleep 0.3
+check "missing transcript_path logged to persist-failures.log" "yes" \
+    "$([[ -f "${TMP}/logs/persist-failures.log" ]] && grep -q 'session-review: transcript unavailable' "${TMP}/logs/persist-failures.log" && echo yes || echo no)"
+
 if [[ "$FAILURES" -gt 0 ]]; then exit 1; fi
 echo "All session-review tests passed."
