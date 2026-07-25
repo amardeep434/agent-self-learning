@@ -22,6 +22,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/config.sh"
+
 QUIET="${1:-}"
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -61,12 +65,12 @@ section() {
 section "Directories"
 
 REQUIRED_DIRS=(
-    "${HOME}/.claude/state/self-learning"
-    "${HOME}/.claude/learned-skills"
-    "${HOME}/.claude/sessions"
-    "${HOME}/.claude/logs/reviews"
-    "${HOME}/.claude/logs/curator"
-    "${HOME}/.claude/scripts/self-learning"
+    "$SL_STATE_DIR"
+    "$SL_SKILLS_DIR"
+    "$(dirname "$SL_SEARCH_DB")"
+    "${SL_LOG_DIR}/reviews"
+    "${SL_LOG_DIR}/curator"
+    "$SCRIPT_DIR"
 )
 
 for dir in "${REQUIRED_DIRS[@]}"; do
@@ -92,7 +96,6 @@ REQUIRED_SCRIPTS=(
     "self-learning-health.sh"
 )
 
-SCRIPT_DIR="${HOME}/.claude/scripts/self-learning"
 for script in "${REQUIRED_SCRIPTS[@]}"; do
     script_path="${SCRIPT_DIR}/${script}"
     if [[ -f "$script_path" ]]; then
@@ -107,8 +110,13 @@ for script in "${REQUIRED_SCRIPTS[@]}"; do
 done
 
 # --- Check 3: Hooks registered in settings.json ---
+# This check is Claude-Code-specific: settings.json is Claude Code's own
+# config file, not part of the framework's (vendor-neutral) store. On a
+# Copilot-only machine it is normal and expected to be absent -- that is a
+# WARN, never a FAIL, so a Copilot-only user never sees a spurious failure
+# here.
 
-section "Hook Registration"
+section "Hook Registration (Claude Code)"
 
 SETTINGS_FILE="${HOME}/.claude/settings.json"
 if [[ -f "$SETTINGS_FILE" ]]; then
@@ -135,14 +143,14 @@ if [[ -f "$SETTINGS_FILE" ]]; then
             "Add Stop hook for index-session.sh to ~/.claude/settings.json"
     fi
 else
-    fail "settings.json not found" "Create ~/.claude/settings.json with hook configuration"
+    warn "settings.json not found (normal on a Copilot-only install -- Claude Code hooks live here, Copilot hooks are registered separately under ~/.copilot/hooks/)"
 fi
 
 # --- Check 4: Turn counter state ---
 
 section "Turn Counter"
 
-COUNTER_FILE="${HOME}/.claude/state/self-learning/turn_counter.json"
+COUNTER_FILE="${SL_STATE_DIR}/turn_counter.json"
 if [[ -f "$COUNTER_FILE" ]]; then
     if jq empty "$COUNTER_FILE" 2>/dev/null; then
         pass "turn_counter.json is valid JSON"
@@ -158,7 +166,7 @@ else
 fi
 
 # Check for stale lock
-LOCK_DIR="${HOME}/.claude/state/self-learning/counter.lock"
+LOCK_DIR="${SL_STATE_DIR}/counter.lock"
 if [[ -d "$LOCK_DIR" ]]; then
     LOCK_AGE=$(( $(date +%s) - $(stat -c %Y "$LOCK_DIR" 2>/dev/null || echo 0) ))
     if [[ "$LOCK_AGE" -gt 30 ]]; then
@@ -173,7 +181,7 @@ fi
 
 section "Session Search Database"
 
-DB_PATH="${HOME}/.claude/sessions/search.db"
+DB_PATH="$SL_SEARCH_DB"
 if [[ -f "$DB_PATH" ]]; then
     if command -v sqlite3 &>/dev/null; then
         SESSION_COUNT=$(sqlite3 "$DB_PATH" "SELECT count(*) FROM sessions" 2>/dev/null || echo "ERROR")
@@ -193,7 +201,7 @@ fi
 
 section "Learned Skills"
 
-USAGE_FILE="${HOME}/.claude/learned-skills/.usage.json"
+USAGE_FILE="${SL_SKILLS_DIR}/.usage.json"
 if [[ -f "$USAGE_FILE" ]]; then
     if jq empty "$USAGE_FILE" 2>/dev/null; then
         SKILL_COUNT=$(jq 'keys | length' "$USAGE_FILE" 2>/dev/null || echo 0)

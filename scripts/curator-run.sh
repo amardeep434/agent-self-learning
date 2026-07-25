@@ -18,15 +18,21 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="${HOME}/.claude/scripts/self-learning"
-SKILLS_DIR="${HOME}/.claude/learned-skills"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/config.sh"
+
+SKILLS_DIR="$SL_SKILLS_DIR"
 ARCHIVE_DIR="${SKILLS_DIR}/.archive"
-BACKUP_DIR="${HOME}/.claude/backups/curator"
-LOG_DIR="${HOME}/.claude/logs/curator"
+# No "backups" key in paths.py (out of scope for this task); derive it under
+# the resolved home the same way install.sh does, so the installer and this
+# consumer never disagree about where backups live.
+BACKUP_DIR="${SL_HOME}/backups/curator"
+LOG_DIR="${SL_LOG_DIR}/curator"
 REPORT_FILE="${LOG_DIR}/$(date +%Y-%m-%d)-curator-report.md"
 IDLE_GATE_HOURS="${CLAUDE_CURATOR_IDLE_GATE:-2}"
 LLM_PASS="${CLAUDE_CURATOR_LLM_PASS:-false}"
-STATE_DIR="${HOME}/.claude/state/self-learning"
+STATE_DIR="$SL_STATE_DIR"
 
 mkdir -p "$ARCHIVE_DIR" "$BACKUP_DIR" "$LOG_DIR" "$STATE_DIR"
 

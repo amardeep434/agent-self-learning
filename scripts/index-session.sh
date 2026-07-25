@@ -8,8 +8,15 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="${HOME}/.claude/scripts/self-learning"
-DB_PATH="${HOME}/.claude/sessions/search.db"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/config.sh"
+
+DB_PATH="$SL_SEARCH_DB"
+# SESSIONS_DIR is Claude Code's OWN transcript directory -- the session
+# *source* this script reads, not the framework's store. It is legitimately
+# Claude-specific and must stay hardcoded; neutralizing it would break
+# session indexing.
 SESSIONS_DIR="${HOME}/.claude/projects"
 
 mkdir -p "$(dirname "$DB_PATH")"
