@@ -105,6 +105,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from isotime import parse_iso  # noqa: E402  (single source of truth, see module docstring)
+import coachtables  # noqa: E402  (vendored MODEL_TIERS / WORK_TYPE_PATTERNS)
 import telemetry  # noqa: E402  (harness-native per-request telemetry; see TELEMETRY_ADAPTERS)
 
 OPS = {
@@ -323,40 +324,9 @@ UNSUPPORTED_REASONS = {
         "backticks first) must be ported with it or every rude variable "
         "name is a false positive",
 
-    "premium-waste": "reachable; not yet built. The previous reason "
-        "('hardcoding a snapshot of the tier table here would silently rot "
-        "as models ship') proves too much and is answered by this "
-        "project's own machinery: the vendored RULE files rot identically, "
-        "and the response was sync-coach-rules.sh plus a mutation-tested "
-        "_pin() that refuses to run an adapter whose upstream text drifted. "
-        "MODEL_TIERS is a plain Record<string, number> literal [upstream "
-        "src/core/dsl/interpreter.ts:267-284] plus a 5-line "
-        "modelTierLookup [:286-292]; it is itself upstream's snapshot of "
-        "GitHub's published multipliers. modelId and aiCode.length are "
-        "already captured. What is missing is a table-vendoring step, which "
-        "is a line item, not a reason",
 
-    "premium-for-lookup-questions": "reachable; not yet built. Same "
-        "MODEL_TIERS dependency as premium-waste (see that entry for why "
-        "the rot argument does not hold), plus a question-opener regex "
-        "that is a literal inside [vendored "
-        "premium-for-lookup-questions.md detect block]",
 
-    "auto-avoidance": "reachable; not yet built. Same MODEL_TIERS "
-        "dependency as premium-waste, plus [vendored auto-avoidance.md "
-        "detect block] countWhere(matched, 'modelId', 'matches', "
-        "'(?i)auto') -- one regex over an already-captured "
-        "field. models.topShare is already computed by the shared helper "
-        "model-overreliance uses",
 
-    "session-drift": "reachable; not yet built. The previous reason "
-        "('implementing it here would mean inventing a different taxonomy "
-        "and calling it the same rule') is FALSE: the taxonomy is ten "
-        "[RegExp, label] pairs in MIT-licensed upstream source [upstream "
-        "src/core/dsl/interpreter.ts:303-313 WORK_TYPE_PATTERNS] plus "
-        "classifyWorkText [:316-322] -- first 300 chars, first match wins, "
-        "default 'feature'. Vendoring it is the same act as vendoring a "
-        "rule. workTypeCount is the only missing input",
 
     "yolo-mode": "reachable; not yet built, and the sentence the previous "
         "reason turned on -- 'an auto-approve RATE computed from this "
@@ -1461,6 +1431,159 @@ def eval_no_spec_structure(rule, tel):
     return matched
 
 
+# ---------------------------------------------------------------------------
+# The MODEL_TIERS / WORK_TYPE_PATTERNS cluster.
+#
+# All four were skipped on "upstream maintains a table; a snapshot would
+# silently rot". Both tables are plain literals in MIT-licensed upstream
+# source and are now vendored and pinned exactly as the rules are -- see
+# scripts/lib/coachtables.py for the argument and the mechanism. The tables
+# are loaded LAZILY, once, so a rule that does not need them is unaffected
+# by a pin mismatch and the four that do skip loudly with the pin message.
+# ---------------------------------------------------------------------------
+
+_TABLE_CACHE = {}
+
+
+def _model_tiers():
+    if "tiers" not in _TABLE_CACHE:
+        _TABLE_CACHE["tiers"] = coachtables.model_tiers()
+    return _TABLE_CACHE["tiers"]
+
+
+def _work_type_patterns():
+    if "worktypes" not in _TABLE_CACHE:
+        _TABLE_CACHE["worktypes"] = coachtables.work_type_patterns()
+    return _TABLE_CACHE["worktypes"]
+
+
+def eval_premium_waste(rule, tel):
+    """modelTier(modelId) >= 1 AND a short prompt that produced no code.
+
+    No adaptation: every input is upstream's own field, read from the same
+    events upstream's CLI parser reads.
+    """
+    _pin(rule, match="modelTier(modelId) >= 1 AND messageLength < "
+                     "thresholds.maxMessageLength AND messageLength > 0 AND "
+                     "aiCode.length == 0",
+               check="count > thresholds.minSample")
+    t = _thresholds(rule, "minSample", "maxMessageLength")
+    tiers = _model_tiers()
+    turns = _require_records(
+        telemetry.requests_with(tel.turns, "modelId", "messageLength", "aiCode"),
+        rule["id"], "modelId/messageLength/aiCode")
+    matched = 0
+    for record in turns:
+        if coachtables.model_tier(record["modelId"], tiers) < 1:
+            continue
+        if not 0 < record["messageLength"] < t["maxMessageLength"]:
+            continue
+        # `aiCode.length` is the number of fenced blocks, not their LoC --
+        # resolveField returns Array.length for a `.length` suffix.
+        if len(record["aiCode"]) != 0:
+            continue
+        matched += 1
+    if not matched > t["minSample"]:
+        return None
+    return matched
+
+
+# premium-for-lookup-questions' question-opener regex, a literal in its own
+# detect block (there is no patterns: frontmatter for it).
+LOOKUP_QUESTION_RE = re.compile(
+    r"(?i)^\s*(what(?:'s| is| are)|where(?:'s| is| are)|how do (?:i|you)|"
+    r"explain|why (?:does|is|are)|when (?:should|do)|which|tell me about|"
+    r"define)\b")
+
+
+def eval_premium_for_lookup_questions(rule, tel):
+    """A premium model asked a bare lookup question: no code, no tools."""
+    _pin(rule, check="ratio > thresholds.maxRatio AND count > thresholds.minSample")
+    t = _thresholds(rule, "minSample", "maxRatio", "maxMessageLength")
+    tiers = _model_tiers()
+    turns = _require_records(
+        telemetry.requests_with(tel.turns, "modelId", "messageText",
+                                "messageLength", "aiCode", "toolsUsed"),
+        rule["id"], "modelId/messageText/messageLength/aiCode/toolsUsed")
+    matched = 0
+    for record in turns:
+        if coachtables.model_tier(record["modelId"], tiers) < 1:
+            continue
+        if not 0 < record["messageLength"] < t["maxMessageLength"]:
+            continue
+        if len(record["aiCode"]) != 0 or len(record["toolsUsed"]) != 0:
+            continue
+        if not LOOKUP_QUESTION_RE.search(record["messageText"]):
+            continue
+        matched += 1
+    ratio = matched / len(turns)
+    if not (ratio > t["maxRatio"] and matched > t["minSample"]):
+        return None
+    return matched
+
+
+AUTO_MODEL_RE = re.compile(r"(?i)auto")
+
+
+def eval_auto_avoidance(rule, tel):
+    """One premium model dominates and the `auto` router was never used."""
+    _pin(rule, match='modelId != ""',
+               check="models.topShare > thresholds.minTopShare AND "
+                     "modelTier(models.topModel) >= 1 AND hasAutoUsage == 0 "
+                     "AND models.total > thresholds.minSample")
+    t = _thresholds(rule, "minTopShare", "minSample")
+    tiers = _model_tiers()
+    turns = _require_records(
+        telemetry.requests_with(tel.turns, "modelId"), rule["id"], "modelId")
+    matched = [r for r in turns if r["modelId"] != ""]
+    if not matched:
+        return None
+    # computeModelStats normalises the id before counting [upstream
+    # src/core/dsl/interpreter.ts:859-876]; hasAutoUsage does NOT -- it
+    # regexes the raw field. Keeping that difference matters: a normalised
+    # id has already lost nothing here, but conflating the two would be a
+    # silent reinterpretation of two different upstream call sites.
+    counts = Counter(coachtables.normalize_model_id(r["modelId"]) for r in matched)
+    top_model, top_count = counts.most_common(1)[0]
+    top_share = top_count / len(matched)
+    has_auto = sum(1 for r in matched if AUTO_MODEL_RE.search(r["modelId"]))
+    if not (top_share > t["minTopShare"]
+            and coachtables.model_tier(top_model, tiers) >= 1
+            and has_auto == 0
+            and len(matched) > t["minSample"]):
+        return None
+    return top_count
+
+
+def eval_session_drift(rule, tel):
+    """Sessions that touched four or more distinct kinds of work."""
+    _pin(rule, match="requestCount >= thresholds.minReqsPerSession AND "
+                     "workTypeCount(requests) >= thresholds.maxWorkTypes",
+               check="count > thresholds.minSessions")
+    t = _thresholds(rule, "maxWorkTypes", "minReqsPerSession", "minSessions")
+    patterns = _work_type_patterns()
+    turns = _require_records(
+        telemetry.requests_with(tel.turns, "messageText"), rule["id"], "messageText")
+    matched = 0
+    for session in telemetry.build_sessions(turns):
+        if session["requestCount"] < t["minReqsPerSession"]:
+            continue
+        # workTypeCount prefers an explicit `workType` field and falls back
+        # to classifying messageText [upstream src/core/dsl/
+        # interpreter.ts:1401-1410]. Neither harness records workType, so
+        # the fallback is always taken -- which is upstream's behaviour for
+        # CLI data too, not an adaptation.
+        kinds = {
+            coachtables.classify_work_text(r.get("messageText") or "", patterns)
+            for r in session["requests"]
+        }
+        if len(kinds) >= t["maxWorkTypes"]:
+            matched += 1
+    if not matched > t["minSessions"]:
+        return None
+    return matched
+
+
 TELEMETRY_ADAPTERS = {
     "vibe-coding": eval_vibe_coding,
     "copy-paste-blindness": eval_copy_paste_blindness,
@@ -1479,6 +1602,10 @@ TELEMETRY_ADAPTERS = {
     "agentic-no-tools": eval_agentic_no_tools,
     "verbose-prompt-no-compression": eval_verbose_prompt_no_compression,
     "no-spec-structure": eval_no_spec_structure,
+    "premium-waste": eval_premium_waste,
+    "premium-for-lookup-questions": eval_premium_for_lookup_questions,
+    "auto-avoidance": eval_auto_avoidance,
+    "session-drift": eval_session_drift,
 }
 
 

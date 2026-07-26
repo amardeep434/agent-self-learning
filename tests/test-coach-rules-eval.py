@@ -845,6 +845,233 @@ class RestoredAdapterTest(CoachRulesEvalBase):
         self.assertEqual(self.fired("vibe-coding"), [])
 
 
+class VendoredTableAdapterTest(CoachRulesEvalBase):
+    """Fire/no-fire pairs for the four rules unlocked by vendoring
+    MODEL_TIERS and WORK_TYPE_PATTERNS."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = Path(self.tmp) / "search.db"
+        conn = make_db(str(self.db))
+        insert_session(conn, "s0", 1)
+        conn.commit()
+        conn.close()
+        self.store = Path(self.tmp) / "store"
+        (self.store / "session-state").mkdir(parents=True)
+
+    def copilot(self, session_id, events):
+        return TFIX.copilot_session(str(self.store), session_id, events)
+
+    def fired(self, rule_id):
+        signals, stderr = self.run_eval(VENDOR_RULES, self.db, telemetry_home=self.store)
+        self.assertNotIn(
+            "skipping {} ".format(rule_id), stderr,
+            "{} skipped when it should have evaluated:\n{}".format(rule_id, stderr))
+        return [s for s in signals if s["id"] == rule_id]
+
+    def _turns(self, count, model, user, tools=(), per_session=10):
+        made = 0
+        index = 0
+        while made < count:
+            events = []
+            for turn in range(min(per_session, count - made)):
+                events.extend(TFIX.simple_turn(
+                    str(turn), model=model, user=user, tools=tools))
+                made += 1
+            self.copilot("s{}".format(index), events)
+            index += 1
+
+    # -- premium-waste -----------------------------------------------------
+    # 'claude-opus-4.6' is tier 3 and 'gemini-2.0-flash' is tier 0.3 in the
+    # vendored table; the pair is what makes these fire/no-fire cases about
+    # the TABLE rather than about the other conjuncts.
+    PREMIUM = "claude-opus-4.6"
+    CHEAP = "gemini-2.0-flash"
+
+    def test_premium_waste_fires_on_short_promptless_premium_turns(self):
+        self._turns(20, self.PREMIUM, "fix it")
+        self.assertTrue(self.fired("premium-waste"))
+
+    def test_premium_waste_silent_on_a_sub_premium_model(self):
+        """Same turns, a tier-0.3 model. If the vendored table were empty or
+        misparsed every model would read as tier 0 and this rule could never
+        fire; if the tier test were dropped it could never stay silent."""
+        self._turns(20, self.CHEAP, "fix it")
+        self.assertEqual(self.fired("premium-waste"), [])
+
+    def test_premium_waste_silent_when_the_prompt_is_substantial(self):
+        self._turns(20, self.PREMIUM, "x" * 200)
+        self.assertEqual(self.fired("premium-waste"), [])
+
+    def test_premium_waste_silent_when_the_turn_produced_code(self):
+        self._turns(20, self.PREMIUM, "fix it", tools=[
+            ("edit", {"path": "/r/a.py", "old_str": "x", "new_str": "a\nb\nc"})])
+        self.assertEqual(self.fired("premium-waste"), [])
+
+    # -- premium-for-lookup-questions --------------------------------------
+    def test_premium_lookup_fires_on_bare_question_openers(self):
+        self._turns(20, self.PREMIUM, "what is a monad")
+        self.assertTrue(self.fired("premium-for-lookup-questions"))
+
+    def test_premium_lookup_silent_on_imperative_prompts(self):
+        """Same length, same model, no question opener."""
+        self._turns(20, self.PREMIUM, "rewrite the parser")
+        self.assertEqual(self.fired("premium-for-lookup-questions"), [])
+
+    def test_premium_lookup_silent_when_the_turn_used_tools(self):
+        self._turns(20, self.PREMIUM, "what is a monad",
+                    tools=[("bash", {"command": "ls"})])
+        self.assertEqual(self.fired("premium-for-lookup-questions"), [])
+
+    # -- auto-avoidance ----------------------------------------------------
+    def test_auto_avoidance_fires_when_one_premium_model_dominates(self):
+        self._turns(40, self.PREMIUM, "x")
+        self.assertTrue(self.fired("auto-avoidance"))
+
+    def test_auto_avoidance_silent_when_the_auto_router_was_used(self):
+        """hasAutoUsage == 0 is a conjunct: a single `auto` model id
+        anywhere in the matched set turns the rule off."""
+        self._turns(40, self.PREMIUM, "x")
+        self.copilot("auto", TFIX.simple_turn("0", model="copilot-auto", user="x"))
+        self.assertEqual(self.fired("auto-avoidance"), [])
+
+    def test_auto_avoidance_silent_when_the_top_model_is_not_premium(self):
+        self._turns(40, self.CHEAP, "x")
+        self.assertEqual(self.fired("auto-avoidance"), [])
+
+    def test_auto_avoidance_silent_when_no_model_dominates(self):
+        for index in range(4):
+            events = []
+            for turn in range(10):
+                events.extend(TFIX.simple_turn(
+                    str(turn), model="claude-opus-4.{}".format(index), user="x"))
+            self.copilot("s{}".format(index), events)
+        self.assertEqual(self.fired("auto-avoidance"), [])
+
+    # -- session-drift -----------------------------------------------------
+    # One prompt per work type, straight from the vendored patterns.
+    DRIFTING = ["fix the crash", "refactor the module", "add a test",
+                "update the readme", "tune the docker pipeline"]
+    FOCUSED = ["fix the crash", "fix the other crash", "debug the error",
+               "the build is broken", "wrong output again"]
+
+    def _drift_sessions(self, prompts, count=6):
+        for index in range(count):
+            events = []
+            for turn, prompt in enumerate(prompts):
+                events.extend(TFIX.simple_turn(str(turn), user=prompt))
+            self.copilot("s{}".format(index), events)
+
+    def test_session_drift_fires_when_one_session_spans_many_work_types(self):
+        self._drift_sessions(self.DRIFTING)
+        self.assertTrue(self.fired("session-drift"))
+
+    def test_session_drift_silent_when_a_session_stays_on_one_kind_of_work(self):
+        """Same request count, five prompts that all classify as 'bug fix'.
+        Without this case the rule would look like a session-length alarm."""
+        self._drift_sessions(self.FOCUSED)
+        self.assertEqual(self.fired("session-drift"), [])
+
+    def test_session_drift_silent_below_the_requests_per_session_floor(self):
+        """Four prompts, four DISTINCT work types -- over the work-type
+        threshold but under the five-request floor. Mutation testing showed
+        a three-prompt fixture proved nothing here, because it fell below
+        the work-type threshold too and would have stayed silent with the
+        floor deleted."""
+        self.assertEqual(len(self.DRIFTING[:4]), 4)
+        self._drift_sessions(self.DRIFTING[:4])
+        self.assertEqual(self.fired("session-drift"), [])
+
+
+class VendoredTablePinTest(unittest.TestCase):
+    """The pin is the whole answer to "a vendored table would silently rot".
+
+    If a table can be changed under an unchanged name without anything
+    failing, then the objection the vendoring was supposed to defeat is
+    still live. These tests are what make the answer true rather than
+    asserted.
+    """
+
+    def setUp(self):
+        sys.path.insert(0, str(REPO / "scripts" / "lib"))
+        import coachtables
+        self.ct = coachtables
+
+    def test_tables_parse_to_upstreams_own_values(self):
+        tiers = self.ct.model_tiers()
+        self.assertEqual(tiers["claude-opus-4.6"], 3)
+        self.assertEqual(tiers["gemini-2.0-flash"], 0.3)
+        # Order is load-bearing: the more specific id must be hit first.
+        self.assertEqual(self.ct.model_tier("claude-opus-4.6-fast", tiers), 30)
+        self.assertEqual(self.ct.model_tier("claude-opus-4.6", tiers), 3)
+        self.assertEqual(self.ct.model_tier("no-such-model", tiers), 0)
+        self.assertEqual(self.ct.model_tier("anthropic/claude-sonnet-4.6", tiers), 1)
+        self.assertEqual(self.ct.model_tier("gpt-4.1-nano-2024-11-20", tiers), 0.2)
+
+    def test_normalize_model_id_folds_a_dated_snapshot_onto_its_base_id(self):
+        """auto-avoidance counts NORMALISED ids, so a dated snapshot and its
+        base id must land in the same bucket -- otherwise a user on one
+        model looks like a user on two and topShare never clears the bar."""
+        self.assertEqual(self.ct.normalize_model_id("claude-opus-4.6-2026-01-31"),
+                         self.ct.normalize_model_id("claude-opus-4.6"))
+        self.assertEqual(self.ct.normalize_model_id("openai/GPT-5.4"), "gpt-5.4")
+        self.assertEqual(self.ct.normalize_model_id(""), "untracked")
+
+    def test_work_type_patterns_classify_in_upstreams_order(self):
+        patterns = self.ct.work_type_patterns()
+        self.assertEqual(len(patterns), 10)
+        self.assertEqual(self.ct.classify_work_text("fix the failing test", patterns),
+                         "bug fix")
+        self.assertEqual(self.ct.classify_work_text("write the readme", patterns),
+                         "documentation")
+        self.assertEqual(self.ct.classify_work_text("add an endpoint", patterns),
+                         "feature")
+
+    def test_only_the_first_300_characters_are_classified(self):
+        patterns = self.ct.work_type_patterns()
+        text = ("z" * 400) + " docker"
+        self.assertEqual(self.ct.classify_work_text(text, patterns), "feature")
+
+    def test_a_changed_table_value_under_an_unchanged_name_is_refused(self):
+        """Mutation, executed rather than described: reprice a model in a
+        copy of the vendored table and the loader must refuse it."""
+        tmp = Path(tempfile.mkdtemp())
+        original = (self.ct.TABLES_DIR / self.ct.MODEL_TIERS_FILE).read_text()
+        self.assertIn("'claude-opus-4.6': 3", original)
+        (tmp / self.ct.MODEL_TIERS_FILE).write_text(
+            original.replace("'claude-opus-4.6': 3", "'claude-opus-4.6': 99"))
+        with self.assertRaises(self.ct.TableError) as caught:
+            self.ct.model_tiers(tables_dir=tmp)
+        self.assertIn("changed since the adapters", str(caught.exception))
+
+    def test_a_missing_table_is_refused_rather_than_read_as_empty(self):
+        tmp = Path(tempfile.mkdtemp())
+        with self.assertRaises(self.ct.TableError):
+            self.ct.model_tiers(tables_dir=tmp)
+
+    def test_extraction_fails_loudly_when_the_upstream_anchor_is_gone(self):
+        """An anchor that silently matched nothing would vendor an empty
+        table, which would make modelTier() return 0 for every model and
+        switch three rules off without a word."""
+        with self.assertRaises(self.ct.TableError) as caught:
+            self.ct.extract_tables("// upstream restructured this file\n")
+        self.assertIn("anchor not found", str(caught.exception))
+
+    def test_extraction_round_trips_the_vendored_files_byte_for_byte(self):
+        """The vendored files must be exactly what the extractor produces
+        from the pinned upstream text -- otherwise someone hand-edited them
+        and the 'verbatim upstream slice' claim is false."""
+        for name in (self.ct.MODEL_TIERS_FILE, self.ct.WORK_TYPE_PATTERNS_FILE):
+            text = (self.ct.TABLES_DIR / name).read_text(encoding="utf-8")
+            extracted = self.ct.extract_one(text, name)
+            self.assertEqual(extracted.rstrip("\n"), text.rstrip("\n"), name)
+
+    def test_the_recorded_pin_matches_the_vendored_file(self):
+        for name, pin in self.ct.TABLE_PINS.items():
+            text = (self.ct.TABLES_DIR / name).read_text(encoding="utf-8")
+            self.assertEqual(self.ct.sha256(text), pin, name)
+
+
 class TelemetryDetectPinTest(CoachRulesEvalBase):
     """Each telemetry adapter hardcodes one rule's predicate, so it must
     refuse to run if that rule's `detect` block ever changes shape.
@@ -1172,7 +1399,8 @@ class TelemetryAbsentSkipsLoudlyTest(CoachRulesEvalBase):
         "vibe-coding", "copy-paste-blindness", "speed-accept",
         "low-markdown-ratio", "no-language-exploration",
         "no-skills", "agentic-no-tools", "verbose-prompt-no-compression",
-        "no-spec-structure",
+        "no-spec-structure", "premium-waste", "premium-for-lookup-questions",
+        "auto-avoidance", "session-drift",
     ]
 
     def test_all_telemetry_rules_skip_with_a_source_naming_reason(self):
@@ -1299,7 +1527,7 @@ class CoverageAssertionTest(CoachRulesEvalBase):
     # skip. TelemetryAdapterTest covers them with a store present, and
     # TelemetryAbsentSkipsLoudlyTest pins that they skip without one.
     EXPECTED_EVALUATED = 11
-    EXPECTED_TELEMETRY_ADAPTERS = 17
+    EXPECTED_TELEMETRY_ADAPTERS = 21
     EXPECTED_TOTAL_RULES = 45
 
     def test_coverage_count_pinned(self):
