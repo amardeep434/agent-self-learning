@@ -298,6 +298,33 @@ class StagedReplaceProbeTest(unittest.TestCase):
             sub = os.path.join(d, "ro")
             os.mkdir(sub, 0o500)
             try:
+                # mode 0o500 is advisory on some filesystems: Windows governs
+                # write access by ACL, not by POSIX mode bits, so the mkdir
+                # above leaves the directory fully writable there and no
+                # OSError can be raised (observed on both windows-latest
+                # cells, CI run 30185583796). PROBE whether the restriction
+                # actually took rather than inferring it from the platform
+                # name -- the same discipline tests/test-doctor.sh uses for
+                # its chmod-based non-writable assertions, and the reason
+                # this file's own backend detection measures instead of
+                # assuming.
+                canary = os.path.join(sub, ".write-probe")
+                try:
+                    with open(canary, "w") as fh:
+                        fh.write("x")
+                    os.unlink(canary)
+                except OSError:
+                    denied = True
+                else:
+                    denied = False
+                if not denied:
+                    print("[capability probe] chmod 0o500 write denial: "
+                          "UNAVAILABLE (directory still writable -- verified "
+                          "by writing a probe file, not assumed; expected on "
+                          "ACL-governed filesystems such as Windows)")
+                    self.skipTest(
+                        "[skip] mode 0o500 does not deny writes on this "
+                        "filesystem; the precondition cannot be established")
                 with self.assertRaises(OSError):
                     win_dir_pin.staged_replace_probe(sub)
             finally:
