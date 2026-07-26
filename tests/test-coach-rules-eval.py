@@ -1237,6 +1237,108 @@ class InstructionFileAdapterTest(CoachRulesEvalBase):
         self.assertEqual(self.fired("context-engineering-gaps"), [])
 
 
+class ProfanityAdapterTest(CoachRulesEvalBase):
+    """Fire/no-fire for the hashed-dictionary profanity rule.
+
+    The fixtures deliberately use the mildest entry in leo-profanity's list
+    that is also an ordinary English word ("sucks"), so this file commits no
+    slurs either -- the same property the hashed dictionary buys for the
+    vendored data.
+    """
+
+    MILD = "sucks"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = Path(self.tmp) / "search.db"
+        conn = make_db(str(self.db))
+        insert_session(conn, "s0", 1)
+        conn.commit()
+        conn.close()
+        self.store = Path(self.tmp) / "store"
+        (self.store / "session-state").mkdir(parents=True)
+        sys.path.insert(0, str(REPO / "scripts" / "lib"))
+        import coachtables
+        self.ct = coachtables
+        self.assertTrue(
+            self.ct.contains_profanity(self.MILD, self.ct.profanity_hashes()),
+            "test fixture word is not in the vendored dictionary")
+
+    def copilot(self, session_id, events):
+        return TFIX.copilot_session(str(self.store), session_id, events)
+
+    def fired(self, rule_id):
+        signals, stderr = self.run_eval(VENDOR_RULES, self.db, telemetry_home=self.store)
+        self.assertNotIn(
+            "skipping {} ".format(rule_id), stderr,
+            "{} skipped when it should have evaluated:\n{}".format(rule_id, stderr))
+        return [s for s in signals if s["id"] == rule_id]
+
+    def test_profanity_fires_on_a_hostile_prompt(self):
+        self.copilot("s0", TFIX.simple_turn(
+            "0", user="this build {} and is broken again".format(self.MILD)))
+        self.assertTrue(self.fired("profanity"))
+
+    def test_profanity_silent_on_civil_prompts(self):
+        self.copilot("s0", TFIX.simple_turn("0", user="the build is broken again"))
+        self.assertEqual(self.fired("profanity"), [])
+
+    def test_profanity_ignores_a_fenced_code_block(self):
+        """stripCode is not optional: without it every snippet containing a
+        rude identifier becomes a finding.
+
+        The fence deliberately contains a stray backtick. With a plain
+        fenced block the inline-backtick pass happens to swallow the content
+        anyway, so deleting the fenced-block pass survives mutation testing;
+        an odd backtick inside makes the two passes disagree, which is the
+        only shape that actually tests the fenced branch.
+        """
+        self.copilot("s0", TFIX.simple_turn(
+            "0", user="```\n` {} = 1\n```\n".format(self.MILD)))
+        self.assertEqual(self.fired("profanity"), [])
+
+    def test_profanity_ignores_an_inline_backtick_span(self):
+        """A MULTI-WORD span. A single backticked token proves nothing --
+        tokenisation splits on spaces only, so the backticks stay glued to
+        the word and it would fail to match with or without the strip.
+        Mutation testing caught that; only a span with spaces in it
+        exercises the inline branch."""
+        self.copilot("s0", TFIX.simple_turn(
+            "0", user="run `this {} check` again".format(self.MILD)))
+        self.assertEqual(self.fired("profanity"), [])
+
+    def test_profanity_matches_whole_words_only(self):
+        """check() is exact set membership, not substring search -- which is
+        also exactly why hashing the dictionary is behaviour-preserving."""
+        self.copilot("s0", TFIX.simple_turn("0", user="run the {}shoot".format(self.MILD)))
+        self.assertEqual(self.fired("profanity"), [])
+
+    def test_trailing_punctuation_still_matches(self):
+        """sanitize() replaces '.' and ',' with a space before splitting."""
+        self.copilot("s0", TFIX.simple_turn("0", user="what {}, again".format(self.MILD)))
+        self.assertTrue(self.fired("profanity"))
+
+    def test_dictionary_is_committed_as_hashes_not_words(self):
+        """The whole point of the vendoring choice. If a future re-sync
+        wrote plaintext, this fails."""
+        text = (self.ct.TABLES_DIR / self.ct.PROFANITY_FILE).read_text()
+        entries = [ln for ln in text.splitlines() if ln and not ln.startswith("#")]
+        self.assertEqual(len(entries), 253)
+        for entry in entries:
+            self.assertRegex(entry, r"^[0-9a-f]{64}$")
+
+    def test_hash_dictionary_refuses_an_entry_that_could_never_match(self):
+        """A multi-word or mixed-case entry cannot match check()'s
+        single-lowercase-token semantics, so hashing it would silently drop
+        it from the dictionary."""
+        with self.assertRaises(self.ct.TableError):
+            self.ct.hash_dictionary(["two words"])
+        with self.assertRaises(self.ct.TableError):
+            self.ct.hash_dictionary(["MixedCase"])
+        with self.assertRaises(self.ct.TableError):
+            self.ct.hash_dictionary([])
+
+
 class TelemetryDetectPinTest(CoachRulesEvalBase):
     """Each telemetry adapter hardcodes one rule's predicate, so it must
     refuse to run if that rule's `detect` block ever changes shape.
@@ -1566,7 +1668,7 @@ class TelemetryAbsentSkipsLoudlyTest(CoachRulesEvalBase):
         "no-skills", "agentic-no-tools", "verbose-prompt-no-compression",
         "no-spec-structure", "premium-waste", "premium-for-lookup-questions",
         "auto-avoidance", "session-drift", "instruction-bloat",
-        "no-custom-instructions", "context-engineering-gaps",
+        "no-custom-instructions", "context-engineering-gaps", "profanity",
     ]
 
     def test_all_telemetry_rules_skip_with_a_source_naming_reason(self):
@@ -1661,11 +1763,6 @@ class SkipPathTest(CoachRulesEvalBase):
                     "skip reason too generic: {}".format(line),
                 )
 
-    def test_profanity_skips_with_wordlist_reason(self):
-        signals, stderr = self.run_eval(VENDOR_RULES, self._empty_db())
-        self.assertIn("profanity", stderr)
-        self.assertIn("wordlist", stderr)
-
     def _empty_db(self):
         tmp = tempfile.mkdtemp()
         db = Path(tmp) / "search.db"
@@ -1693,7 +1790,7 @@ class CoverageAssertionTest(CoachRulesEvalBase):
     # skip. TelemetryAdapterTest covers them with a store present, and
     # TelemetryAbsentSkipsLoudlyTest pins that they skip without one.
     EXPECTED_EVALUATED = 11
-    EXPECTED_TELEMETRY_ADAPTERS = 24
+    EXPECTED_TELEMETRY_ADAPTERS = 25
     EXPECTED_TOTAL_RULES = 45
 
     def test_coverage_count_pinned(self):

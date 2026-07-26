@@ -274,22 +274,6 @@ UNSUPPORTED_REASONS = {
         "/tests, /doc') names commands neither CLI has",
 
 
-    "profanity": "reachable; not yet built. The previous reason "
-        "('evaluating it would mean inventing a moderation wordlist') is "
-        "FALSE: upstream invents none either. [upstream "
-        "src/core/profanity.ts:1-46] is 46 "
-        "lines with NO wordlist and a header saying so; it delegates to "
-        "leo-profanity, pinned at 1.9.0 in [upstream package.json:359], "
-        "MIT-licensed per the npm registry metadata for that version. "
-        "Vendoring that dictionary is the same act as vendoring the rules. "
-        "The real objection -- which the old text never made -- is "
-        "Microsoft's own: they deliberately keep the plaintext list out of "
-        "the repository. That has a cheap answer, since check() is "
-        "whole-word matching after normalisation, so committing SHA-256 "
-        "hashes of the words preserves behaviour exactly and commits no "
-        "slurs. Upstream's stripCode() (drop fenced blocks and inline "
-        "backticks first) must be ported with it or every rude variable "
-        "name is a false positive",
 
 
 
@@ -1686,6 +1670,44 @@ def eval_context_engineering_gaps(rule, tel):
     return gap_count
 
 
+def _profanity_digests():
+    if "profanity" not in _TABLE_CACHE:
+        _TABLE_CACHE["profanity"] = coachtables.profanity_hashes()
+    return _TABLE_CACHE["profanity"]
+
+
+def eval_profanity(rule, tel):
+    """Hostile language in a prompt, using upstream's own dictionary.
+
+    Not an adaptation: upstream's containsProfanity() is leo-profanity's
+    check() over a code-stripped message, and both halves are transcribed in
+    scripts/lib/coachtables.py. The only difference from upstream is that
+    the dictionary is stored as SHA-256 hashes rather than plaintext -- which
+    is behaviour-preserving, because check() is exact whole-word set
+    membership after lowercasing and replacing '.' and ',' with spaces -- and
+    which keeps this repository free of the slurs, the property Microsoft
+    wanted when they pushed the list into an external package.
+
+    `messageLength > 0` is an EQUIVALENT MUTANT: contains_profanity("") is
+    False, so the guard cannot change any answer. It is kept because it is
+    upstream's own first conjunct and this adapter is pinned on that exact
+    predicate text.
+    """
+    _pin(rule, match="messageLength > 0 AND hasProfanity(messageText)",
+               check="count >= thresholds.minReqs")
+    t = _thresholds(rule, "minReqs")
+    digests = _profanity_digests()
+    turns = _require_records(
+        telemetry.requests_with(tel.turns, "messageText", "messageLength"),
+        rule["id"], "messageText/messageLength")
+    matched = sum(1 for r in turns
+                  if r["messageLength"] > 0
+                  and coachtables.contains_profanity(r["messageText"], digests))
+    if not matched >= t["minReqs"]:
+        return None
+    return matched
+
+
 TELEMETRY_ADAPTERS = {
     "vibe-coding": eval_vibe_coding,
     "copy-paste-blindness": eval_copy_paste_blindness,
@@ -1711,6 +1733,7 @@ TELEMETRY_ADAPTERS = {
     "instruction-bloat": eval_instruction_bloat,
     "no-custom-instructions": eval_no_custom_instructions,
     "context-engineering-gaps": eval_context_engineering_gaps,
+    "profanity": eval_profanity,
 }
 
 

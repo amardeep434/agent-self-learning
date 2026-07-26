@@ -30,10 +30,22 @@ done
 # writing an empty table: an empty MODEL_TIERS would make modelTier() return 0
 # for every model and silently switch off three rules.
 TMP_TS="$(mktemp)"
-trap 'rm -f "${TMP_TS}"' EXIT
 gh api "repos/${REPO}/contents/${INTERPRETER_PATH}?ref=${COMMIT_SHA}" --jq '.content' \
     | python3 -c 'import base64,sys;sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' > "${TMP_TS}"
 python3 "${SCRIPT_DIR}/scripts/lib/coachtables.py" extract "${TMP_TS}" "${DEST}/tables"
+# Profanity dictionary. Upstream deliberately keeps the plaintext wordlist out
+# of its repository and depends on leo-profanity instead; this project keeps
+# that property by committing SHA-256 hashes, which behave identically because
+# leoProfanity.check() is exact whole-word set membership.
+LEO_VERSION="$(python3 -c 'import sys;sys.path.insert(0,"'"${SCRIPT_DIR}"'/scripts/lib");import coachtables;print(coachtables.PROFANITY_VERSION)')"
+TMP_LEO="$(mktemp -d)"
+trap 'rm -f "${TMP_TS}"; rm -rf "${TMP_LEO}"' EXIT
+curl -fsSL "https://registry.npmjs.org/leo-profanity/-/leo-profanity-${LEO_VERSION}.tgz" \
+    -o "${TMP_LEO}/leo.tgz"
+tar xzf "${TMP_LEO}/leo.tgz" -C "${TMP_LEO}"
+python3 "${SCRIPT_DIR}/scripts/lib/coachtables.py" hash-dictionary \
+    "${TMP_LEO}/package/dictionary/default.json" "${DEST}/tables"
+
 echo "  (if a sha256 above differs from scripts/lib/coachtables.py TABLE_PINS,"
 echo "   re-read the adapters that consume it BEFORE updating the pin)"
 
