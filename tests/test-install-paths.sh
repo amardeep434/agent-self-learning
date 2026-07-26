@@ -278,17 +278,44 @@ rm -rf "$MISSING_SCRIPT_SRC" "$MISSING_TMP_HOME"
 # ~/.claude/scripts/self-learning/..., re-ran the installer, was told it
 # succeeded, and got no learning at all. Nothing covered this branch.
 # ---------------------------------------------------------------------------
+# NOTE ON PATHS (fix round: windows-latest). Every expectation below is
+# expressed with $RESOLVED_SCRIPTS -- the scripts dir as paths.py reports it
+# -- never "${STORE}/scripts". The two are the same directory but NOT the
+# same string on Git Bash: RESOLVED_SCRIPTS crossed a python3.exe subprocess
+# boundary and comes back in native (C:/...) form, while ${STORE} is the MSYS
+# (/c/...) form that never left the shell. install.sh renders the hook from
+# the SAME paths.py value, so the file on disk holds the native form. The
+# first version of these tests compared against ${STORE}/scripts and failed
+# on both Windows cells for that reason alone -- the installer was correct.
+# See the identical warning at the sl_check_same_path call above.
+#
+# The stale/edited fixtures below are built by REWRITING the hook install.sh
+# just wrote, rather than by re-rendering the template with a path this shell
+# constructed, so nothing here has to know which form is in use.
 COPILOT_HOOK="${TMP_HOME}/.copilot/hooks/self-learning.json"
-EXPECTED_HOOK="$(sed "s|__SL_SCRIPTS_DIR__|${STORE}/scripts|g" "${SCRIPT_DIR}/config/copilot-hooks.json")"
 
-# U1: a STALE hook (ours, old path) must be re-rendered, not skipped.
-printf '%s\n' "$EXPECTED_HOOK" \
-    | sed "s|${STORE}/scripts|${TMP_HOME}/.claude/scripts/self-learning|g" > "$COPILOT_HOOK"
+# Rewrite whatever directory currently precedes our script name to $1.
+# Same basic-sed normalization install.sh itself uses, for the same
+# portability reasons (GNU/BSD/MSYS).
+repoint_hook_to() {
+    sed "s#[^\" ]*/copilot-session-review\.sh#$1/copilot-session-review.sh#g" \
+        "$COPILOT_HOOK" > "${COPILOT_HOOK}.new"
+    mv "${COPILOT_HOOK}.new" "$COPILOT_HOOK"
+}
+LEGACY_DIR="${TMP_HOME}/.claude/scripts/self-learning"
+
+# U1: a STALE hook (ours, pointing at the pre-branch ~/.claude location) must
+# be re-rendered. It used to be skipped with "Already exists ... (skipping)",
+# which made upgrading a silent no-op: the installer reported success and the
+# hook kept running a script that was no longer there.
+repoint_hook_to "$LEGACY_DIR"
 UPGRADE_OUT="$(run_install 2>&1)" || true
 check "U1: a stale Copilot hook is re-rendered, not silently skipped" "yes" \
-    "$(grep -qF "${STORE}/scripts/copilot-session-review.sh" "$COPILOT_HOOK" && echo yes || echo no)"
+    "$(grep -qF "${RESOLVED_SCRIPTS}/copilot-session-review.sh" "$COPILOT_HOOK" && echo yes || echo no)"
 check "U1: the stale path is gone from the hook" "yes" \
-    "$(grep -q 'self-learning/copilot-session-review' "$COPILOT_HOOK" && echo no || echo yes)"
+    "$(grep -qF "$LEGACY_DIR" "$COPILOT_HOOK" && echo no || echo yes)"
+check "U1: the re-rendered hook points at a script that exists" "yes" \
+    "$([[ -f "${RESOLVED_SCRIPTS}/copilot-session-review.sh" ]] && echo yes || echo no)"
 case "$UPGRADE_OUT" in
     *"UPDATED (was stale)"*) echo "PASS: U1: the update is reported, not silent" ;;
     *) echo "FAIL: U1: install.sh did not report updating the stale hook"; FAILURES=$((FAILURES+1)) ;;
@@ -301,24 +328,30 @@ case "$UPGRADE_OUT" in
     *) echo "PASS: U1: the silent-skip branch is gone" ;;
 esac
 
-# U2: an already-correct hook is left alone and said to be up to date.
+# U2: an already-correct hook is left byte-for-byte alone. Compared as a
+# before/after snapshot of the file itself -- no reconstructed expectation,
+# so this asserts the actual property (nothing changed) independent of path
+# form or line endings.
+HOOK_BEFORE="$(cat "$COPILOT_HOOK")"
 UPTODATE_OUT="$(run_install 2>&1)" || true
 case "$UPTODATE_OUT" in
     *"Up to date"*) echo "PASS: U2: an already-correct hook is reported up to date" ;;
     *) echo "FAIL: U2: a correct hook was not reported as up to date"; FAILURES=$((FAILURES+1)) ;;
 esac
-check "U2: an already-correct hook is unchanged" "$EXPECTED_HOOK" "$(cat "$COPILOT_HOOK")"
+check "U2: an already-correct hook is unchanged" "$HOOK_BEFORE" "$(cat "$COPILOT_HOOK")"
 
 # U3: ours but locally EDITED -- still upgraded (a broken path must not
 # survive an upgrade) but the previous file is preserved and named.
-printf '%s\n' "$EXPECTED_HOOK" \
-    | sed "s|${STORE}/scripts|${TMP_HOME}/.claude/scripts/self-learning|g; s|\"timeoutSec\": 30|\"timeoutSec\": 99|" \
-    > "$COPILOT_HOOK"
+repoint_hook_to "$LEGACY_DIR"
+sed 's|"timeoutSec": 30|"timeoutSec": 99|' "$COPILOT_HOOK" > "${COPILOT_HOOK}.new"
+mv "${COPILOT_HOOK}.new" "$COPILOT_HOOK"
 EDITED_OUT="$(run_install 2>&1)" || true
 check "U3: a locally-edited hook is still repointed at the real store" "yes" \
-    "$(grep -qF "${STORE}/scripts/copilot-session-review.sh" "$COPILOT_HOOK" && echo yes || echo no)"
+    "$(grep -qF "${RESOLVED_SCRIPTS}/copilot-session-review.sh" "$COPILOT_HOOK" && echo yes || echo no)"
 check "U3: the user's previous file is preserved as a .bak" "yes" \
     "$(ls "${TMP_HOME}/.copilot/hooks/"*.bak-* >/dev/null 2>&1 && echo yes || echo no)"
+check "U3: the .bak still holds the user's edit" "yes" \
+    "$(grep -qF '"timeoutSec": 99' "${TMP_HOME}/.copilot/hooks/"*.bak-* && echo yes || echo no)"
 case "$EDITED_OUT" in
     *"previous version saved to"*) echo "PASS: U3: the backup location is printed" ;;
     *) echo "FAIL: U3: install.sh did not say where the backup went"; FAILURES=$((FAILURES+1)) ;;
