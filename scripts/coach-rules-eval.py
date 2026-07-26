@@ -135,8 +135,13 @@ BESPOKE_SESSION_IDS = {"tunnel-vision", "mcp-tool-bloat"}
 # meaning "not in schema/session-search-schema.sql". That conflated one
 # project's index with what is obtainable, and it was wrong for a majority
 # of the entries. Ground truth, read from microsoft/AI-Engineering-Coach at
-# HEAD 766d0f2 (2026-07-24; the vendored rules' own commit 9b4deb1 is no
-# longer reachable in the public history):
+# HEAD 766d0f2 (2026-07-24), which is also the commit the rules are now
+# vendored at. The six commits between the previously vendored 9b4deb1 and
+# 766d0f2 are all Dependabot bumps: nothing under src/core/rules, src/core/dsl
+# or any parser changed, and a live re-run of scripts/sync-coach-rules.sh
+# produced byte-identical rule files. (An earlier comment claimed 9b4deb1 was
+# unreachable upstream; it is a direct ancestor of HEAD -- compare reports
+# status "ahead", behind_by 0.):
 #
 #   * Upstream is not a VS Code-internals consumer. Its README is "any
 #     harness, one dashboard", and src/core/parser-harnesses.ts registers

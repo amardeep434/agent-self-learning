@@ -181,8 +181,11 @@ def _copilot_event_files(env=None, limit=MAX_SESSIONS):
 #   src/core/parser-vscode-cli.ts  FILE_REF_TOOLS / FILE_EDIT_TOOLS / META_TOOLS
 #   src/core/parser-claude.ts      CLAUDE_READ_FILE_TOOLS / CLAUDE_READ_PATH_TOOLS
 #                                  / CLAUDE_WRITE_TOOLS
-# (upstream HEAD 766d0f2, 2026-07-24; this project vendored rules at
-# 9b4deb1, which is no longer reachable in the public history.)
+# (upstream HEAD 766d0f2, 2026-07-24. Correction of record: an earlier
+# comment here said the previously vendored commit 9b4deb1 was "no longer
+# reachable in the public history". That was false -- the compare API reports
+# 9b4deb1...766d0f2 as status "ahead", behind_by 0, i.e. a direct ancestor.
+# The rules are now vendored at 766d0f2 and are byte-identical to 9b4deb1's.)
 COPILOT_FILE_REF_TOOLS = {"view", "grep", "glob", "rg", "show_file"}
 COPILOT_FILE_EDIT_TOOLS = {"edit", "create"}
 COPILOT_META_TOOLS = {"report_intent"}
