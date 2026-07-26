@@ -612,6 +612,98 @@ class BuildSessionsTest(unittest.TestCase):
         self.assertEqual(session["workspaceName"], "s9")
 
 
+class CustomInstructionBytesTest(unittest.TestCase):
+    """The instruction-file plumbing three Coach rules depend on.
+
+    Upstream computes this for CLI sessions -- resolveCustomInstructionsBytes
+    branches on an `isCLI` flag to read <session dir>/workspace.yaml and stat
+    <folder>/.github/copilot-instructions.md [upstream
+    src/core/parser-vscode.ts:106-133]. The claim that it comes "from the VS
+    Code workspace, not from any CLI session log" was false.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.ws = self.tmp / "ws"
+        self.ws.mkdir()
+
+    # -- Copilot: workspace.yaml -> .github/copilot-instructions.md --------
+    def _copilot(self, cwd_line):
+        store = self.tmp / "store"
+        (store / "session-state").mkdir(parents=True, exist_ok=True)
+        session_dir = copilot_session(str(store), "s0", simple_turn("0", user="x"))
+        if cwd_line is not None:
+            (session_dir / "workspace.yaml").write_text(cwd_line)
+        return telemetry.build_turn_requests(
+            {"SL_COPILOT_HOME": str(store), "CLAUDE_CONFIG_DIR": "/nope"})
+
+    def test_copilot_reads_the_instruction_file_named_by_workspace_yaml(self):
+        (self.ws / ".github").mkdir()
+        (self.ws / ".github" / "copilot-instructions.md").write_text("x" * 1234)
+        turns = self._copilot("cwd: {}\n".format(self.ws))
+        self.assertEqual([t["customInstructionsBytes"] for t in turns], [1234])
+        self.assertEqual(turns[0]["workspaceName"], str(self.ws))
+
+    def test_an_absent_instruction_file_is_zero_not_unknown(self):
+        """0 and None mean different things downstream: 0 is "this workspace
+        has no instructions" (a finding), None is "we could not tell" (a
+        skip). Collapsing them would turn absent data into a finding."""
+        turns = self._copilot("cwd: {}\n".format(self.ws))
+        self.assertEqual([t["customInstructionsBytes"] for t in turns], [0])
+
+    def test_no_workspace_yaml_leaves_the_size_unknown(self):
+        turns = self._copilot(None)
+        self.assertEqual([t["customInstructionsBytes"] for t in turns], [None])
+
+    def test_a_relative_cwd_is_refused(self):
+        """Transcribes parseCLIWorkspaceFolderPath's absolute-path guard
+        [upstream src/core/parser-vscode-files.ts:586]. Without it a
+        relative value would be resolved against the evaluator's own
+        working directory."""
+        turns = self._copilot("cwd: ../../etc\n")
+        self.assertEqual([t["customInstructionsBytes"] for t in turns], [None])
+
+    def test_a_trailing_slash_is_stripped_like_upstream(self):
+        (self.ws / ".github").mkdir()
+        (self.ws / ".github" / "copilot-instructions.md").write_text("y" * 7)
+        turns = self._copilot("cwd: {}//\n".format(self.ws))
+        self.assertEqual([t["customInstructionsBytes"] for t in turns], [7])
+
+    # -- Claude Code: cwd -> CLAUDE.md -------------------------------------
+    def _claude(self, cwd):
+        home = self.tmp / "claude"
+        project = home / "projects" / "-repo"
+        project.mkdir(parents=True, exist_ok=True)
+        with (project / "sess.jsonl").open("w") as handle:
+            for line in [
+                {"type": "user", "cwd": cwd, "uuid": "u1",
+                 "timestamp": "2026-07-25T10:00:00.000Z",
+                 "message": {"role": "user", "content": "hi"}},
+                {"type": "assistant", "requestId": "r1", "cwd": cwd,
+                 "timestamp": "2026-07-25T10:00:01.000Z",
+                 "message": {"role": "assistant", "model": "claude-opus-5",
+                             "stop_reason": "end_turn",
+                             "content": [{"type": "text", "text": "ok"}],
+                             "usage": {"input_tokens": 1, "output_tokens": 1}}},
+            ]:
+                handle.write(json.dumps(line) + "\n")
+        return telemetry.build_turn_requests(
+            {"CLAUDE_CONFIG_DIR": str(home), "SL_COPILOT_HOME": "/nope"})
+
+    def test_claude_reads_claude_md_from_the_sessions_cwd(self):
+        """ADAPTATION: Claude Code has no .github/copilot-instructions.md.
+        <cwd>/CLAUDE.md is the same artefact -- always-on instructions
+        prepended to every request in the workspace -- under a different
+        name, and it is what this harness's half of the rule reads."""
+        (self.ws / "CLAUDE.md").write_text("z" * 4321)
+        turns = self._claude(str(self.ws))
+        self.assertEqual([t["customInstructionsBytes"] for t in turns], [4321])
+
+    def test_claude_workspace_without_claude_md_is_zero(self):
+        turns = self._claude(str(self.ws))
+        self.assertEqual([t["customInstructionsBytes"] for t in turns], [0])
+
+
 class RequestsWithTest(unittest.TestCase):
     def test_none_excludes_but_zero_and_empty_list_do_not(self):
         records = [

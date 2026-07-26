@@ -151,6 +151,79 @@ def _newest(paths, limit):
 # Copilot CLI: events.jsonl -> turn-level requests
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Custom-instruction file size.
+#
+# Upstream computes this FOR CLI SESSIONS -- resolveCustomInstructionsBytes(
+# entryPath, isCLI) branches on isCLI to read <session dir>/workspace.yaml
+# and stat <folder>/.github/copilot-instructions.md [upstream
+# src/core/parser-vscode.ts:106-133], and parseCLIEventsFile takes
+# customInstructionsBytes as its fourth parameter [parser-vscode-cli.ts:398].
+# The claim that upstream reads this "from the VS Code workspace, not from
+# any CLI session log" was false, and it kept three rules skipped.
+#
+# ADAPTATION, Claude Code half: Claude Code has no
+# .github/copilot-instructions.md. Its equivalent per-project instruction
+# file is <cwd>/CLAUDE.md, which is what is stat'ed for that harness. This is
+# an adaptation of upstream's semantics, not upstream's literal field: the
+# QUESTION ("how many bytes of always-on instructions does this workspace
+# push into every request?") is preserved exactly; the FILENAME is not, and
+# cannot be, because the harnesses read different files.
+#
+# A missing file is 0 bytes, matching detectCustomInstructionsBytes; an
+# unreadable folder is None, meaning "not determined", which keeps the
+# session out of the denominator rather than scoring it as instruction-free.
+# ---------------------------------------------------------------------------
+
+COPILOT_INSTRUCTIONS_RELPATH = (".github", "copilot-instructions.md")
+CLAUDE_INSTRUCTIONS_RELPATH = ("CLAUDE.md",)
+
+_INSTRUCTION_BYTES_CACHE = {}
+
+
+def _instruction_bytes(folder, relparts):
+    """Size of a workspace's instruction file: 0 if absent, None if the
+    workspace folder itself is unknown."""
+    if not folder:
+        return None
+    key = (folder, relparts)
+    if key in _INSTRUCTION_BYTES_CACHE:
+        return _INSTRUCTION_BYTES_CACHE[key]
+    try:
+        size = Path(folder).joinpath(*relparts).stat().st_size
+    except OSError:
+        size = 0
+    _INSTRUCTION_BYTES_CACHE[key] = size
+    return size
+
+
+_WORKSPACE_CWD_RE = re.compile(r"^cwd:\s*(.+)$", re.M)
+
+
+def _copilot_workspace_folder(session_dir):
+    """`cwd:` out of a session's workspace.yaml.
+
+    Transcribes parseCLIWorkspaceFolderPath [upstream
+    src/core/parser-vscode-files.ts:580-592] including its absolute-path
+    guard, which is what stops a relative or templated value being joined
+    onto the process's own working directory. No YAML parser: upstream reads
+    the one key with a regex and so does this, which keeps the dependency
+    surface at zero and matches upstream byte for byte on the same file.
+    """
+    try:
+        raw = (Path(session_dir) / "workspace.yaml").read_text(
+            encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = _WORKSPACE_CWD_RE.search(raw)
+    if not match:
+        return None
+    cwd = match.group(1).strip()
+    if not (cwd.startswith("/") or re.match(r"^[A-Za-z]:", cwd)):
+        return None
+    return cwd.rstrip("/") or None
+
+
 def _copilot_event_files(env=None, limit=MAX_SESSIONS):
     try:
         root = resolve_copilot_state_root(env)
@@ -377,6 +450,14 @@ def _copilot_turns(events_path: Path):
     the message text reaches rules like verbose-output.
     """
     session_id = events_path.parent.name
+    # workspace.yaml is a SECOND, independent statement of the same folder
+    # session.start's context carries. Upstream treats it as the CLI
+    # workspace identity (parseCLIWorkspaceFolderPath), and it is present
+    # even for a session whose log was truncated before session.start --
+    # which is why it is also the fallback for workspaceName below.
+    workspace_folder = _copilot_workspace_folder(events_path.parent)
+    instruction_bytes = _instruction_bytes(
+        workspace_folder, COPILOT_INSTRUCTIONS_RELPATH)
     turns = {}
     order = []
     scans = {}
@@ -577,7 +658,8 @@ def _copilot_turns(events_path: Path):
         rec["editedFiles"] = _unique(rec["editedFiles"])
         rec["skillsUsed"] = _unique(rec["skillsUsed"])
         rec["aiCode"] = scans[turn_id].blocks
-        rec["workspaceName"] = workspace
+        rec["workspaceName"] = workspace or workspace_folder
+        rec["customInstructionsBytes"] = instruction_bytes
         if not rec["toolsUsed"] and not rec["modelId"]:
             # A turn that produced neither a model attribution nor a tool
             # call is a fragment (truncated tail of an open session), not a
@@ -877,6 +959,8 @@ def _claude_records(path: Path):
         rec["skillsUsed"] = _unique(rec["skillsUsed"])
         rec["aiCode"] = scans[id(rec)].blocks
         rec["workspaceName"] = workspace
+        rec["customInstructionsBytes"] = _instruction_bytes(
+            workspace, CLAUDE_INSTRUCTIONS_RELPATH)
     return turns, api_calls
 
 

@@ -1072,6 +1072,171 @@ class VendoredTablePinTest(unittest.TestCase):
             self.assertEqual(self.ct.sha256(text), pin, name)
 
 
+class InstructionFileAdapterTest(CoachRulesEvalBase):
+    """Fire/no-fire pairs for the three rules unlocked by reading the
+    workspace's custom-instruction file.
+
+    These fixtures write a REAL workspace.yaml next to the events log and a
+    REAL .github/copilot-instructions.md in the folder it names, because
+    that is the whole mechanism under test: a fixture that injected a
+    customInstructionsBytes field directly would prove the arithmetic and
+    nothing about whether the file is ever found.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = Path(self.tmp) / "search.db"
+        conn = make_db(str(self.db))
+        insert_session(conn, "s0", 1)
+        conn.commit()
+        conn.close()
+        self.store = Path(self.tmp) / "store"
+        (self.store / "session-state").mkdir(parents=True)
+
+    def fired(self, rule_id):
+        signals, stderr = self.run_eval(VENDOR_RULES, self.db, telemetry_home=self.store)
+        self.assertNotIn(
+            "skipping {} ".format(rule_id), stderr,
+            "{} skipped when it should have evaluated:\n{}".format(rule_id, stderr))
+        return [s for s in signals if s["id"] == rule_id]
+
+    def workspace(self, name, instruction_bytes=None):
+        """A workspace folder, optionally with an instruction file in it."""
+        folder = Path(self.tmp) / "ws" / name
+        folder.mkdir(parents=True, exist_ok=True)
+        if instruction_bytes is not None:
+            github = folder / ".github"
+            github.mkdir(exist_ok=True)
+            (github / "copilot-instructions.md").write_text("x" * instruction_bytes)
+        return folder
+
+    def session(self, session_id, folder, turns=10, user="x", tools=(),
+                write_workspace_yaml=True):
+        events = []
+        for turn in range(turns):
+            events.extend(TFIX.simple_turn(str(turn), user=user, tools=tools))
+        session_dir = TFIX.copilot_session(str(self.store), session_id, events)
+        if write_workspace_yaml:
+            (session_dir / "workspace.yaml").write_text(
+                "id: {}\ncwd: {}\nbranch: main\n".format(session_id, folder))
+        return session_dir
+
+    # -- instruction-bloat -------------------------------------------------
+    def test_instruction_bloat_fires_on_an_oversized_instruction_file(self):
+        self.session("s0", self.workspace("big", instruction_bytes=9000))
+        self.assertTrue(self.fired("instruction-bloat"))
+
+    def test_instruction_bloat_silent_on_a_lean_instruction_file(self):
+        self.session("s0", self.workspace("lean", instruction_bytes=100))
+        self.assertEqual(self.fired("instruction-bloat"), [])
+
+    def test_instruction_bloat_silent_when_no_instruction_file_exists(self):
+        self.session("s0", self.workspace("bare"))
+        self.assertEqual(self.fired("instruction-bloat"), [])
+
+    def test_instruction_bloat_counts_one_workspace_once(self):
+        """upstream folds sessions onto workspaceName and keeps the max, so
+        four sessions in one bloated workspace is ONE finding, not four."""
+        folder = self.workspace("big", instruction_bytes=9000)
+        for index in range(4):
+            self.session("s{}".format(index), folder)
+        signals = self.fired("instruction-bloat")
+        self.assertEqual([s["count"] for s in signals], [1])
+
+    def test_instruction_bloat_skips_when_no_workspace_can_be_resolved(self):
+        """No workspace.yaml means the folder is unknown, which is not the
+        same as "no instructions". The honest output is a skip."""
+        self.session("s0", self.workspace("x"), write_workspace_yaml=False)
+        _, stderr = self.run_eval(VENDOR_RULES, self.db, telemetry_home=self.store)
+        self.assertIn("skipping instruction-bloat ", stderr)
+
+    def test_a_relative_workspace_cwd_is_refused(self):
+        """parseCLIWorkspaceFolderPath requires an absolute path. Without
+        that guard a relative value would be joined onto whatever directory
+        the evaluator happens to be running in."""
+        session_dir = self.session("s0", self.workspace("x"))
+        (session_dir / "workspace.yaml").write_text("cwd: ../../etc\n")
+        _, stderr = self.run_eval(VENDOR_RULES, self.db, telemetry_home=self.store)
+        self.assertIn("skipping instruction-bloat ", stderr)
+
+    # -- no-custom-instructions --------------------------------------------
+    def test_no_custom_instructions_fires_when_no_workspace_has_a_file(self):
+        for index in range(4):
+            self.session("s{}".format(index), self.workspace("bare{}".format(index)))
+        self.assertTrue(self.fired("no-custom-instructions"))
+
+    def test_no_custom_instructions_silent_when_workspaces_have_files(self):
+        for index in range(4):
+            self.session("s{}".format(index),
+                         self.workspace("w{}".format(index), instruction_bytes=500))
+        self.assertEqual(self.fired("no-custom-instructions"), [])
+
+    def test_no_custom_instructions_silent_at_a_healthy_mixed_usage_rate(self):
+        """Half the requests run in a workspace with instructions: the
+        numerator is non-zero but the usage rate clears the threshold, so
+        the rule must stay silent. Mutation testing showed the all-covered
+        fixture above proved nothing -- deleting the usageRate test left it
+        green, because with zero uncovered requests the count was 0 and no
+        signal is emitted for a zero count either way."""
+        for index in range(2):
+            self.session("with{}".format(index),
+                         self.workspace("w{}".format(index), instruction_bytes=500))
+            self.session("without{}".format(index),
+                         self.workspace("bare{}".format(index)))
+        self.assertEqual(self.fired("no-custom-instructions"), [])
+
+    def test_no_custom_instructions_silent_below_the_request_floor(self):
+        self.session("s0", self.workspace("bare"), turns=5)
+        self.assertEqual(self.fired("no-custom-instructions"), [])
+
+    # -- context-engineering-gaps ------------------------------------------
+    def test_context_gaps_fires_when_the_corpus_uses_none_of_the_tools(self):
+        for index in range(4):
+            self.session("s{}".format(index), self.workspace("bare{}".format(index)))
+        signals = self.fired("context-engineering-gaps")
+        self.assertTrue(signals)
+        # All five gaps open: no subagents, no skills, no MCP, no file refs,
+        # no instruction files.
+        self.assertEqual(signals[0]["count"], 5)
+
+    def test_context_gaps_silent_when_every_gap_is_closed(self):
+        folder = self.workspace("rich", instruction_bytes=500)
+        for index in range(4):
+            events = []
+            for turn in range(10):
+                events.extend(TFIX.simple_turn(str(turn), user="x", tools=[
+                    ("mcp_thing_do", {}),
+                    ("view", {"path": "/repo/a.py"}),
+                    ("skill", {"skill": "brainstorming"}),
+                ]))
+            events.insert(-1, TFIX.ev("subagent.started", {"agentName": "explore"},
+                                      "2026-07-25T22:40:01.000Z"))
+            session_dir = TFIX.copilot_session(str(self.store), "s{}".format(index), events)
+            (session_dir / "workspace.yaml").write_text("cwd: {}\n".format(folder))
+        self.assertEqual(self.fired("context-engineering-gaps"), [])
+
+    def test_context_gaps_counts_only_the_open_gaps(self):
+        """Skills and file references present, the other three absent. If
+        the adapter were counting turns rather than gaps, or hard-coding
+        five, this would not come back as 3."""
+        folder = self.workspace("partial")
+        for index in range(4):
+            events = []
+            for turn in range(10):
+                events.extend(TFIX.simple_turn(str(turn), user="x", tools=[
+                    ("view", {"path": "/repo/a.py"}),
+                    ("skill", {"skill": "brainstorming"}),
+                ]))
+            session_dir = TFIX.copilot_session(str(self.store), "s{}".format(index), events)
+            (session_dir / "workspace.yaml").write_text("cwd: {}\n".format(folder))
+        signals = self.fired("context-engineering-gaps")
+        self.assertEqual([s["count"] for s in signals], [3])
+
+    def test_context_gaps_silent_below_the_request_floor(self):
+        self.session("s0", self.workspace("bare"), turns=5)
+        self.assertEqual(self.fired("context-engineering-gaps"), [])
+
+
 class TelemetryDetectPinTest(CoachRulesEvalBase):
     """Each telemetry adapter hardcodes one rule's predicate, so it must
     refuse to run if that rule's `detect` block ever changes shape.
@@ -1400,7 +1565,8 @@ class TelemetryAbsentSkipsLoudlyTest(CoachRulesEvalBase):
         "low-markdown-ratio", "no-language-exploration",
         "no-skills", "agentic-no-tools", "verbose-prompt-no-compression",
         "no-spec-structure", "premium-waste", "premium-for-lookup-questions",
-        "auto-avoidance", "session-drift",
+        "auto-avoidance", "session-drift", "instruction-bloat",
+        "no-custom-instructions", "context-engineering-gaps",
     ]
 
     def test_all_telemetry_rules_skip_with_a_source_naming_reason(self):
@@ -1527,7 +1693,7 @@ class CoverageAssertionTest(CoachRulesEvalBase):
     # skip. TelemetryAdapterTest covers them with a store present, and
     # TelemetryAbsentSkipsLoudlyTest pins that they skip without one.
     EXPECTED_EVALUATED = 11
-    EXPECTED_TELEMETRY_ADAPTERS = 21
+    EXPECTED_TELEMETRY_ADAPTERS = 24
     EXPECTED_TOTAL_RULES = 45
 
     def test_coverage_count_pinned(self):

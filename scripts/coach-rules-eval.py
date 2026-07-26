@@ -216,41 +216,8 @@ UNSUPPORTED_REASONS = {
         "_pin() exists to prevent. This wants a locally-named signal with "
         "its own suggestion text, not a redefinition of a vendored rule",
 
-    "instruction-bloat": "reachable; not yet built. The previous reason "
-        "('upstream reads it from the VS Code workspace, not from any CLI "
-        "session log') is FALSE: resolveCustomInstructionsBytes(entryPath, "
-        "isCLI) branches on isCLI to read <session dir>/workspace.yaml and "
-        "stat <folder>/.github/copilot-instructions.md [upstream "
-        "src/core/parser-vscode.ts:106-133], and parseCLIEventsFile takes "
-        "customInstructionsBytes as a parameter [src/core/"
-        "parser-vscode-cli.ts:398]. Upstream computes this FOR CLI "
-        "SESSIONS. [measured: workspace.yaml exists in every local Copilot "
-        "session directory -- 137 found]. The Claude analogue is "
-        "<cwd>/CLAUDE.md and cwd is already extracted. What is missing is "
-        "the plumbing, not the data",
 
-    "no-custom-instructions": "reachable; not yet built, and downstream of "
-        "instruction-bloat. Distinct from it: this rule needs per-request "
-        "customInstructions[], set only by extractCustomInstructions("
-        "req.contentReferences) [upstream src/core/parser-vscode-request.ts:"
-        "387] -- the VS Code request parser, and the only place any parser "
-        "sets it -- so a naive evaluation gives usageRate == 0 < 0.05 for "
-        "corpus -- a rule that ALWAYS fires, the same failure class as one "
-        "that never fires and arguably worse because it looks like a "
-        "finding. Meaningful evaluation needs the session-scope "
-        "instruction-file mapping described under instruction-bloat",
 
-    "context-engineering-gaps": "reachable; not yet built. The previous "
-        "reason said it was 'blocked' on customInstructions. It is not "
-        "blocked: gapCount sums FIVE independent booleans [upstream "
-        "src/core/dsl/interpreter.ts:612-650 computeContextGaps] -- "
-        "sub-agents, skills, MCP tools, file-reference rate, "
-        "custom-instruction rate -- and four are computable from fields "
-        "telemetry.py already produces (agentName, skillsUsed, toolsUsed "
-        "with an mcp_ prefix, referencedFiles). Only the fifth needs the "
-        "instruction-bloat plumbing, and since severity keys on "
-        "gapCount >= 4 a missing fifth gap moves a severity boundary, not "
-        "the rule's ability to answer",
 
     "agent-mode-for-asks": "reachable; not yet built. The previous reason "
         "was wrong twice over. (a) It claimed upstream's CLI parser "
@@ -1584,6 +1551,141 @@ def eval_session_drift(rule, tel):
     return matched
 
 
+# ---------------------------------------------------------------------------
+# The instruction-file cluster.
+#
+# All three were skipped on the claim that upstream reads custom-instruction
+# size "from the VS Code workspace, not from any CLI session log". False:
+# resolveCustomInstructionsBytes branches on an `isCLI` parameter to read the
+# CLI session's own workspace.yaml [upstream src/core/parser-vscode.ts:118].
+# scripts/lib/telemetry.py now does the same, and states the Claude-side
+# adaptation (CLAUDE.md in place of .github/copilot-instructions.md) at the
+# point where it is made.
+# ---------------------------------------------------------------------------
+
+def _instruction_records(tel, rule_id):
+    """Turns whose workspace instruction size could be DETERMINED.
+
+    None means "workspace folder unknown", not "no instructions". Scoring
+    those as 0 bytes would report a clean bill of health from absent data,
+    so they are excluded and an empty selection skips the rule loudly.
+    """
+    return _require_records(
+        telemetry.requests_with(tel.turns, "customInstructionsBytes",
+                                "workspaceName"),
+        rule_id, "customInstructionsBytes/workspaceName")
+
+
+def eval_instruction_bloat(rule, tel):
+    """Transcribes computeInstructionBloatStats [upstream
+    src/core/dsl/interpreter.ts:717-746].
+
+    Note the field is named bloatedSessions but is counted PER WORKSPACE --
+    upstream folds sessions onto workspaceName and keeps the maximum size
+    seen. Counting per session instead would multiply one bloated
+    instruction file by however many sessions happened to touch it.
+    """
+    _pin(rule, match="true", check="stats.bloatedSessions >= thresholds.minBloated")
+    t = _thresholds(rule, "maxBytes", "minBloated")
+    turns = _instruction_records(tel, rule["id"])
+    per_workspace = {}
+    for record in turns:
+        name = record["workspaceName"]
+        size = record["customInstructionsBytes"]
+        if name not in per_workspace or size > per_workspace[name]:
+            per_workspace[name] = size
+    bloated = sum(1 for size in per_workspace.values() if size > t["maxBytes"])
+    if not bloated >= t["minBloated"]:
+        return None
+    return bloated
+
+
+def eval_no_custom_instructions(rule, tel):
+    """ADAPTATION, and the most dangerous rule in this file to get wrong.
+
+    Upstream's input is a PER-REQUEST customInstructions[] array, populated
+    only by extractCustomInstructions(req.contentReferences) [upstream
+    src/core/parser-vscode-request.ts:387] -- the VS Code request parser.
+    No CLI parser sets it, upstream's included. Evaluating the rule with
+    that field simply absent would give usageRate == 0 < 0.05 for every
+    corpus on earth: a rule that ALWAYS fires, which is the same failure
+    class as one that never fires and worse in practice, because it looks
+    like a finding.
+
+    So the input is redefined for CLI harnesses: a request counts as
+    carrying custom instructions when its workspace has a non-empty
+    instruction file, since that file is prepended to every request in the
+    workspace. What differs from upstream: upstream can distinguish two
+    requests in the SAME workspace, one of which attached an instruction
+    reference and one of which did not. This cannot -- the value is constant
+    within a workspace. The rule therefore answers "what fraction of your
+    requests ran in a workspace with no instruction file", which varies
+    across a real corpus and is the question the remediation text addresses.
+    """
+    _pin(rule, match="customInstructions.length == 0",
+               check="usageRate < thresholds.minRate AND total > thresholds.minReqs")
+    t = _thresholds(rule, "minRate", "minReqs")
+    turns = _instruction_records(tel, rule["id"])
+    without = sum(1 for r in turns if r["customInstructionsBytes"] <= 0)
+    total = len(turns)
+    usage_rate = (total - without) / total
+    if not (usage_rate < t["minRate"] and total > t["minReqs"]):
+        return None
+    return without
+
+
+def eval_context_engineering_gaps(rule, tel):
+    """Five independent gap booleans; the rule reports how many are open.
+
+    The previous skip called this "blocked on customInstructions". It was
+    not blocked -- four of the five gaps read fields telemetry.py already
+    produced, and `severity` keys on gapCount >= 4, so a missing fifth gap
+    would have moved a severity boundary rather than the rule's ability to
+    answer. The fifth is now available anyway.
+
+    ADAPTATION, hasSubAgents: the vendored detect block's third conjunct is
+    someWhere(allReqs, "agentMode", "agent"), universally true for a CLI, so
+    it is a no-op and dropped. Note also that upstream's DSL block and its
+    TypeScript computeContextGaps [upstream src/core/dsl/interpreter.ts:612]
+    disagree with each other -- the block ANDs three independent someWhere()
+    calls, the function requires all three conditions on the SAME request.
+    The vendored block is what this project pins, so the block is what is
+    followed here.
+    """
+    _pin(rule, match="true",
+               check="gapCount > 0 AND reqCount >= thresholds.minReqs")
+    t = _thresholds(rule, "minReqs", "fileRefMinRate", "instructionMinRate")
+    # agentName is deliberately NOT in the requires list: it is None on
+    # every turn that ran no subagent, and "this corpus used no subagents"
+    # is precisely gap 1 -- the finding, not missing data. Upstream reads it
+    # through asStr(), which maps absent to "". The other four fields are
+    # always populated when the harness produced the turn at all, so an
+    # empty selection there really does mean "no data".
+    turns = _require_records(
+        telemetry.requests_with(tel.turns, "skillsUsed", "toolsUsed",
+                                "referencedFiles", "customInstructionsBytes"),
+        rule["id"],
+        "skillsUsed/toolsUsed/referencedFiles/customInstructionsBytes")
+    total = len(turns)
+    has_subagents = any(
+        (r.get("agentName") or "") not in ("", "copilot") for r in turns)
+    has_skills = any(len(r["skillsUsed"]) > 0 for r in turns)
+    has_mcp = any(t_name.startswith("mcp_")
+                  for r in turns for t_name in r["toolsUsed"])
+    file_ref_rate = sum(1 for r in turns if len(r["referencedFiles"]) > 0) / total
+    instr_rate = sum(1 for r in turns if r["customInstructionsBytes"] > 0) / total
+    gap_count = sum((
+        not has_subagents,
+        not has_skills,
+        not has_mcp,
+        file_ref_rate < t["fileRefMinRate"],
+        instr_rate < t["instructionMinRate"],
+    ))
+    if not (gap_count > 0 and total >= t["minReqs"]):
+        return None
+    return gap_count
+
+
 TELEMETRY_ADAPTERS = {
     "vibe-coding": eval_vibe_coding,
     "copy-paste-blindness": eval_copy_paste_blindness,
@@ -1606,6 +1708,9 @@ TELEMETRY_ADAPTERS = {
     "premium-for-lookup-questions": eval_premium_for_lookup_questions,
     "auto-avoidance": eval_auto_avoidance,
     "session-drift": eval_session_drift,
+    "instruction-bloat": eval_instruction_bloat,
+    "no-custom-instructions": eval_no_custom_instructions,
+    "context-engineering-gaps": eval_context_engineering_gaps,
 }
 
 
