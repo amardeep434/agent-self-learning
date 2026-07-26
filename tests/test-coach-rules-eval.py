@@ -1566,7 +1566,7 @@ class SlashAndPlanAdapterTest(CoachRulesEvalBase):
         self.assertTrue(signals)
         suggestion = signals[0]["suggestion"]
         self.assertIn("ADAPTED FOR CLI", suggestion)
-        self.assertIn("none of which exist", suggestion)
+        self.assertIn("none exist in either CLI", suggestion)
         self.assertNotEqual(
             suggestion, parse_rule(VENDOR_RULES / "no-slash-commands.md")["suggestion"])
 
@@ -1637,7 +1637,7 @@ class SlashAndPlanAdapterTest(CoachRulesEvalBase):
         self.assertTrue(signals)
         suggestion = signals[0]["suggestion"]
         self.assertIn("ADAPTED FOR CLI", suggestion)
-        self.assertIn("which neither CLI has", suggestion)
+        self.assertIn("which\n            neither CLI has".replace("\n            ", " "), suggestion)
         self.assertNotEqual(
             suggestion, parse_rule(VENDOR_RULES / "agent-mode-for-asks.md")["suggestion"])
 
@@ -1679,6 +1679,145 @@ class SlashAndPlanAdapterTest(CoachRulesEvalBase):
     def test_no_spec_driven_silent_below_the_session_floor(self):
         self._copilot_sessions("make it work", count=3)
         self.assertEqual(self.fired("no-spec-driven-development"), [])
+
+
+class SuggestionOverrideAndScopeTest(CoachRulesEvalBase):
+    """The two things that only show up in the PERSISTED artifact.
+
+    Reading the source proves what the evaluator emits. It does not prove
+    what survives coach-signals.py, which sanitizes every suggestion to 240
+    characters before it can reach a reviewer prompt or the memory file. The
+    first version of SUGGESTION_OVERRIDES was cut mid-word at that cap --
+    the ADAPTED FOR CLI marker survived, the half saying what to do instead
+    did not. So these tests run the real merge step and read the file.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = Path(self.tmp) / "search.db"
+        conn = make_db(str(self.db))
+        insert_session(conn, "s0", 1)
+        conn.commit()
+        conn.close()
+        self.store = Path(self.tmp) / "store"
+        (self.store / "session-state").mkdir(parents=True)
+
+    def copilot(self, session_id, events):
+        return TFIX.copilot_session(str(self.store), session_id, events)
+
+    def plain_turns(self, count, per_session=10, user="x", tools=()):
+        made = 0
+        index = 0
+        while made < count:
+            events = []
+            for turn in range(min(per_session, count - made)):
+                events.extend(TFIX.simple_turn(str(turn), user=user, tools=tools))
+                made += 1
+            self.copilot("s{}".format(index), events)
+            index += 1
+
+    def merged_signals(self):
+        """Drive the REAL coach-signals.py merge and read what it wrote."""
+        out = Path(self.tmp) / "coach-signals.json"
+        env = dict(os.environ)
+        env.update({
+            "SL_COACH_RULES_ENABLED": "true",
+            "SL_COACH_RULES_DIR": str(VENDOR_RULES),
+            "SL_SEARCH_DB": str(self.db),
+            "SL_COACH_SIGNALS_FILE": str(out),
+            "SL_COPILOT_HOME": str(self.store),
+            "CLAUDE_CONFIG_DIR": str(Path(self.tmp) / "no-claude"),
+        })
+        proc = subprocess.run(
+            [sys.executable, str(REPO / "scripts" / "coach-signals.py")],
+            capture_output=True, text=True, env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return {s["id"]: s for s in json.loads(out.read_text())["signals"]}
+
+    # -- SUGGESTION_OVERRIDES ---------------------------------------------
+    def test_every_override_survives_the_sanitize_cap_intact(self):
+        """A contract, not a style rule: an override one character over the
+        cap is cut mid-sentence in the file the reviewer actually reads."""
+        for rule_id, text in CRE.SUGGESTION_OVERRIDES.items():
+            self.assertLessEqual(
+                len(text), CRE.OVERRIDE_MAX_CHARS,
+                "override for {} is {} chars and will be truncated by "
+                "coach-signals.py at {}".format(
+                    rule_id, len(text), CRE.OVERRIDE_MAX_CHARS))
+
+    def test_the_override_reaches_the_persisted_file_whole(self):
+        """Inspects the artifact, not the table. Asserts the marker AND the
+        final sentence, so a re-lengthened override fails here even if the
+        prefix still survives."""
+        self.plain_turns(60, user="what is a monad")
+        signal = self.merged_signals()["agent-mode-for-asks"]
+        self.assertTrue(signal["suggestion"].startswith("ADAPTED FOR CLI"))
+        self.assertIn("ask them somewhere cheaper", signal["suggestion"])
+        self.assertEqual(signal["suggestion"],
+                         CRE.SUGGESTION_OVERRIDES["agent-mode-for-asks"])
+
+    def test_the_override_is_not_upstreams_text(self):
+        self.plain_turns(60, user="what is a monad")
+        signal = self.merged_signals()["agent-mode-for-asks"]
+        upstream = parse_rule(VENDOR_RULES / "agent-mode-for-asks.md")["suggestion"]
+        self.assertNotEqual(signal["suggestion"], upstream)
+        # The override NAMES Ask/Chat mode in order to say it does not exist
+        # here, so a bare absence check would be the wrong assertion. What
+        # must not survive is upstream RECOMMENDING it.
+        self.assertNotIn("Use Ask/Chat mode", signal["suggestion"])
+        self.assertIn("which neither CLI has", signal["suggestion"])
+
+    # -- absence scope ----------------------------------------------------
+    def test_an_absence_finding_states_the_window_it_was_measured_over(self):
+        """no-skills asserts "you have never used a skill". Over a capped
+        sample that is not the claim the data supports, so the signal must
+        say which window it saw."""
+        self.plain_turns(60)
+        signal = self.merged_signals()["no-skills"]
+        self.assertIn("SCOPE:", signal["scope"])
+        self.assertIn("absence", signal["scope"])
+        # The REAL session count, not the cap: 60 turns at 10 per session.
+        self.assertIn("6 session log(s)", signal["scope"])
+        self.assertIn("newest 40 per harness", signal["scope"])
+
+    def test_a_rate_based_finding_carries_no_scope_note(self):
+        """A rate over a sample is an estimate of a rate, which is what a
+        sample is for. Annotating those too would make the note noise and
+        teach the reader to ignore it."""
+        self.plain_turns(60)
+        signal = self.merged_signals()["agentic-no-tools"]
+        self.assertEqual(signal.get("scope"), "")
+
+    def test_the_scope_note_survives_into_the_persisted_file(self):
+        """It travels in its own field precisely so a long suggestion cannot
+        push it past the 240-char cap. Assert it is there AFTER the merge,
+        not merely emitted by the evaluator."""
+        self.plain_turns(60)
+        raw, _ = self.run_eval(VENDOR_RULES, self.db, telemetry_home=self.store)
+        emitted = {s["id"]: s for s in raw}
+        self.assertIn("scope", emitted["no-skills"])
+        merged = self.merged_signals()["no-skills"]
+        self.assertEqual(merged["scope"], emitted["no-skills"]["scope"])
+
+    def test_scope_note_is_rendered_into_the_reviewer_prompt_line(self):
+        """The jq in session-review.sh is the only thing that puts `scope` in
+        front of the model. A field the renderer drops is a field that does
+        not exist."""
+        self.plain_turns(60)
+        merged = self.merged_signals()
+        line = "- [{id}] severity={severity}: {suggestion}{scope}".format(
+            scope=" [{}]".format(merged["no-skills"]["scope"]), **{
+                k: merged["no-skills"][k]
+                for k in ("id", "severity", "suggestion")})
+        self.assertIn("SCOPE:", line)
+        renderers = [
+            (REPO / "scripts" / "session-review.sh").read_text(),
+            (REPO / "scripts" / "copilot-session-review.sh").read_text(),
+        ]
+        for text in renderers:
+            self.assertIn(".scope", text,
+                          "a review script renders signals without .scope, so "
+                          "the window disclosure never reaches the model")
 
 
 class TelemetryDetectPinTest(CoachRulesEvalBase):

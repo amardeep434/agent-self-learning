@@ -113,6 +113,14 @@ def main():
                 "id": sanitize_text(sig["id"]),
                 "severity": sanitize_text(sig.get("severity", "unknown")),
                 "suggestion": sanitize_text(sig.get("suggestion", "")),
+                # An absence measured over a capped sample is not the global
+                # claim its wording implies, so the evaluator states the
+                # window it used. Carried in its OWN field: appended to
+                # `suggestion` it would fall past the 240-character cap and
+                # vanish silently, and a caveat that can be truncated away is
+                # worse than no caveat, because the claim survives without it.
+                # Sanitized like every other field -- still untrusted input.
+                "scope": sanitize_text(sig.get("scope", "")),
                 "count": int(sig.get("count", 0) or 0),
                 "source": sig.get("source", "unknown"),
             }
@@ -127,6 +135,10 @@ def main():
                 "id": sanitize_text(sig["id"]),
                 "severity": sanitize_text(sig.get("severity", "unknown")),
                 "suggestion": sanitize_text(sig.get("suggestion", "")),
+                # Route B reads Coach's own analysis over its own corpus, so
+                # it carries no window of ours to disclose. The key is still
+                # emitted, empty, so the renderer stays uniform across routes.
+                "scope": sanitize_text(sig.get("scope", "")),
                 "count": int(sig.get("count", 0) or 0),
                 "source": sig.get("source", "unknown"),
             }

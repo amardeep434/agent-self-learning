@@ -274,20 +274,78 @@ def _join_continuations(text):
 # buried in an adapter. The rule id and the count remain upstream's.
 # ---------------------------------------------------------------------------
 SUGGESTION_OVERRIDES = {
+    # Kept under coach-signals.py's 240-character sanitize cap ON PURPOSE.
+    # Inspecting the persisted coach-signals.json showed the first version of
+    # these was cut mid-word at 240, losing the half that says what to do
+    # instead -- so the marker survived but the replacement advice did not,
+    # which is the only thing that made substituting the text honest. Two
+    # of upstream's own suggestions are still truncated by the same cap;
+    # that is upstream's text being shortened, not ours being falsified.
+    # scripts/lib/coachtables.py has no equivalent constraint; this one is
+    # load-bearing, and OVERRIDE_MAX_CHARS below is asserted by a test.
     "no-slash-commands":
-        "ADAPTED FOR CLI: upstream suggests /fix, /explain, /tests and /doc, "
-        "none of which exist in Copilot CLI or Claude Code. Use the commands "
-        "your harness does have, and define project-level ones for the tasks "
-        "you repeat (Claude Code: .claude/commands/; Copilot CLI: custom "
-        "prompt files). Note the detected count includes built-in UI "
-        "commands such as /model and /compact, which are not task commands.",
+        "ADAPTED FOR CLI: upstream names /fix, /explain, /tests, /doc - none "
+        "exist in either CLI. Define project-level commands for the tasks "
+        "you repeat (Claude Code: .claude/commands/). The count includes "
+        "built-in UI commands such as /model.",
     "agent-mode-for-asks":
-        "ADAPTED FOR CLI: upstream suggests switching to Ask/Chat mode, which "
-        "neither CLI has. The finding still holds -- these were short "
-        "questions that consumed a full agentic turn and produced no tool "
-        "call, no code and no file access. Ask them somewhere cheaper, or "
-        "batch them into a task that does real work.",
+        "ADAPTED FOR CLI: upstream says switch to Ask/Chat mode, which "
+        "neither CLI has. These were short questions that spent a full "
+        "agentic turn and produced no tool call, no code and no file access; "
+        "ask them somewhere cheaper.",
 }
+
+# coach-signals.py sanitizes every suggestion to this many characters before
+# it can reach a reviewer prompt or the memory file. An override longer than
+# this is silently cut mid-sentence, so the length is a contract, not a
+# style preference.
+OVERRIDE_MAX_CHARS = 240
+
+
+
+# ---------------------------------------------------------------------------
+# Absence-based findings, and the window they were measured over.
+#
+# telemetry.MAX_SESSIONS caps how many session logs are parsed. For a RATE
+# that cap is sound -- a rate over the newest N sessions is an estimate of a
+# rate, and estimating is what it is for. For an ABSENCE it is not: "no
+# ExitPlanMode in the newest 40 sessions" and "this user never uses plan
+# mode" are different claims, and only the second is worth telling someone.
+# Emitting the first while wording it as the second is the same vacuity
+# shape this evaluator's skip table exists to remove -- a global assertion
+# resting on data that cannot support it.
+#
+# So every rule whose check is driven by a "this never happened" boolean
+# carries a scope note into the emitted signal. The note travels in its OWN
+# field rather than appended to `suggestion`, because coach-signals.py
+# sanitizes each suggestion to 240 characters and a note on the end of a long
+# suggestion would be silently cut -- which is exactly how the first version
+# of SUGGESTION_OVERRIDES lost half its text.
+#
+# Rate-driven rules (no-slash-commands, no-custom-instructions,
+# no-spec-structure, ...) are deliberately NOT listed: they assert a rate
+# over a sample, which the sample supports.
+# ---------------------------------------------------------------------------
+
+SAMPLE_SCOPE_NOTE = (
+    "SCOPE: this is an absence, measured over the {sessions} session log(s) "
+    "read (newest {cap} per harness), not over full history."
+)
+
+ABSENCE_SCOPED_RULES = {
+    "no-skills": SAMPLE_SCOPE_NOTE,
+    "auto-avoidance": SAMPLE_SCOPE_NOTE,
+    "context-engineering-gaps": SAMPLE_SCOPE_NOTE,
+}
+
+
+def _scope_note(rule_id, telemetry_source):
+    """The scope note for a signal, or "" when the rule is not absence-based."""
+    template = ABSENCE_SCOPED_RULES.get(rule_id)
+    if template is None or telemetry_source is None:
+        return ""
+    return template.format(sessions=telemetry_source.session_count,
+                           cap=telemetry.MAX_SESSIONS)
 
 
 def parse_rule(path):
@@ -1997,6 +2055,14 @@ class TelemetrySource:
         return self._turns
 
     @property
+    def session_count(self):
+        """Distinct (harness, session) pairs actually parsed. Reported in the
+        scope note rather than telemetry.MAX_SESSIONS on its own, because a
+        corpus smaller than the cap would otherwise be described as "the
+        newest 40" when it is the whole history."""
+        return len({(r.get("source"), r.get("session_id")) for r in self.turns})
+
+    @property
     def api_calls(self):
         if self._api_calls is None:
             self._api_calls = telemetry.build_api_calls(self._env)
@@ -2077,13 +2143,17 @@ def main():
 
         evaluated += 1
         if count is not None and count > 0:
-            signals.append({
+            signal = {
                 "id": rule_id,
                 "severity": rule["severity"],
                 "suggestion": SUGGESTION_OVERRIDES.get(rule_id, rule["suggestion"]),
                 "count": count,
                 "source": "rules",
-            })
+            }
+            scope = _scope_note(rule_id, telemetry_source)
+            if scope:
+                signal["scope"] = scope
+            signals.append(signal)
 
     print(
         "coach-rules-eval: {} of 45 vendored rules evaluated (adapted to this "
