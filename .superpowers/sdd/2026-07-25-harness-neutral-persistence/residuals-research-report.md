@@ -1189,3 +1189,199 @@ fails on exactly that.
    lying in either direction.
 4. `test_pinned_directory_cannot_be_removed` — never actually reported before,
    because the old combined test died at the rename first.
+
+---
+
+## Residual A, round 3 — the pin blocked our own writes
+
+CI run `30184755246` on `1aff99b`. The access-mask diagnosis was right:
+
+```
+[capability probe] win32 directory pinning: AVAILABLE (verified: a pinned directory could not be renamed)
+```
+
+Ubuntu ×2 and macOS ×2 green. Windows: **10 of 43 suites failing**, including
+`test-claude-absent.sh`, `test-copilot-session-review.sh`,
+`test-e2e-skill-visibility.sh`, `test-adversarial-sweep.py`,
+`test-persist-proposal.py`. Symptoms: *"nothing persisted with claude absent"*,
+*"Copilot path did not persist"*, *"pipeline wrote the skill as a directory
+(expected 'yes', got 'no')"*.
+
+**Persistence was completely broken on Windows whenever pinning engaged** —
+the exact failure this branch exists to eliminate, reintroduced by the
+hardening meant to prevent it. The probe said the guarantee was verified, and
+it was; it was verifying half the property.
+
+### Is the exclusion intrinsic? No — and one citation settles it
+
+The coordinator's hypothesis pointed at the final `os.replace` needing delete
+access on the destination entry. The mechanism is one step earlier and more
+general:
+
+> **FILE_WRITE_DATA** (value: 2) — "For a file object, the right to write data
+> to the file. For a directory object, the right to create a file in the
+> directory (FILE_ADD_FILE)."
+>
+> **FILE_ADD_FILE** (value: 2) — "For a directory, the right to create a file
+> in the directory."
+
+<https://learn.microsoft.com/en-us/windows/win32/fileio/file-access-rights-constants>
+
+**Creating a file inside a directory is a write to the directory object.**
+`FILE_ADD_FILE` and `FILE_WRITE_DATA` are the same bit, 0x0002. So
+`tempfile.mkstemp(dir=stage_dir)` — and the commit-phase `os.replace`, which
+also creates an entry in that directory — open the pinned directory
+requesting `FILE_ADD_FILE`. The share-access check sees `WriteAccess`, our
+share mode omitted `FILE_SHARE_WRITE`, and the kernel refused. We denied
+ourselves the one operation this module exists to protect. Not just the
+replace: **staging itself** was refused, which is why the failures read as
+"nothing persisted" rather than as a partial write.
+
+The two properties are governed by **different flags**, so they are not
+mutually exclusive:
+
+| Requirement | Flag |
+|---|---|
+| attacker cannot rename/delete the pinned directory | deny `FILE_SHARE_DELETE` |
+| we can still create and replace files inside it | grant `FILE_SHARE_WRITE` |
+
+`PIN_SHARE_MODE = FILE_SHARE_READ | FILE_SHARE_WRITE`.
+
+**No pin release before the replace is needed**, so the "security theatre"
+option the coordinator raised does not arise. That option would have reopened
+the window at exactly the moment it matters and would have been the wrong
+trade even if it worked.
+
+### What this costs, stated rather than buried
+
+Granting `FILE_SHARE_WRITE` means a concurrent process can still open the
+directory for write, so converting it **in place** to a junction via
+`FSCTL_SET_REPARSE_POINT` is no longer blocked.
+
+The module now claims **exactly one thing**: a pinned directory cannot be
+**renamed or deleted** while held. That is the swap the measured ~18% TOCTOU
+race actually performs — check, then `mkstemp` into a directory that was
+replaced in between. In-place reparse conversion is a different, narrower
+attack and is not covered. Every docstring claiming both was describing a
+configuration that cannot coexist with writing anything at all; all of them
+are corrected (`win_dir_pin.py` module docstring, `persist-proposal.py` module
+docstring, `_write_all_path`'s docstring, and the pin call-site comment).
+
+### The non-negotiable, implemented two ways
+
+> *the module must never be able to break the write path.*
+
+**1. The probe verifies both halves as one verdict.**
+`verify_pin_blocks_rename` is replaced by `verify_pin_contract`, which measures
+(a) that an attacker's rename is refused **and** (b) that our own staged
+replace inside the pinned directory succeeds. Order matters: (b) runs first
+and while pinned, because if our writes are refused there is nothing to
+discuss about (a).
+
+`staged_replace_probe()` performs the writer's **exact** three operations —
+create a destination, `tempfile.mkstemp` alongside it, `os.replace` **over the
+existing** destination — not an approximation. A weaker probe is precisely how
+the previous round shipped a "verified" guarantee that broke every write. It
+is plain stdlib filesystem work, so unlike the pin it is directly testable on
+POSIX, and it is.
+
+| Verdict | Availability |
+|---|---|
+| `GUARANTEE_HELD` — rename refused, our writes fine, rename allowed after release | **available** |
+| `GUARANTEE_BLOCKS_OUR_WRITES` — our own staged replace refused while pinned | disabled |
+| `GUARANTEE_NOT_ENFORCED` — rename succeeded while pinned | disabled |
+| `GUARANTEE_INCONCLUSIVE` — rename refused even after release | disabled |
+| `GUARANTEE_NO_BACKEND` — no kernel32 | disabled |
+
+**2. A structural safety net, because the probe cannot be complete.**
+The probe necessarily measures a **temp** directory; the store may live on
+another volume with different behaviour. So `_write_all_path` now releases
+every pin and re-runs the whole transaction **unpinned** if staging fails
+while pins were held.
+
+This is safe for one specific reason, which is the invariant that function has
+always documented: *on a staging failure, no real target has been touched.*
+Consequently:
+
+* **Commit-phase failures are not retried.** Past the first `os.replace` some
+  entries are committed, and re-running an append-mode entry would
+  double-apply it — worse than the original failure.
+* **`PersistError` is never retried.** Confinement refusals and reparse-point
+  rejections are attack signals; retrying one *with the pins released* would
+  be the single worst thing this path could do. `PersistError` is not an
+  `OSError` subclass, so it bypasses the retry wrapping structurally rather
+  than by clause ordering.
+* **A staging failure with nothing pinned still propagates unchanged.** If no
+  pin was taken, pinning cannot be the cause, and an ordinary permissions or
+  disk-full error must surface exactly as it always has.
+
+`_StagingFailed` is an internal marker that never escapes the module.
+
+### Mutation results (Residual A, round 3)
+
+10 mutants, **all killed** — one after a fixture defect was corrected:
+
+| # | Mutation | Result |
+|---|---|---|
+| S1 | deny write sharing again (the persistence-breaking config) | killed |
+| S2 | grant `FILE_SHARE_DELETE` (reopens the race) | killed |
+| S3 | contract stops checking our own writes | killed |
+| S4 | probe replaces onto a *new* name instead of an existing file | killed |
+| S5 | probe destination never pre-created | killed |
+| S6 | retry even when nothing was pinned (masks real failures) | killed |
+| S7 | retry reuses the same, still-pinned `PinSet` | killed |
+| S8 | staging failures never retryable | killed |
+| S9 | pins not released before the retry | killed |
+| S10 | `PersistError` becomes retryable | **survived** → see below → killed |
+
+**S10 is the instructive one, and it is the third instance of the same shape.**
+The refusal fixture put the reparse point on the **first** element of the
+chain, so no pin had been taken when the refusal fired, `pinned_paths()` was
+empty, and the retry was skipped for a reason unrelated to the property under
+test. Making `PersistError` retryable therefore changed nothing observable.
+The test now refuses at the **leaf** of the skill chain, where `learned-skills`
+is pinned first and the retry branch is genuinely reachable. A second test
+keeps the first-element case.
+
+### What CI must confirm
+
+1. **The capability line.** `AVAILABLE (verified: a pinned directory could not
+   be renamed, and our own staged replace inside it still succeeded)` is now
+   the only string that means the module is live and correct.
+2. **All 43 suites on Windows**, in particular the ten that failed:
+   `test-claude-absent.sh`, `test-copilot-session-review.sh`,
+   `test-e2e-skill-visibility.sh`, `test-install-paths.sh`,
+   `test-session-review.sh`, `test-adversarial-sweep.py`,
+   `test-persist-concurrency.py`, `test-persist-proposal.py`,
+   `test-store-lock-writers.py`, `test-win-dir-pin.py`.
+3. **`test_the_real_writer_operations_work_inside_a_pinned_directory`** — the
+   new Windows test that runs `staged_replace_probe` under a live pin. The
+   pre-existing `test_writes_inside_a_pinned_directory_still_work` passed on
+   the run where the pin was completely inert *and* its replace target did not
+   previously exist, so it never covered this.
+4. `test_guarantee_holds_on_this_runner` and
+   `test_probe_agrees_with_the_measured_guarantee`, unchanged.
+
+If the capability line comes back `UNAVAILABLE (... blocks this process's own
+staged replace ...)`, the module disables itself, all 43 suites should still
+pass, and the honest conclusion is that the two properties cannot be held
+simultaneously on Windows after all — at which point the module should be
+reduced to its handle-derived reparse-point check.
+
+### The pattern across all three rounds, recorded deliberately
+
+Three Windows failures, and every one of them was a **correct document applied
+one level away from the actual operation**:
+
+1. MSDN's `dwShareMode` text describes what a share mode does *once the check
+   runs*; nothing there says the check depends on your own desired access.
+2. Raymond Chen's current-directory handle really does block deletion — but it
+   is a handle held for *traversal*, under a share mode that does not deny
+   write. The inference "therefore a directory handle cannot block writes
+   inside it" did not follow.
+3. Each round's tests then verified the thing that had been reasoned about
+   rather than the thing that had to be true.
+
+The countermeasure is not more reasoning. It is that `available()` now means a
+**measured** conjunction of both properties, and that the write path cannot be
+broken by this module even if that measurement is wrong again.
