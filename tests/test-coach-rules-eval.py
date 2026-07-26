@@ -1025,12 +1025,51 @@ class SkipPathTest(CoachRulesEvalBase):
     """Every rule this evaluator does not evaluate must skip LOUDLY with a
     specific reason, never silently evaluate to a no-op.
 
-    The count this class used to describe as "the 34 unreachable rules" was
-    corrected on 2026-07-26: 8 of them were reachable from harness telemetry
-    all along (now TELEMETRY_ADAPTERS), 11 are IDE-only by upstream's own
-    `requiresIdeContext` flag and are a correct permanent skip for a CLI
-    harness, and the rest are reachable-but-unimplemented with a named
-    cost. See coach-rules-eval.py's UNSUPPORTED_REASONS header."""
+    "Specific" was not enough. On 2026-07-26 an adversarial re-analysis
+    found twelve of the then-21 skip reasons were specific AND FALSE -- each
+    naming a concrete upstream behaviour or local measurement that does not
+    exist, and each pointing away from doing work. So the bar is now
+    EVIDENCE-CITING, not merely specific: a skip reason must carry either
+    "[upstream <file>:<line>]", "[vendored <rule>.md ...]" or
+    "[measured ...]". A reason that cannot name how it could be checked is
+    not admissible.
+
+    See coach-rules-eval.py's UNSUPPORTED_REASONS header for the standing
+    rules, including the two banned arguments (requiresIdeContext as proof
+    of unreachability; "a constant conjunct makes the rule a constant")."""
+
+    # `requiresIdeContext` is upstream's dashboard-attribution flag, not a
+    # reachability proof -- see the UNSUPPORTED_REASONS header, rule 2. It
+    # must not reappear as a load-bearing justification.
+    BANNED_REASON_SUBSTRINGS = ("IDE-ONLY", "Reachable via Route B only")
+
+    def test_every_skip_reason_cites_upstream_source_or_a_measurement(self):
+        _, stderr = self.run_eval(VENDOR_RULES, self._empty_db())
+        import importlib.util as ilu
+        for rule_id, reason in CRE.UNSUPPORTED_REASONS.items():
+            self.assertTrue(
+                any(tag in reason for tag in
+                    ("[upstream ", "[vendored ", "[measured ")),
+                "skip reason for {} cites no checkable evidence -- it must "
+                "carry [upstream <file>:<line>], [vendored <rule>.md ...] "
+                "or [measured ...]:\n{}".format(
+                    rule_id, reason),
+            )
+            for banned in self.BANNED_REASON_SUBSTRINGS:
+                self.assertNotIn(
+                    banned, reason,
+                    "skip reason for {} resurrects a banned justification "
+                    "({!r}) -- see UNSUPPORTED_REASONS header".format(
+                        rule_id, banned),
+                )
+
+    def test_skip_reasons_only_name_rules_that_exist(self):
+        """A stale entry for a deleted/renamed rule would be dead text that
+        never prints, so no reader could catch that it went wrong."""
+        vendored = {
+            f.stem for f in VENDOR_RULES.glob("*.md") if f.name != "UPSTREAM.md"
+        }
+        self.assertEqual(set(CRE.UNSUPPORTED_REASONS) - vendored, set())
 
     def test_every_real_vendored_rule_either_evaluates_or_names_missing_field(self):
         tmp = tempfile.mkdtemp()

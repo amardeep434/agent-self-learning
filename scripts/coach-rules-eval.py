@@ -130,139 +130,300 @@ BESPOKE_SESSION_IDS = {"tunnel-vision", "mcp-tool-bloat"}
 # ---------------------------------------------------------------------------
 # Rules this evaluator does NOT evaluate, each with the SPECIFIC reason.
 #
-# REWRITTEN 2026-07-26 against upstream's own source, not against a guess.
-# The previous version of this table said "not captured" for most entries,
-# meaning "not in schema/session-search-schema.sql". That conflated one
-# project's index with what is obtainable, and it was wrong for a majority
-# of the entries. Ground truth, read from microsoft/AI-Engineering-Coach at
-# HEAD 766d0f2 (2026-07-24), which is also the commit the rules are now
-# vendored at. The six commits between the previously vendored 9b4deb1 and
-# 766d0f2 are all Dependabot bumps: nothing under src/core/rules, src/core/dsl
-# or any parser changed, and a live re-run of scripts/sync-coach-rules.sh
-# produced byte-identical rule files. (An earlier comment claimed 9b4deb1 was
-# unreachable upstream; it is a direct ancestor of HEAD -- compare reports
-# status "ahead", behind_by 0.):
+# REWRITTEN 2026-07-26 (second time), after an adversarial re-analysis
+# (.superpowers/sdd/2026-07-25-harness-neutral-persistence/
+# skip-reanalysis-audit.md) found that TWELVE of the twenty-one entries then
+# in this table asserted something about upstream's source, or about the data
+# on this machine, that is FALSE -- and that every one of the twelve pointed
+# away from doing work. A skip reason is user-visible output. A reason that
+# misstates WHY is the same class of defect as a rule that silently never
+# fires, and it is the mechanism by which the wrongness survives review.
 #
-#   * Upstream is not a VS Code-internals consumer. Its README is "any
-#     harness, one dashboard", and src/core/parser-harnesses.ts registers
-#     parsers for Claude Code, Codex CLI and OpenCode alongside VS Code;
-#     src/core/parser-vscode-cli.ts parses Copilot CLI's OWN
-#     session-state/<id>/events.jsonl -- the same file scripts/lib/
-#     telemetry.py now reads. src/core/types/session-types.ts even documents
-#     the CLI origins field by field ("Copilot CLI: session.start.data.
-#     reasoningEffort and session.model_change.data.reasoningEffort").
-#     So the telemetry was never unobtainable; it was unplumbed.
+# Standing rules for this table:
 #
-#   * Upstream itself marks exactly ELEVEN rules `requiresIdeContext: true`
-#     and DROPS them when analysing a non-IDE harness
-#     (src/core/detector-registry.ts getActiveDetectors(); the flag is set
-#     in analyzer-patterns.ts as `harness && !startsWith('Local Agent') &&
-#     !== 'Xcode'`). Those eleven are marked IDE-ONLY below. For a CLI
-#     harness they are a CORRECT permanent skip, not a coverage gap --
-#     upstream would skip them too. They are reachable only through Route B
-#     (`SL_COACH_EXPORT_ENABLED`, the Coach extension's own export), and
-#     then only for sessions the user actually ran in VS Code Copilot Chat.
+#   1. Every reason must be checkable and must say HOW: either
+#      "[upstream <file>:<line>]" against microsoft/AI-Engineering-Coach at
+#      the commit vendor/coach-rules/UPSTREAM.md records, or "[measured ...]"
+#      naming a count actually run over the local harness stores. No reason
+#      may rest on an unverified belief about upstream's code.
 #
-#   * The remaining entries are genuinely reachable from data already on
-#     disk, and are skipped here for a stated cost/fidelity reason, not
-#     because the data is missing. Each names what would have to be built.
+#   2. `requiresIdeContext: true` is NOT evidence of unreachability and must
+#      never again be cited as if it were. Upstream computes
+#        skipIdeDetectors = !!(f?.harness && !f.harness.startsWith('Local Agent')
+#                              && f.harness !== 'Xcode')
+#      [upstream src/core/analyzer-patterns.ts:262] -- i.e. only when a
+#      HARNESS FILTER is applied in the dashboard. In upstream's default
+#      unfiltered view all 45 detectors run over a corpus that includes CLI
+#      sessions (src/core/parser-vscode-cli.ts parses Copilot CLI's own
+#      session-state/<id>/events.jsonl -- byte-for-byte the file
+#      scripts/lib/telemetry.py reads). The flag is a presentation decision
+#      about attributing a finding in a mixed-harness dashboard, not a claim
+#      that the input is absent.
+#
+#   3. "A conjunct is constant here, so the rule is a constant" is a logic
+#      error and is banned as a reason. A universally-true clause inside a
+#      conjunction is a NO-OP; the discriminating work is done by the other
+#      clauses. Three rules were skipped on that reasoning.
+#
+#   4. "We would have to invent the table" is only admissible after checking
+#      whether upstream has one. MODEL_TIERS [upstream
+#      src/core/dsl/interpreter.ts:267-284] and WORK_TYPE_PATTERNS
+#      [:303-313] are plain literals in MIT-licensed source, vendorable by
+#      the same mechanism as the rules themselves.
+#
+# The standing principle is unchanged and is NOT weakened: a rule that
+# evaluates but can never fire, because its input is structurally always
+# empty, is worse than a loud skip. What the re-analysis established is that
+# the principle had been invoked for inputs that were UNPLUMBED rather than
+# structurally empty. Where a rule evaluates, tests/test-coach-rules-eval.py
+# carries a fire/no-fire pair for it built from real-shaped harness events.
 # ---------------------------------------------------------------------------
 UNSUPPORTED_REASONS = {
-    # -- IDE-ONLY (upstream `requiresIdeContext: true`; skipped for CLI
-    #    harnesses by upstream too). Route B reaches these; Route A cannot,
-    #    and should not pretend to.
-    "agent-mode-for-asks": "IDE-ONLY (upstream requiresIdeContext): keys off "
-        "VS Code's ask/agent mode toggle. Neither CLI has that toggle -- "
-        "upstream's own CLI parser hardcodes agentMode='agent' "
-        "(parser-vscode-cli.ts, parser-claude.ts), so the rule's ask-mode "
-        "branch could never fire here. Reachable via Route B only",
-    "agentic-no-tools": "IDE-ONLY (upstream requiresIdeContext): same "
-        "agentMode dependency as agent-mode-for-asks. toolsUsed IS now "
-        "captured (see telemetry.py), but the mode half of the predicate is "
-        "constant for a CLI harness. Reachable via Route B only",
-    "auto-approve-terminal": "IDE-ONLY (upstream requiresIdeContext), and "
-        "independently unmeasurable here: upstream's CLI and Claude parsers "
-        "populate toolConfirmations for NO harness but VS Code "
-        "(parser-vscode-request.ts is the only parser that sets it). Copilot "
-        "CLI does emit permission.requested/completed, but an AUTO-approved "
-        "call emits no permission event at all -- measured across 242 real "
-        "confirmations, every approval took human-scale time (min 0.638s) "
-        "and only non-interactive DENIALS were instantaneous (median "
-        "0.004s). An auto-approve RATE computed from this stream would have "
-        "a permanently zero numerator: a rule that evaluates and can never "
-        "fire, which is worse than this skip. Reachable via Route B only",
-    "instruction-bloat": "IDE-ONLY (upstream requiresIdeContext): needs "
-        "customInstructions byte size, which upstream reads from the VS Code "
-        "workspace, not from any CLI session log. Reachable via Route B only",
-    "no-custom-instructions": "IDE-ONLY (upstream requiresIdeContext): same "
-        "customInstructions dependency. Reachable via Route B only",
-    "no-devcontainer": "IDE-ONLY (upstream requiresIdeContext): needs a "
-        "vscode-vs-terminal request classification, a distinction that does "
-        "not exist inside a single CLI harness. Reachable via Route B only",
-    "no-file-context": "IDE-ONLY (upstream requiresIdeContext): the rule is "
-        "about attaching file context in the chat UI. referencedFiles/"
-        "editedFiles ARE now captured for both CLIs (telemetry.py), but a "
-        "CLI agent reads files by calling a tool, so the absence the rule "
-        "looks for cannot occur and it would never fire. Reachable via "
-        "Route B only",
-    "no-plan-mode": "IDE-ONLY (upstream requiresIdeContext): needs VS Code's "
-        "plan mode / slash command surface. Reachable via Route B only",
-    "no-skills": "IDE-ONLY (upstream requiresIdeContext). skillsUsed IS now "
-        "captured (Copilot's `skill` tool + skill.invoked; Claude's Skill "
-        "tool), but the rule fires on the ABSENCE of skill usage across an "
-        "IDE session population, which a CLI-only corpus cannot represent. "
-        "Reachable via Route B only",
-    "no-slash-commands": "IDE-ONLY (upstream requiresIdeContext): needs a "
-        "parsed slashCommand, which upstream extracts only in the VS Code "
-        "request parser. Confirmed absent from the CLI corpus: 0 of 136 "
-        "real Copilot user.message events began with a slash. Reachable via "
-        "Route B only",
-    "yolo-mode": "IDE-ONLY (upstream requiresIdeContext), and independently "
-        "unmeasurable here for the same reason as auto-approve-terminal -- "
-        "see that entry for the measured evidence. Reachable via Route B only",
+    # -- GENUINELY UNREACHABLE (1)
+    "no-devcontainer": "genuinely unreachable, and the only entry in this "
+        "table for which that is true. NOT because of requiresIdeContext: "
+        "because upstream's own computeDevcontainerStats opens with "
+        "sessions.filter(s => VSCODE_HARNESSES.has(asStr(s.harness))), "
+        "VSCODE_HARNESSES = {'VS Code','VS Code Insiders','Local Agent',"
+        "'Local Agent (Insiders)'} [upstream src/core/dsl/interpreter.ts:"
+        "579-583]. For a CLI harness the scored population is empty INSIDE "
+        "UPSTREAM'S OWN FUNCTION, by a hardcoded harness gate, before any "
+        "field of ours is consulted. It additionally needs "
+        "session.hasDevcontainer and toolConfirmations[].isTerminal, which "
+        "no CLI emits",
 
-    # -- REACHABLE from data already on disk, not implemented here. Each of
-    #    these is a cost/fidelity decision with a named missing piece, NOT a
-    #    missing-data claim.
-    "broken-flow-state": "reachable but not implemented: needs "
-        "flowScoreStats, a per-day session-fragmentation score. Upstream "
-        "implements it in src/core/analyzer-flow.ts; the vendored rule file "
-        "does not carry the algorithm, so evaluating it here means porting "
-        "that analyzer rather than adapting a predicate",
-    "no-spec-driven-development": "reachable but not implemented: needs "
-        "first(requests).referencedFiles (now captured) AND .agentMode "
-        "(constant 'agent' for both CLIs). Two of the rule's three OR "
-        "branches would be dead, changing what the signal means",
-    "no-spec-structure": "reachable but would never fire: the predicate is "
-        "someWhere(requests, agentMode, agent), and agentMode is hardcoded "
-        "'agent' for every CLI request by upstream's own parsers -- so the "
-        "condition is universally true and the rule is a constant. Skipped "
-        "deliberately rather than emitted as a permanent signal",
-    "session-drift": "reachable but not implemented: needs "
-        "workTypeCount(requests). Upstream ships a work-type classifier; the "
-        "vendored rule does not carry its taxonomy, so implementing it here "
-        "would mean inventing a different one and calling it the same rule",
-    "context-engineering-gaps": "reachable but not implemented: needs "
-        "agentName, skillsUsed, toolsUsed (mcp_ prefix) and referencedFiles "
-        "-- all now captured -- PLUS customInstructions, which is not "
-        "available outside the IDE. Blocked on that one field",
-    "auto-avoidance": "reachable but not implemented: modelId is now "
-        "captured, but the predicate also needs modelTier(models.topModel) "
-        "and a countWhere(...) regex over model ids -- the same maintained "
-        "premium-tier table premium-waste needs",
-    "premium-waste": "reachable but not implemented: needs modelTier(modelId) "
-        "AND aiCode.length. modelId is now captured; the tier mapping is a "
-        "maintained upstream table of which model ids bill as premium, and "
-        "hardcoding a snapshot of it here would silently rot as models ship",
-    "premium-for-lookup-questions": "reachable but not implemented: same "
-        "modelTier(modelId) dependency as premium-waste",
-    "verbose-prompt-no-compression": "reachable but not implemented: needs "
-        "hasSkillByPattern(skillsUsed) -- skillsUsed is now captured, but "
-        "the rule's pattern set is not carried in the vendored rule file",
-    "profanity": "no patterns: the wordlist is supplied by the rule and the "
-        "vendored file carries none; upstream keeps it in src/core/"
-        "profanity.ts. Evaluating it would mean inventing a moderation "
-        "wordlist -- a product judgment out of scope for this evaluator",
+    # -- REACHABLE, NOT YET BUILT. Each names the work, not a missing input.
+    "broken-flow-state": "reachable; deferred, cost stated. Needs "
+        "flowScoreStats: a four-component weighted per-session score "
+        "(rapid-followup rate 40%, median-latency band 30%, duration band "
+        "15%, request density 15%) with hardcoded breakpoints, bucketed per "
+        "day into a lowScoreRate [upstream src/core/analyzer-flow.ts:41 "
+        "computeSessionFlowScore; ~100 of that file's 275 lines]. Every "
+        "INPUT is already captured (request timestamps, session duration, "
+        "request counts) -- this is a ~150-line analyzer port with its own "
+        "test surface, not a data gap",
+
+    "no-file-context": "reachable; deliberately not shipped under THIS rule "
+        "id. Upstream's referencedFiles here means context the HUMAN "
+        "attached to the prompt, and Copilot CLI records exactly that as "
+        "user.message.data.attachments [measured over 62 local Copilot "
+        "sessions: 5 of 156 user.message events carry attachments, so the "
+        "rule would fire]. But telemetry.py populates referencedFiles from "
+        "TOOL ARGUMENTS, mirroring upstream's own CLI parser, and four "
+        "shipped adapters depend on that definition. Answering under "
+        "upstream's rule id with a different input is exactly the drift "
+        "_pin() exists to prevent. This wants a locally-named signal with "
+        "its own suggestion text, not a redefinition of a vendored rule",
+
+    "instruction-bloat": "reachable; not yet built. The previous reason "
+        "('upstream reads it from the VS Code workspace, not from any CLI "
+        "session log') is FALSE: resolveCustomInstructionsBytes(entryPath, "
+        "isCLI) branches on isCLI to read <session dir>/workspace.yaml and "
+        "stat <folder>/.github/copilot-instructions.md [upstream "
+        "src/core/parser-vscode.ts:106-133], and parseCLIEventsFile takes "
+        "customInstructionsBytes as a parameter [src/core/"
+        "parser-vscode-cli.ts:398]. Upstream computes this FOR CLI "
+        "SESSIONS. [measured: workspace.yaml exists in every local Copilot "
+        "session directory -- 137 found]. The Claude analogue is "
+        "<cwd>/CLAUDE.md and cwd is already extracted. What is missing is "
+        "the plumbing, not the data",
+
+    "no-custom-instructions": "reachable; not yet built, and downstream of "
+        "instruction-bloat. Distinct from it: this rule needs per-request "
+        "customInstructions[], set only by extractCustomInstructions("
+        "req.contentReferences) [upstream src/core/parser-vscode-request.ts:"
+        "387] -- the VS Code request parser, and the only place any parser "
+        "sets it -- so a naive evaluation gives usageRate == 0 < 0.05 for "
+        "corpus -- a rule that ALWAYS fires, the same failure class as one "
+        "that never fires and arguably worse because it looks like a "
+        "finding. Meaningful evaluation needs the session-scope "
+        "instruction-file mapping described under instruction-bloat",
+
+    "context-engineering-gaps": "reachable; not yet built. The previous "
+        "reason said it was 'blocked' on customInstructions. It is not "
+        "blocked: gapCount sums FIVE independent booleans [upstream "
+        "src/core/dsl/interpreter.ts:612-650 computeContextGaps] -- "
+        "sub-agents, skills, MCP tools, file-reference rate, "
+        "custom-instruction rate -- and four are computable from fields "
+        "telemetry.py already produces (agentName, skillsUsed, toolsUsed "
+        "with an mcp_ prefix, referencedFiles). Only the fifth needs the "
+        "instruction-bloat plumbing, and since severity keys on "
+        "gapCount >= 4 a missing fifth gap moves a severity boundary, not "
+        "the rule's ability to answer",
+
+    "agent-mode-for-asks": "reachable; not yet built. The previous reason "
+        "was wrong twice over. (a) It claimed upstream's CLI parser "
+        "hardcodes agentMode='agent' in BOTH parsers; true for [upstream "
+        "src/core/parser-claude.ts:607], false for [upstream "
+        "src/core/parser-vscode-cli.ts:210], which "
+        "reads str(ev.data?.agentMode) || 'agent' -- a field read with a "
+        "fallback. (b) The rule has eight conjuncts; agentMode == 'agent' "
+        "being universally true for a CLI makes it a NO-OP, not a "
+        "constant. messageLength, toolsUsed, aiCode, referencedFiles, "
+        "editedFiles and isCanceled are all captured and all "
+        "discriminating. The one real objection, which the old text never "
+        "made, is that the remediation string ('use Ask mode for quick "
+        "questions') names a UI neither CLI has -- and the suggestion is "
+        "what gets written into memory",
+
+    "agentic-no-tools": "reachable; not yet built. Same logic error as "
+        "agent-mode-for-asks. [vendored agentic-no-tools.md detect block] is "
+        "match: (agentMode == 'agent' OR "
+        "agentName != '') AND toolsUsed.length == 0. With the disjunction "
+        "universally true for a CLI the rule reduces to 'turns that used no "
+        "tools', which is live, captured and discriminating -- broader than "
+        "upstream's and correctly so, because in a CLI every turn genuinely "
+        "IS agent mode",
+
+    "no-spec-structure": "reachable; not yet built. The previous reason "
+        "('the condition is universally true and the rule is a constant') "
+        "is a logic error. In [vendored no-spec-structure.md detect block], "
+        "someWhere(requests,'agentMode','agent') is ONE "
+        "of three conjuncts; the other two are a requestCount >= 3 floor "
+        "and five regex tests on the session's FIRST user message "
+        "(bullets, numbered list, heading, requirement keywords, "
+        "lineCount >= 4). All are live and captured. The rule measures what "
+        "fraction of sessions opened with an unstructured prompt -- a "
+        "varying quantity",
+
+    "no-spec-driven-development": "reachable; not yet built. The previous "
+        "reason said 'two of the rule's three OR branches would be dead'. "
+        "There are SEVEN branches [vendored no-spec-driven-development.md "
+        "detect block + patterns frontmatter]: specFileExts over "
+        "first(requests).referencedFiles, specKeywords over messageText, "
+        "bulletList + lineCount >= 3, numberedList + lineCount >= 3, "
+        "headings, slashCommand == 'plan', contains(str(agentMode),"
+        "'plan'). Five are live from patterns carried in the vendored "
+        "frontmatter. Two are dead for Copilot only, and both have Claude "
+        "Code analogues. '2 of 7, one harness' is a fidelity caveat worth "
+        "disclosing in the signal; '2 of 3' was a reason to skip. The two "
+        "framings support opposite decisions and the wrong one was recorded",
+
+    "no-plan-mode": "reachable; not yet built. The previous reason ('needs "
+        "VS Code's plan mode / slash command surface') is wrong for Claude "
+        "Code, which has a real plan mode. But the audit that found that is "
+        "ALSO wrong about the field: [measured over 727 local Claude "
+        "transcripts] permissionMode never once takes the value 'plan' "
+        "(default 377, acceptEdits 853, auto 901, dontAsk 3378), while the "
+        "ExitPlanMode tool -- which Claude Code emits when LEAVING plan "
+        "mode -- appears 780 times. Mapping this rule onto permissionMode "
+        "would produce a rule that always fires; the correct Claude marker "
+        "is the ExitPlanMode tool use. Copilot CLI has no plan mode and for "
+        "that harness the rule is genuinely unreachable",
+
+    "no-skills": "reachable; not yet built, and no argument was ever "
+        "offered against it. [vendored no-skills.md detect block] is match: "
+        "skillsUsed.length == 0, check: count == total AND total > 50. "
+        "skillsUsed is captured for BOTH harnesses (Copilot's `skill` tool "
+        "and skill.invoked; Claude's Skill tool) -- the previous reason "
+        "said so itself one clause before concluding the opposite. Nothing "
+        "about 'did you ever use a skill' is IDE-shaped",
+
+    "no-slash-commands": "reachable; not yet built. The previous "
+        "measurement (0 of 136 Copilot user.message events began with a "
+        "slash) is correct and reproduces, but it was never extended to "
+        "Claude Code, where slash commands are recorded as <command-name> "
+        "blocks inside user messages [measured over 727 local transcripts: "
+        "65 invocations parsed from user messages, 13 distinct, /model x23 "
+        "the most frequent]. Two honest caveats belong with any "
+        "implementation: every one of those is a built-in UI command rather "
+        "than a task command, and the remediation ('try /fix, /explain, "
+        "/tests, /doc') names commands neither CLI has",
+
+    "verbose-prompt-no-compression": "reachable; not yet built, and the "
+        "cheapest item on this list. The previous reason ('the rule's "
+        "pattern set is not carried in the vendored rule file') is FALSE: "
+        "both regexes are literals INSIDE [vendored "
+        "verbose-prompt-no-compression.md detect block] -- the "
+        "filler-word alternation, required to match twice, and "
+        "hasSkillByPattern(allReqs, '(?i)cavecrew|caveman|compress'). "
+        "There is no patterns: frontmatter because none is needed. "
+        "messageLength, messageText and skillsUsed are all captured",
+
+    "profanity": "reachable; not yet built. The previous reason "
+        "('evaluating it would mean inventing a moderation wordlist') is "
+        "FALSE: upstream invents none either. [upstream "
+        "src/core/profanity.ts:1-46] is 46 "
+        "lines with NO wordlist and a header saying so; it delegates to "
+        "leo-profanity, pinned at 1.9.0 in [upstream package.json:359], "
+        "MIT-licensed per the npm registry metadata for that version. "
+        "Vendoring that dictionary is the same act as vendoring the rules. "
+        "The real objection -- which the old text never made -- is "
+        "Microsoft's own: they deliberately keep the plaintext list out of "
+        "the repository. That has a cheap answer, since check() is "
+        "whole-word matching after normalisation, so committing SHA-256 "
+        "hashes of the words preserves behaviour exactly and commits no "
+        "slurs. Upstream's stripCode() (drop fenced blocks and inline "
+        "backticks first) must be ported with it or every rude variable "
+        "name is a false positive",
+
+    "premium-waste": "reachable; not yet built. The previous reason "
+        "('hardcoding a snapshot of the tier table here would silently rot "
+        "as models ship') proves too much and is answered by this "
+        "project's own machinery: the vendored RULE files rot identically, "
+        "and the response was sync-coach-rules.sh plus a mutation-tested "
+        "_pin() that refuses to run an adapter whose upstream text drifted. "
+        "MODEL_TIERS is a plain Record<string, number> literal [upstream "
+        "src/core/dsl/interpreter.ts:267-284] plus a 5-line "
+        "modelTierLookup [:286-292]; it is itself upstream's snapshot of "
+        "GitHub's published multipliers. modelId and aiCode.length are "
+        "already captured. What is missing is a table-vendoring step, which "
+        "is a line item, not a reason",
+
+    "premium-for-lookup-questions": "reachable; not yet built. Same "
+        "MODEL_TIERS dependency as premium-waste (see that entry for why "
+        "the rot argument does not hold), plus a question-opener regex "
+        "that is a literal inside [vendored "
+        "premium-for-lookup-questions.md detect block]",
+
+    "auto-avoidance": "reachable; not yet built. Same MODEL_TIERS "
+        "dependency as premium-waste, plus [vendored auto-avoidance.md "
+        "detect block] countWhere(matched, 'modelId', 'matches', "
+        "'(?i)auto') -- one regex over an already-captured "
+        "field. models.topShare is already computed by the shared helper "
+        "model-overreliance uses",
+
+    "session-drift": "reachable; not yet built. The previous reason "
+        "('implementing it here would mean inventing a different taxonomy "
+        "and calling it the same rule') is FALSE: the taxonomy is ten "
+        "[RegExp, label] pairs in MIT-licensed upstream source [upstream "
+        "src/core/dsl/interpreter.ts:303-313 WORK_TYPE_PATTERNS] plus "
+        "classifyWorkText [:316-322] -- first 300 chars, first match wins, "
+        "default 'feature'. Vendoring it is the same act as vendoring a "
+        "rule. workTypeCount is the only missing input",
+
+    "yolo-mode": "reachable; not yet built, and the sentence the previous "
+        "reason turned on -- 'an auto-approve RATE computed from this "
+        "stream would have a permanently zero numerator' -- is FALSE. "
+        "[measured over all 62 local Copilot sessions: permission.completed "
+        "result.kind is approved 165, "
+        "denied-no-approval-rule-and-could-not-request-from-user 150, "
+        "denied-interactively-by-user 9, approved-for-location 7]. The "
+        "numerator is 7. Upstream's computeYoloStats counts a confirmation "
+        "as auto-approved when autoApproveScope is 'session' or 'always' "
+        "[upstream src/core/dsl/interpreter.ts:658-678] and applies NO "
+        "latency test; rejecting approved-for-location because it took 3.1s "
+        "applied a criterion upstream does not use, to reject the exact "
+        "semantic twin of 'always' -- an approval that is PERSISTED rather "
+        "than one-shot (they land in ~/.copilot/permissions-config.json). "
+        "Under the faithful mapping the rule evaluates to 7/331 = 0.021, "
+        "below threshold, silent -- the same status as model-overreliance "
+        "and cache-hit-starvation, which this project already ships. "
+        "Copilot-only: Claude Code's transcripts record no per-tool-call "
+        "confirmation event at all",
+
+    "auto-approve-terminal": "reachable; not yet built, for exactly the "
+        "same reason and with the same measurement as yolo-mode -- see that "
+        "entry. computeAutoApproveStats [upstream src/core/dsl/"
+        "interpreter.ts:815] uses the identical autoApproveScope test. "
+        "Note for whoever implements it: do NOT define the numerator by "
+        "subtracting permission events from tool executions [measured: 1046 "
+        "bash executions against 219 shell permission requests, which would "
+        "put the ratio at ~0.96 and fire loudly], because Copilot CLI has "
+        "an unpublished built-in allow-list of safe read-only commands, so "
+        "'no permission event' conflates 'the user auto-approved this' with "
+        "'Copilot never asks about ls'. That is a good local signal under a "
+        "local name; it is not upstream's rule",
 }
 
 
