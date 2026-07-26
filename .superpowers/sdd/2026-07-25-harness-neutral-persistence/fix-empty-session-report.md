@@ -231,3 +231,180 @@ U1's direct check that the stale path is gone from the rendered hook.
 - No genuine *interactive* Copilot session has yet fired `sessionEnd` through
   this new code path; that residual is unchanged from the branch-status note in
   `CLAUDE.md`.
+
+---
+
+# Addendum — the two windows-latest failures (CI run `30213545777`)
+
+Ubuntu ×2 and macOS ×2 green; both Windows cells red. Both failures were in
+work added by this round, on the one platform not runnable locally.
+
+## 3 — `tests/test-install-paths.sh` U1/U2/U3: the *test* was wrong, not the installer
+
+### The reported symptom
+
+```
+FAIL: U1: a stale Copilot hook is re-rendered, not silently skipped (expected 'yes', got 'no')
+FAIL: U2: an already-correct hook is unchanged (expected '{ ...
+FAIL: U3: a locally-edited hook is still repointed at the real store (expected 'yes', got 'no')
+```
+
+### Two hypotheses, and why the leading one is wrong
+
+The coordinator's reading was that `got 'no'` means **no re-render happened**,
+i.e. every state fell through to "not ours → refuse", with CRLF breaking the
+byte comparisons — one cause explaining all three.
+
+That is ruled out twice over:
+
+1. **CRLF cannot be it.** `.gitattributes` already carries `*.json text eol=lf`,
+   and `tests/test-line-endings.sh` pins that. The template checks out LF on
+   windows-latest.
+2. **The re-render demonstrably DID happen.** Under the "falls through to
+   not-ours" theory these assertions must also fail — and every one of them
+   **passed** on Windows:
+   - U1 `the update is reported, not silent` (matches `UPDATED (was stale)`,
+     printed *only* by the stale branch)
+   - U1 `the stale path is gone from the hook`
+   - U1 `the silent-skip branch is gone`
+   - U2 `an already-correct hook is reported up to date`
+   - U3 `the user's previous file is preserved as a .bak`
+   - U3 `the backup location is printed`
+   - all four U4 assertions
+
+   The classifier reached the *right* branch every time. Exactly three
+   assertions failed, and they are exactly the three that mention
+   `${STORE}/scripts`.
+
+### Actual cause
+
+The MSYS path-form hazard **this same file already warns about**, twelve lines
+above where the new block was added:
+
+```
+# -- RESOLVED_SCRIPTS crossed a python3.exe subprocess boundary (subject to
+# MSYS auto-conversion on Git Bash) while "${STORE}/scripts" never did.
+sl_check_same_path "resolved scripts dir is under the store" "${STORE}/scripts" "$RESOLVED_SCRIPTS"
+```
+
+`${STORE}` is the MSYS form (`/c/Users/...`) that never left the shell;
+`$RESOLVED_SCRIPTS` comes back from `paths.py` in native form (`C:/Users/...`).
+`install.sh` renders the hook from the **same paths.py value**, so the file on
+disk holds the native form — and a `grep -F` for the MSYS form finds nothing.
+The pre-existing assertion at line 191 uses `$RESOLVED_SCRIPTS` and passes on
+Windows today, which is the empirical proof of which token is correct.
+
+**The installer is correct on Windows. A Windows user upgrading does get the
+hook re-rendered.** The new tests asserted it in a spelling that cannot match.
+
+### Reproduced on Linux
+
+Giving `AGENT_LEARNING_HOME` a `//` that `pathlib` normalizes and the shell does
+not creates the same shape — same directory, different string:
+
+```
+shell-side  ${STORE}/scripts = /tmp/tmp.AexYp4hZlz//store/scripts
+paths.py    RESOLVED_SCRIPTS = /tmp/tmp.AexYp4hZlz/store/scripts
+same dir?     YES
+same string?  NO
+
+OLD grep -qF "${STORE}/scripts/..."    -> no   <-- the 3 CI failures
+NEW grep -qF "${RESOLVED_SCRIPTS}/..." -> yes
+```
+
+### Fix
+
+- Every expectation now uses `$RESOLVED_SCRIPTS`.
+- The stale/edited fixtures are built by **rewriting the hook `install.sh` just
+  wrote** (with the same basic-`sed` normalization the installer uses) instead of
+  re-rendering the template with a shell-constructed path — so they no longer
+  know or care which form is in use.
+- U2 is now a **before/after byte snapshot** of the file rather than a
+  reconstructed expectation: immune to path form *and* line endings, and it
+  asserts the actual property (nothing changed).
+- Three assertions added: the re-rendered hook points at a script that exists,
+  and the `.bak` really retains the user's edit.
+
+No production code changed. Commit `89601af`.
+
+## 4 — `tests/test-coach-rules-eval.py`: 150 interpreter starts
+
+Not mine by authorship (untouched by `add8e39..8309c31`) but red and in scope.
+Exit 124 at the 120s per-suite ceiling on Windows only.
+
+### Cause, measured
+
+`cProfile` over the whole suite on Linux:
+
+```
+150 subprocess.run calls -> 11.28s cumulative of an 11.77s run (96%)
+  10.92s of that is select.poll waiting on the child
+```
+
+Not a hang and not fixture I/O — **one cold Python interpreter start per test**.
+`run_eval` (121 calls) and `run_both` (22) each spawned
+`python coach-rules-eval.py`. Process creation plus interpreter startup is
+several times more expensive on Windows than on Linux; at roughly 0.79s per
+spawn there, 150 spawns account for essentially the entire 120s budget on their
+own. The timeout was not masking a hang, and raising it would have hidden a real
+150× multiplier.
+
+### Fix — remove the spawns, not the ceiling
+
+`coach-rules-eval.py` is a stdlib-only module whose `main()` takes its input from
+`sys.argv` and the environment and writes to stdout/stderr, and it captures no
+environment at import (verified: no module-level `os.environ`/`getenv` binding in
+it, `telemetry.py`, or `transcript.py`; `TelemetrySource()` is constructed per
+call, and `load_sessions` closes its connection in a `finally`). The suite
+already imported it in-process as `CRE` for other assertions.
+
+`eval_in_process()` now calls `CRE.main()` with `argv`, `os.environ` and both
+streams redirected and exactly restored, returning the same
+`(exit_code, stdout, stderr)` triple callers took off a `CompletedProcess`.
+
+**What that would have silently dropped, and how it is kept:** in-process calls
+never touch the script's entry point, so a broken shebang, a broken
+`if __name__` guard, an exit status that stops tracking `main()`'s return value,
+or diagnostics on the wrong stream would all go unnoticed. A new
+`CliContractTest` keeps a handful of genuine spawns for precisely those, including
+`test_in_process_and_subprocess_agree_on_the_same_input`, which runs identical
+input **both ways** and asserts identical exit code, stdout and stderr — so the
+equivalence the speedup rests on is pinned, not assumed. `test_missing_db_yields_empty`
+and the `coach-signals.py` integration tests stay subprocess-based too.
+
+### Before / after (Linux, `~/.pyenv/versions/3.9.24/bin/python3.9`, 3 runs each)
+
+| | run 1 | run 2 | run 3 | tests | spawns |
+|---|---|---|---|---|---|
+| before | 11.999s | 11.266s | 11.597s | 172 | 150 |
+| after | 2.715s | 2.537s | 2.470s | 175 | 10 |
+
+~4.7× faster wall clock; subprocess cumulative time 11.28s → 0.90s. Three tests
+added, none removed. Commit `f602d1d`.
+
+`os.environ` patching is process-global, so this is correct only while `unittest`
+runs tests serially — the default. Noted at the helper.
+
+## Suite state
+
+43 suites, all pass (`All 43 suites passed.`). Full-suite wall clock 1:41.
+All 14 Python suites exit 0 on 3.9.24. No production code changed in this
+addendum — both fixes are in tests.
+
+## What only the Windows runner can confirm
+
+- **The three U-assertions now matching.** Reproduced on Linux via `//`
+  normalization, which produces the same *shape* of divergence (same dir,
+  different string) but not the same *strings*. If Git Bash's conversion differs
+  from `paths.py`'s output in some further way, the U2 byte-snapshot and U1/U3
+  greps would still fail — though U2 can now only fail if install.sh genuinely
+  rewrote a correct file, which would be a real defect rather than a spelling
+  mismatch.
+- **The coach suite fitting the ceiling.** The 0.79s-per-spawn figure is inferred
+  from "150 spawns ≈ 120s", not measured on the runner. With 10 spawns the
+  extrapolation is ~8s of spawn cost plus a few seconds of in-process work —
+  large margin, but the margin itself is an estimate.
+- **`repoint_hook_to`'s `sed` under MSYS.** It edits a file install.sh wrote, in
+  the test's own temp dir, with no `#`-delimiter or bracket-expression
+  constructs that differ between GNU/BSD/MSYS `sed` — but this branch has been
+  burned by `sed` and `date` portability before.
