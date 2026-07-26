@@ -224,6 +224,57 @@ def _copilot_workspace_folder(session_dir):
     return cwd.rstrip("/") or None
 
 
+# ---------------------------------------------------------------------------
+# slashCommand, and the plan-mode marker.
+#
+# Upstream extracts slashCommand only in the VS Code request parser, so the
+# field was recorded here as "absent from the CLI corpus: 0 of 136 Copilot
+# user.message events began with a slash". That measurement is correct and
+# reproduces -- but it was never extended to Claude Code, which records a
+# slash command as a <command-name> block inside the user message. Measured
+# over 727 local transcripts: 65 invocations, 13 distinct, /model x23 the
+# most frequent.
+#
+# ADAPTATION, and a caveat that belongs with any signal derived from it:
+# every one of those is a built-in UI command (/model, /compact, /clear),
+# not a task command, so "did you use a slash command" means something
+# slightly different here than in an IDE with /fix and /explain.
+#
+# PLAN MODE. Claude Code has one, and the field to read it from is NOT
+# permissionMode: measured over the same 727 transcripts, permissionMode
+# never once takes the value 'plan' (default 377, acceptEdits 853, auto 901,
+# dontAsk 3378) even though plan mode is plainly used -- the ExitPlanMode
+# tool, which Claude Code emits when LEAVING plan mode, appears 780 times.
+# Mapping plan mode onto permissionMode would produce a rule that always
+# fires. The tool use is the marker, and it is already in toolsUsed.
+# ---------------------------------------------------------------------------
+
+# Claude Code's transcript wrapper for an invoked slash command.
+_CLAUDE_COMMAND_RE = re.compile(r"<command-name>\s*/?([^<\s]+)\s*</command-name>")
+
+# A leading slash on the first line of a Copilot user message. Upstream's own
+# extractor takes the command word only.
+_LEADING_SLASH_RE = re.compile(r"^\s*/([A-Za-z][\w:-]*)")
+
+# The tool Claude Code emits when leaving plan mode. Upstream has no Claude
+# plan-mode mapping at all, so this is an adaptation, not a transcription.
+CLAUDE_PLAN_MODE_TOOL = "ExitPlanMode"
+
+
+def _slash_command(text):
+    """Command word without its slash, or "" -- upstream's empty-string
+    convention, so `slashCommand == ""` in a detect block means the same
+    thing here. None is never returned: an absent command is a fact about
+    the request, not missing data."""
+    if not text:
+        return ""
+    match = _CLAUDE_COMMAND_RE.search(text)
+    if match:
+        return match.group(1)
+    match = _LEADING_SLASH_RE.match(text)
+    return match.group(1) if match else ""
+
+
 def _copilot_event_files(env=None, limit=MAX_SESSIONS):
     try:
         root = resolve_copilot_state_root(env)
@@ -686,6 +737,7 @@ def _copilot_turns(events_path: Path):
         rec["aiCode"] = scans[turn_id].blocks
         rec["workspaceName"] = workspace or workspace_folder
         rec["customInstructionsBytes"] = instruction_bytes
+        rec["slashCommand"] = _slash_command(rec["messageText"])
         if not rec["toolsUsed"] and not rec["modelId"]:
             # A turn that produced neither a model attribution nor a tool
             # call is a fragment (truncated tail of an open session), not a
@@ -987,6 +1039,7 @@ def _claude_records(path: Path):
         rec["workspaceName"] = workspace
         rec["customInstructionsBytes"] = _instruction_bytes(
             workspace, CLAUDE_INSTRUCTIONS_RELPATH)
+        rec["slashCommand"] = _slash_command(rec["messageText"])
     return turns, api_calls
 
 

@@ -1460,6 +1460,227 @@ class PermissionAdapterTest(CoachRulesEvalBase):
         self.assertEqual(self.fired("auto-approve-terminal"), [])
 
 
+class SlashAndPlanAdapterTest(CoachRulesEvalBase):
+    """Fire/no-fire for the four rules that needed slashCommand or a
+    plan-mode marker."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = Path(self.tmp) / "search.db"
+        conn = make_db(str(self.db))
+        insert_session(conn, "s0", 1)
+        conn.commit()
+        conn.close()
+        self.store = Path(self.tmp) / "store"
+        (self.store / "session-state").mkdir(parents=True)
+        self.claude = Path(self.tmp) / "claude"
+        (self.claude / "projects" / "-repo").mkdir(parents=True)
+
+    def copilot(self, session_id, events):
+        return TFIX.copilot_session(str(self.store), session_id, events)
+
+    def claude_session(self, name, turns):
+        """turns: list of (user_text, [tool_use names])."""
+        lines = []
+        for index, (text, tools) in enumerate(turns):
+            lines.append({
+                "type": "user", "uuid": "u{}".format(index), "cwd": "/repo",
+                "timestamp": "2026-07-25T10:00:00.000Z",
+                "message": {"role": "user", "content": text},
+            })
+            lines.append({
+                "type": "assistant", "requestId": "r{}-{}".format(name, index),
+                "cwd": "/repo", "timestamp": "2026-07-25T10:00:01.000Z",
+                "message": {
+                    "role": "assistant", "model": "claude-opus-5",
+                    "stop_reason": "end_turn",
+                    "content": [{"type": "tool_use", "name": tool, "input": {}}
+                                for tool in tools] or [{"type": "text", "text": "ok"}],
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            })
+        path = self.claude / "projects" / "-repo" / "{}.jsonl".format(name)
+        with path.open("w") as handle:
+            for line in lines:
+                handle.write(json.dumps(line) + "\n")
+
+    def run_both(self):
+        env = dict(os.environ)
+        env["SL_COPILOT_HOME"] = str(self.store)
+        env["CLAUDE_CONFIG_DIR"] = str(self.claude)
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT), str(VENDOR_RULES), str(self.db)],
+            capture_output=True, text=True, env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return json.loads(proc.stdout), proc.stderr
+
+    def fired(self, rule_id):
+        signals, stderr = self.run_both()
+        self.assertNotIn(
+            "skipping {} ".format(rule_id), stderr,
+            "{} skipped when it should have evaluated:\n{}".format(rule_id, stderr))
+        return [s for s in signals if s["id"] == rule_id]
+
+    # -- no-slash-commands -------------------------------------------------
+    def test_no_slash_commands_fires_when_nobody_uses_one(self):
+        for index in range(4):
+            self.claude_session("c{}".format(index), [("do the thing", [])] * 10)
+        self.assertTrue(self.fired("no-slash-commands"))
+
+    def test_no_slash_commands_silent_when_claude_command_blocks_appear(self):
+        """The Claude half the old measurement never looked at: a slash
+        command is a <command-name> block, not a leading slash."""
+        for index in range(4):
+            self.claude_session("c{}".format(index), [
+                ("<command-name>/model</command-name>", [])] * 10)
+        self.assertEqual(self.fired("no-slash-commands"), [])
+
+    def test_no_slash_commands_silent_on_a_leading_slash_in_copilot(self):
+        for index in range(4):
+            events = []
+            for turn in range(10):
+                events.extend(TFIX.simple_turn(str(turn), user="/help me"))
+            self.copilot("s{}".format(index), events)
+        self.assertEqual(self.fired("no-slash-commands"), [])
+
+    def test_no_slash_commands_silent_at_a_healthy_mixed_usage_rate(self):
+        """2 slash commands in 40 requests is 0.05, over the 0.02 floor, so
+        the rule stays silent while the numerator is still non-zero.
+        Mutation testing showed the all-slash fixtures proved nothing --
+        with every request carrying a command the count is 0 and no signal
+        is emitted whether the rate test survives or not."""
+        for index in range(4):
+            turns = [("do the thing", [])] * 10
+            if index < 2:
+                turns[0] = ("<command-name>/model</command-name>", [])
+            self.claude_session("c{}".format(index), turns)
+        self.assertEqual(self.fired("no-slash-commands"), [])
+
+    def test_no_slash_commands_suggestion_does_not_name_absent_commands(self):
+        """Upstream's remediation is "/fix, /explain, /tests, /doc" -- none
+        of which exists in either CLI. The suggestion is what gets written
+        into the user's memory file, so it is replaced."""
+        for index in range(4):
+            self.claude_session("c{}".format(index), [("do the thing", [])] * 10)
+        signals = self.fired("no-slash-commands")
+        self.assertTrue(signals)
+        suggestion = signals[0]["suggestion"]
+        self.assertIn("ADAPTED FOR CLI", suggestion)
+        self.assertIn("none of which exist", suggestion)
+        self.assertNotEqual(
+            suggestion, parse_rule(VENDOR_RULES / "no-slash-commands.md")["suggestion"])
+
+    # -- no-plan-mode ------------------------------------------------------
+    def test_no_plan_mode_fires_when_plan_mode_was_never_used(self):
+        for index in range(4):
+            self.claude_session("c{}".format(index), [("do the thing", ["Read"])] * 10)
+        self.assertTrue(self.fired("no-plan-mode"))
+
+    def test_no_plan_mode_silent_when_exit_plan_mode_appears(self):
+        """ADAPTATION under test: ExitPlanMode is the Claude marker, because
+        permissionMode never carries the value 'plan' -- see telemetry.py."""
+        for index in range(4):
+            turns = [("do the thing", ["Read"])] * 9 + [("plan it", ["ExitPlanMode"])]
+            self.claude_session("c{}".format(index), turns)
+        self.assertEqual(self.fired("no-plan-mode"), [])
+
+    def test_no_plan_mode_silent_on_an_explicit_plan_slash_command(self):
+        """The other half of _used_plan_mode: upstream's own
+        slashCommand == "plan" branch, which is live for both harnesses."""
+        for index in range(4):
+            turns = [("do the thing", ["Read"])] * 10
+            if index == 0:
+                turns[0] = ("<command-name>/plan</command-name>", [])
+            self.claude_session("c{}".format(index), turns)
+        self.assertEqual(self.fired("no-plan-mode"), [])
+
+    def test_no_plan_mode_silent_below_the_request_floor(self):
+        self.claude_session("c0", [("do the thing", ["Read"])] * 10)
+        self.assertEqual(self.fired("no-plan-mode"), [])
+
+    # -- agent-mode-for-asks -----------------------------------------------
+    def test_agent_mode_for_asks_fires_on_short_barren_turns(self):
+        for index in range(4):
+            events = []
+            for turn in range(10):
+                events.extend(TFIX.simple_turn(str(turn), user="what is a monad"))
+            self.copilot("s{}".format(index), events)
+        self.assertTrue(self.fired("agent-mode-for-asks"))
+
+    def test_agent_mode_for_asks_silent_when_the_turns_do_work(self):
+        """The live conjuncts are the point: same short prompts, but each
+        turn calls a tool, so none of them is an "ask"."""
+        for index in range(4):
+            events = []
+            for turn in range(10):
+                events.extend(TFIX.simple_turn(
+                    str(turn), user="what is a monad",
+                    tools=[("bash", {"command": "ls"})]))
+            self.copilot("s{}".format(index), events)
+        self.assertEqual(self.fired("agent-mode-for-asks"), [])
+
+    def test_agent_mode_for_asks_silent_on_long_prompts(self):
+        for index in range(4):
+            events = []
+            for turn in range(10):
+                events.extend(TFIX.simple_turn(str(turn), user="x" * 300))
+            self.copilot("s{}".format(index), events)
+        self.assertEqual(self.fired("agent-mode-for-asks"), [])
+
+    def test_agent_mode_for_asks_suggestion_does_not_name_ask_mode(self):
+        for index in range(4):
+            events = []
+            for turn in range(10):
+                events.extend(TFIX.simple_turn(str(turn), user="what is a monad"))
+            self.copilot("s{}".format(index), events)
+        signals = self.fired("agent-mode-for-asks")
+        self.assertTrue(signals)
+        suggestion = signals[0]["suggestion"]
+        self.assertIn("ADAPTED FOR CLI", suggestion)
+        self.assertIn("which neither CLI has", suggestion)
+        self.assertNotEqual(
+            suggestion, parse_rule(VENDOR_RULES / "agent-mode-for-asks.md")["suggestion"])
+
+    # -- no-spec-driven-development ----------------------------------------
+    def _copilot_sessions(self, first_prompt, count=8, first_tools=()):
+        for index in range(count):
+            events = TFIX.simple_turn("0", user=first_prompt, tools=first_tools)
+            for turn in range(1, 3):
+                events.extend(TFIX.simple_turn(str(turn), user="carry on"))
+            self.copilot("s{}".format(index), events)
+
+    def test_no_spec_driven_fires_when_sessions_open_without_a_spec(self):
+        self._copilot_sessions("make it work")
+        self.assertTrue(self.fired("no-spec-driven-development"))
+
+    def test_no_spec_driven_silent_on_a_keyword_opening(self):
+        self._copilot_sessions("the requirements are clear")
+        self.assertEqual(self.fired("no-spec-driven-development"), [])
+
+    def test_no_spec_driven_silent_on_a_bulleted_opening(self):
+        self._copilot_sessions("- one\n- two\n- three")
+        self.assertEqual(self.fired("no-spec-driven-development"), [])
+
+    def test_no_spec_driven_silent_when_the_first_prompt_reads_a_spec_file(self):
+        """The specFileExts branch, driven by a pattern in the vendored
+        frontmatter rather than retyped here."""
+        self._copilot_sessions(
+            "go", first_tools=[("view", {"path": "/repo/design.md"})])
+        self.assertEqual(self.fired("no-spec-driven-development"), [])
+
+    def test_no_spec_driven_silent_when_the_session_opens_in_plan_mode(self):
+        """The seventh branch. Live for Claude Code, dead for Copilot --
+        which is exactly why it is exercised on a Claude fixture."""
+        for index in range(8):
+            self.claude_session("c{}".format(index), [
+                ("go", ["ExitPlanMode"]), ("carry on", []), ("and again", [])])
+        self.assertEqual(self.fired("no-spec-driven-development"), [])
+
+    def test_no_spec_driven_silent_below_the_session_floor(self):
+        self._copilot_sessions("make it work", count=3)
+        self.assertEqual(self.fired("no-spec-driven-development"), [])
+
+
 class TelemetryDetectPinTest(CoachRulesEvalBase):
     """Each telemetry adapter hardcodes one rule's predicate, so it must
     refuse to run if that rule's `detect` block ever changes shape.
@@ -1790,7 +2011,8 @@ class TelemetryAbsentSkipsLoudlyTest(CoachRulesEvalBase):
         "no-spec-structure", "premium-waste", "premium-for-lookup-questions",
         "auto-avoidance", "session-drift", "instruction-bloat",
         "no-custom-instructions", "context-engineering-gaps", "profanity",
-        "yolo-mode", "auto-approve-terminal",
+        "yolo-mode", "auto-approve-terminal", "no-slash-commands",
+        "no-plan-mode", "agent-mode-for-asks", "no-spec-driven-development",
     ]
 
     def test_all_telemetry_rules_skip_with_a_source_naming_reason(self):
@@ -1912,7 +2134,7 @@ class CoverageAssertionTest(CoachRulesEvalBase):
     # skip. TelemetryAdapterTest covers them with a store present, and
     # TelemetryAbsentSkipsLoudlyTest pins that they skip without one.
     EXPECTED_EVALUATED = 11
-    EXPECTED_TELEMETRY_ADAPTERS = 27
+    EXPECTED_TELEMETRY_ADAPTERS = 31
     EXPECTED_TOTAL_RULES = 45
 
     def test_coverage_count_pinned(self):

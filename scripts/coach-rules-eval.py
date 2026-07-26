@@ -219,59 +219,12 @@ UNSUPPORTED_REASONS = {
 
 
 
-    "agent-mode-for-asks": "reachable; not yet built. The previous reason "
-        "was wrong twice over. (a) It claimed upstream's CLI parser "
-        "hardcodes agentMode='agent' in BOTH parsers; true for [upstream "
-        "src/core/parser-claude.ts:607], false for [upstream "
-        "src/core/parser-vscode-cli.ts:210], which "
-        "reads str(ev.data?.agentMode) || 'agent' -- a field read with a "
-        "fallback. (b) The rule has eight conjuncts; agentMode == 'agent' "
-        "being universally true for a CLI makes it a NO-OP, not a "
-        "constant. messageLength, toolsUsed, aiCode, referencedFiles, "
-        "editedFiles and isCanceled are all captured and all "
-        "discriminating. The one real objection, which the old text never "
-        "made, is that the remediation string ('use Ask mode for quick "
-        "questions') names a UI neither CLI has -- and the suggestion is "
-        "what gets written into memory",
 
 
 
-    "no-spec-driven-development": "reachable; not yet built. The previous "
-        "reason said 'two of the rule's three OR branches would be dead'. "
-        "There are SEVEN branches [vendored no-spec-driven-development.md "
-        "detect block + patterns frontmatter]: specFileExts over "
-        "first(requests).referencedFiles, specKeywords over messageText, "
-        "bulletList + lineCount >= 3, numberedList + lineCount >= 3, "
-        "headings, slashCommand == 'plan', contains(str(agentMode),"
-        "'plan'). Five are live from patterns carried in the vendored "
-        "frontmatter. Two are dead for Copilot only, and both have Claude "
-        "Code analogues. '2 of 7, one harness' is a fidelity caveat worth "
-        "disclosing in the signal; '2 of 3' was a reason to skip. The two "
-        "framings support opposite decisions and the wrong one was recorded",
-
-    "no-plan-mode": "reachable; not yet built. The previous reason ('needs "
-        "VS Code's plan mode / slash command surface') is wrong for Claude "
-        "Code, which has a real plan mode. But the audit that found that is "
-        "ALSO wrong about the field: [measured over 727 local Claude "
-        "transcripts] permissionMode never once takes the value 'plan' "
-        "(default 377, acceptEdits 853, auto 901, dontAsk 3378), while the "
-        "ExitPlanMode tool -- which Claude Code emits when LEAVING plan "
-        "mode -- appears 780 times. Mapping this rule onto permissionMode "
-        "would produce a rule that always fires; the correct Claude marker "
-        "is the ExitPlanMode tool use. Copilot CLI has no plan mode and for "
-        "that harness the rule is genuinely unreachable",
 
 
-    "no-slash-commands": "reachable; not yet built. The previous "
-        "measurement (0 of 136 Copilot user.message events began with a "
-        "slash) is correct and reproduces, but it was never extended to "
-        "Claude Code, where slash commands are recorded as <command-name> "
-        "blocks inside user messages [measured over 727 local transcripts: "
-        "65 invocations parsed from user messages, 13 distinct, /model x23 "
-        "the most frequent]. Two honest caveats belong with any "
-        "implementation: every one of those is a built-in UI command rather "
-        "than a task command, and the remediation ('try /fix, /explain, "
-        "/tests, /doc') names commands neither CLI has",
+
 
 
 
@@ -304,6 +257,37 @@ def _join_continuations(text):
     if pending is not None:
         out.append(pending)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Remediation text that names a UI neither CLI has.
+#
+# A rule's "How to Improve" section is what gets written into the user's
+# memory file, so a suggestion naming a nonexistent command or mode is not a
+# cosmetic problem -- it is wrong advice, persisted. Two vendored rules have
+# this problem, and it is the ONLY honest objection to evaluating them (the
+# reasons previously recorded were about data, and were false).
+#
+# Skipping the rules would discard a real finding to avoid a text problem.
+# Emitting upstream's text would persist bad advice. So the finding ships and
+# the text is replaced, with the substitution declared here rather than
+# buried in an adapter. The rule id and the count remain upstream's.
+# ---------------------------------------------------------------------------
+SUGGESTION_OVERRIDES = {
+    "no-slash-commands":
+        "ADAPTED FOR CLI: upstream suggests /fix, /explain, /tests and /doc, "
+        "none of which exist in Copilot CLI or Claude Code. Use the commands "
+        "your harness does have, and define project-level ones for the tasks "
+        "you repeat (Claude Code: .claude/commands/; Copilot CLI: custom "
+        "prompt files). Note the detected count includes built-in UI "
+        "commands such as /model and /compact, which are not task commands.",
+    "agent-mode-for-asks":
+        "ADAPTED FOR CLI: upstream suggests switching to Ask/Chat mode, which "
+        "neither CLI has. The finding still holds -- these were short "
+        "questions that consumed a full agentic turn and produced no tool "
+        "call, no code and no file access. Ask them somewhere cheaper, or "
+        "batch them into a task that does real work.",
+}
 
 
 def parse_rule(path):
@@ -1773,6 +1757,191 @@ def eval_auto_approve_terminal(rule, tel):
     return terminal_auto
 
 
+# ---------------------------------------------------------------------------
+# The slash-command / plan-mode cluster.
+#
+# scripts/lib/telemetry.py now extracts slashCommand for both harnesses and
+# records Claude Code's ExitPlanMode tool use, which is the plan-mode marker
+# (NOT permissionMode -- see that module for the measurement that rules it
+# out). Two of these four also carry a remediation problem, handled by
+# SUGGESTION_OVERRIDES below rather than by skipping the rule.
+# ---------------------------------------------------------------------------
+
+def _used_plan_mode(record):
+    """ADAPTATION. Upstream's hasPlanning tests slashCommand == "plan" or
+    agentMode containing "plan" [upstream src/core/dsl/interpreter.ts:1772].
+    Neither CLI sets agentMode, but Claude Code emits ExitPlanMode when it
+    LEAVES plan mode, which is a positive record that plan mode was used.
+    Copilot CLI has no plan mode at all, so for that harness this is always
+    False -- a real per-harness gap, not a mapping choice.
+    """
+    if record.get("slashCommand") == "plan":
+        return True
+    return telemetry.CLAUDE_PLAN_MODE_TOOL in (record.get("toolsUsed") or [])
+
+
+def eval_no_slash_commands(rule, tel):
+    """Did any request use a slash command at all?
+
+    The old skip measured Copilot only (0 of 136 user.message events began
+    with a slash -- correct, and it reproduces) and never looked at Claude
+    Code, where a slash command is a <command-name> block inside the user
+    message.
+
+    DISCLOSED CAVEAT: every slash command in the local Claude corpus is a
+    built-in UI command (/model, /compact), not a task command, so this
+    fires for essentially any CLI user. That is a fidelity note about what
+    the count means, not a reason the rule cannot be evaluated -- and
+    upstream's own remediation text is replaced, see SUGGESTION_OVERRIDES.
+    """
+    _pin(rule, match='slashCommand == ""',
+               check="usageRate < thresholds.minRate AND total > thresholds.minReqs")
+    t = _thresholds(rule, "minRate", "minReqs")
+    turns = _require_records(
+        telemetry.requests_with(tel.turns, "slashCommand"), rule["id"], "slashCommand")
+    without = sum(1 for r in turns if r["slashCommand"] == "")
+    total = len(turns)
+    usage_rate = (total - without) / total
+    if not (usage_rate < t["minRate"] and total > t["minReqs"]):
+        return None
+    return without
+
+
+def eval_no_plan_mode(rule, tel):
+    """ADAPTATION: the `agentMode == "agent"` half of the match clause is
+    universally true for a CLI, so the predicate reduces to all requests and
+    agentRatio is 1.0 -- which clears the agentRate floor rather than
+    bypassing it, because in a CLI every request genuinely is agentic.
+
+    The discriminating clause is planUsage, and it is live: see
+    _used_plan_mode. Note the vendored detect block's planUsage line is
+    CORRUPTED upstream -- it reads
+      someWhere(all, "agentMode", "matches", "(?i)plan"slashCommand", "plan")
+    with an unbalanced quote. The intent is unambiguous from the surrounding
+    clauses and from hasPlanning, and _pin() holds this adapter to that
+    exact text, so if upstream fixes the typo the adapter stops rather than
+    silently answering the old shape.
+    """
+    _pin(rule, match='agentMode == "agent" OR agentName != ""',
+               check="planUsage == 0 AND total >= thresholds.minReqs AND "
+                     "agentRatio >= thresholds.agentRate")
+    t = _thresholds(rule, "minReqs", "agentRate")
+    turns = _require_records(
+        telemetry.requests_with(tel.turns, "slashCommand", "toolsUsed"),
+        rule["id"], "slashCommand/toolsUsed")
+    if any(_used_plan_mode(r) for r in turns):
+        return None
+    if not len(turns) >= t["minReqs"]:
+        return None
+    return len(turns)
+
+
+def eval_agent_mode_for_asks(rule, tel):
+    """ADAPTATION: `agentMode == "agent"` is universally true for a CLI, so
+    it is a NO-OP and dropped. The previous skip concluded from that same
+    observation that "the rule's ask-mode branch could never fire here",
+    which is a logic error -- the other seven conjuncts (a short non-empty
+    prompt, no tools, no code, no file references, no edits, not cancelled)
+    are all captured and all discriminating.
+
+    The rule as evaluated here means "short questions that consumed a full
+    agentic turn and produced nothing". Upstream's remediation names an
+    Ask/Chat mode neither CLI has, so it is replaced -- see
+    SUGGESTION_OVERRIDES.
+    """
+    _pin(rule, match='agentMode == "agent" AND messageLength > 0 AND '
+                     "messageLength < thresholds.maxMessageLength AND "
+                     "length(toolsUsed) == 0 AND length(aiCode) == 0 AND "
+                     "length(referencedFiles) == 0 AND "
+                     "length(editedFiles) == 0 AND isCanceled == false",
+               check="ratio > thresholds.maxRatio AND count > thresholds.minSample")
+    t = _thresholds(rule, "maxMessageLength", "minSample", "maxRatio")
+    turns = _require_records(
+        telemetry.requests_with(tel.turns, "messageLength", "toolsUsed", "aiCode",
+                                "referencedFiles", "editedFiles", "isCanceled"),
+        rule["id"],
+        "messageLength/toolsUsed/aiCode/referencedFiles/editedFiles/isCanceled")
+    matched = 0
+    for record in turns:
+        if not 0 < record["messageLength"] < t["maxMessageLength"]:
+            continue
+        if record["toolsUsed"] or record["aiCode"]:
+            continue
+        if record["referencedFiles"] or record["editedFiles"]:
+            continue
+        if record["isCanceled"]:
+            continue
+        matched += 1
+    ratio = matched / len(turns)
+    if not (ratio > t["maxRatio"] and matched > t["minSample"]):
+        return None
+    return matched
+
+
+def eval_no_spec_driven_development(rule, tel):
+    """Seven OR branches decide whether a session opened spec-driven.
+
+    The old skip said "two of the rule's three OR branches would be dead".
+    There are seven, five of them driven by regexes carried in the vendored
+    frontmatter, and of the remaining two the slashCommand branch is now
+    live for both harnesses and the plan-mode branch is live for Claude
+    Code. DISCLOSED: the plan-mode branch is dead for Copilot CLI, which has
+    no plan mode -- so a Copilot-only corpus is scored against six branches,
+    not seven.
+    """
+    _pin(rule, check="specSessionTotal >= thresholds.minAgentSessions AND "
+                     "specRate < thresholds.specRate")
+    t = _thresholds(rule, "minAgentSessions", "specRate")
+    patterns = rule["patterns"]
+    for key in ("specFileExts", "specKeywords", "bulletList", "numberedList",
+                "headings"):
+        if key not in patterns:
+            raise ValueError(
+                "pattern {} missing from the vendored rule; the branch it "
+                "drives would silently never match".format(key))
+    # The vendored patterns carry JS inline flags -- (?i), (?m) -- at the
+    # start, which Python's re accepts with the same meaning. Compiling
+    # them rather than re-typing them is the point: a re-sync that changes
+    # a pattern changes behaviour here without an edit, and a pattern that
+    # stopped being valid Python raises instead of silently never matching.
+    try:
+        compiled = {key: re.compile(patterns[key])
+                    for key in ("specFileExts", "specKeywords", "bulletList",
+                                "numberedList", "headings")}
+    except re.error as exc:
+        raise ValueError(
+            "a vendored pattern is not valid Python regex ({}) -- upstream "
+            "used a JS-only construct".format(exc))
+    turns = _require_records(
+        telemetry.requests_with(tel.turns, "messageText", "referencedFiles",
+                                "slashCommand", "toolsUsed"),
+        rule["id"], "messageText/referencedFiles/slashCommand/toolsUsed")
+    eligible = [s for s in telemetry.build_sessions(turns)
+                if s["requestCount"] >= 3]
+    if not eligible:
+        return None
+    unstructured = 0
+    for session in eligible:
+        first = session["requests"][0]
+        text = first.get("messageText") or ""
+        lines = _line_count(text)
+        spec_driven = (
+            any(compiled["specFileExts"].search(f)
+                for f in (first.get("referencedFiles") or []))
+            or compiled["specKeywords"].search(text)
+            or (compiled["bulletList"].search(text) and lines >= 3)
+            or (compiled["numberedList"].search(text) and lines >= 3)
+            or compiled["headings"].search(text)
+            or _used_plan_mode(first)
+        )
+        if not spec_driven:
+            unstructured += 1
+    spec_rate = (len(eligible) - unstructured) / len(eligible)
+    if not (len(eligible) >= t["minAgentSessions"] and spec_rate < t["specRate"]):
+        return None
+    return unstructured
+
+
 TELEMETRY_ADAPTERS = {
     "vibe-coding": eval_vibe_coding,
     "copy-paste-blindness": eval_copy_paste_blindness,
@@ -1801,6 +1970,10 @@ TELEMETRY_ADAPTERS = {
     "profanity": eval_profanity,
     "yolo-mode": eval_yolo_mode,
     "auto-approve-terminal": eval_auto_approve_terminal,
+    "no-slash-commands": eval_no_slash_commands,
+    "no-plan-mode": eval_no_plan_mode,
+    "agent-mode-for-asks": eval_agent_mode_for_asks,
+    "no-spec-driven-development": eval_no_spec_driven_development,
 }
 
 
@@ -1907,7 +2080,7 @@ def main():
             signals.append({
                 "id": rule_id,
                 "severity": rule["severity"],
-                "suggestion": rule["suggestion"],
+                "suggestion": SUGGESTION_OVERRIDES.get(rule_id, rule["suggestion"]),
                 "count": count,
                 "source": "rules",
             })
