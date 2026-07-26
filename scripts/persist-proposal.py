@@ -29,10 +29,16 @@ closes the race a prior version of this module measured at up to ~18% escape
 under active contention (tests/test-adversarial-sweep.py's TestTOCTOU; see
 .superpowers/sdd/2026-07-25-harness-neutral-persistence/fix-p3-toctou-report.md).
 Windows has no dir_fd support in the stdlib `os` module at all (`os.mkdir`
-etc. raise NotImplementedError there), so on Windows this module falls back
-to the previous path-based implementation (_write_all_path) and the TOCTOU
-window it has is disclosed, not silently reintroduced -- see
-_write_all_path's docstring and `doctor.sh`'s dir_fd probe.
+etc. raise NotImplementedError there), so on Windows this module uses the
+path-based implementation (_write_all_path) -- but no longer with the race
+naked. There, every directory in the chain is *pinned*: held open root-to-leaf
+via CreateFileW (ctypes, stdlib) with FILE_FLAG_BACKUP_SEMANTICS |
+FILE_FLAG_OPEN_REPARSE_POINT and a share mode omitting FILE_SHARE_DELETE and
+FILE_SHARE_WRITE, which makes the kernel refuse the swap outright for the
+duration of the write. See lib/win_dir_pin.py for the MSDN citations and
+_write_all_path's docstring for how it is sequenced. Pinning is gated on a
+functional probe, never a platform name, and degrades to the older unpinned
+behaviour if a directory cannot be opened -- see also `doctor.sh`'s probes.
 
 CONCURRENCY: the plan+write transaction (everything from reading an existing
 MEMORY.md or `.usage.json` through renaming the staged files into place) is
@@ -73,6 +79,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 
 import paths  # noqa: E402
+import win_dir_pin  # noqa: E402
 from isotime import now_iso as _now_iso  # noqa: E402  (fix round D: shared with skill-lifecycle.py, index-session.py, coach-signals.py)
 from proposal_schema import ValidationError, extract_proposal, validate_proposal  # noqa: E402
 from store_lock import LockTimeout, LockUnavailable, StoreLock, default_lock_dir  # noqa: E402
@@ -221,12 +228,15 @@ def _open_nofollow_fd(path: Path, flags: int, mode: int = 0o644) -> int:
     On POSIX this closes the TOCTOU window between an earlier is_symlink()
     check and this call: if something swapped in a symlink in between, the
     kernel refuses with ELOOP instead of following it. Windows has no
-    O_NOFOLLOW (os.O_NOFOLLOW is absent there), so on Windows we fall back to
-    the is_symlink() pre-check alone, which leaves a narrow race the stdlib
-    gives no primitive to close. Unprivileged symlink creation is restricted
-    by default on Windows, which bounds -- but does not eliminate -- that
-    risk (directory junctions do not require the same privilege and are not
-    detected by Path.is_symlink()).
+    O_NOFOLLOW (os.O_NOFOLLOW is absent there), so on Windows this falls back
+    to the is_symlink()/st_reparse_tag pre-check alone. The narrow race that
+    leaves on the *directory* components is closed separately by
+    lib/win_dir_pin.py's held directory handles (see _write_all_path); the
+    residual here is the target *file* itself, where os.replace() does not
+    follow a symlink at the destination in any case (see
+    _reject_if_symlink). Note that directory junctions never require the
+    elevation symlink creation does, and are invisible to
+    Path.is_symlink() -- which is why st_reparse_tag is checked too.
     """
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -503,80 +513,47 @@ def _write_all_path(planned: list[tuple[tuple[Path, ...], Path, str, str]]) -> t
     a journal or a directory-swap trick this stdlib-only, cross-platform
     script does not attempt.
 
-    KNOWN, DISCLOSED RESIDUAL (this function only): a race lives between
-    `_assert_inside(root, ...)` above and `tempfile.mkstemp(dir=root)` inside
-    `_stage`: `root` could in principle be swapped for a symlink in that gap.
-    Measured (tests/test-adversarial-sweep.py's TestTOCTOU, prior to the
-    dir_fd fix) at up to ~18% escape under active contention on POSIX; this
-    path-based function is still exactly that vulnerable, because closing it
-    needs dir_fd-relative operations throughout, which Windows's `os` module
-    does not provide (`os.mkdir(..., dir_fd=...)` etc. raise
-    NotImplementedError there; `os.supports_dir_fd` is empty).
+    THE RACE THIS USED TO CARRY UNCONDITIONALLY, AND WHAT NOW CLOSES IT
+    -------------------------------------------------------------------
+    A race lives between `_assert_inside(root, ...)` and
+    `tempfile.mkstemp(dir=root)` inside `_stage`: `root` could in principle be
+    swapped for a symlink or junction in that gap. Measured
+    (tests/test-adversarial-sweep.py's TestTOCTOU, prior to the dir_fd fix) at
+    up to ~18% escape under active contention on POSIX. Closing it the POSIX
+    way needs dir_fd-relative operations throughout, which Windows's `os`
+    module does not provide (`os.mkdir(..., dir_fd=...)` etc. raise
+    NotImplementedError; `os.supports_dir_fd` is empty), and `os.O_NOFOLLOW`
+    does not exist there either. Both are confirmed UNAVAILABLE by this repo's
+    own capability probe on windows-latest.
 
-    "UNFIXABLE ON THIS PLATFORM" WAS WRONG -- CORRECTED 2026-07-26
-    -------------------------------------------------------------
-    This docstring used to end "Unfixable on this platform with the stdlib
-    alone". Researched properly, that is false, and the threat is realer
-    than the old wording implied. Recording the finding here so the next
-    person does not re-derive it:
+    The threat is not theoretical on Windows: the same CI probe prints
+    "symlink creation: AVAILABLE" on the runner, and directory JUNCTIONS have
+    never required elevation at all -- which is why `_reject_if_symlink()`
+    above checks `st_reparse_tag`. That check is correct but is a *check*, and
+    therefore still racy.
 
-      * The premises hold. os.O_NOFOLLOW really is absent on Windows --
-        CPython documents it under "extensions ... not present if they are
-        not defined by the C library", Availability: Linux/macOS/Unix -- and
-        this repo's own CI probe on windows-latest prints
-        "O_NOFOLLOW: UNAVAILABLE" and "dir_fd (functional): UNAVAILABLE".
+    lib/win_dir_pin.py now closes that window on Windows with documented Win32
+    rather than ntdll: every directory in the chain is opened root-to-leaf
+    with CreateFileW using FILE_FLAG_BACKUP_SEMANTICS |
+    FILE_FLAG_OPEN_REPARSE_POINT and a share mode of FILE_SHARE_READ *only*.
+    Omitting FILE_SHARE_DELETE means no other process can obtain delete
+    access, and MSDN states delete access "allows both delete and rename
+    operations"; omitting FILE_SHARE_WRITE blocks in-place conversion via
+    FSCTL_SET_REPARSE_POINT. While the handles are held the swap is prevented
+    by the kernel rather than detected after the fact. See that module's
+    docstring for the full citations, the reason holding the handles does not
+    block our own writes into those directories, and the fail-safe posture
+    (unavailable or unopenable -> today's unpinned behaviour; a handle that
+    reports a reparse point -> hard refusal).
 
-      * The threat model DOES apply on Windows, more than the "symlinks need
-        elevation" folklore suggests. The same CI probe prints
-        "symlink creation: AVAILABLE" on windows-latest. And directory
-        JUNCTIONS -- reparse points that redirect just like a symlink -- have
-        never needed elevation at all, which is precisely why
-        _reject_if_symlink() above checks st_reparse_tag.
+    Pinning is gated on `win_dir_pin.available()`, a real functional probe, so
+    it is inert on POSIX -- where `_write_all_fd` runs instead anyway -- and
+    cannot become a platform-name branch. `_PIN_SET_FACTORY` below is the
+    single injection point tests use to exercise the sequencing on a host
+    where the Win32 backend can never run.
 
-      * A stdlib-only fix nevertheless exists, and it is not the obvious one.
-        Emulating dir_fd would mean NtCreateFile with an OBJECT_ATTRIBUTES
-        RootDirectory handle -- an ntdll native API, not documented Win32,
-        with UNICODE_STRING marshalling and NTSTATUS decoding. That is the
-        expensive path and it is NOT what is needed. Win32 offers a cheaper
-        primitive that closes the same window: hold an open HANDLE to the
-        directory across the whole check-stage-rename sequence, opened with
-        ctypes + CreateFileW using
-            FILE_FLAG_BACKUP_SEMANTICS        -- "You must set this flag to
-                                                 obtain a handle to a
-                                                 directory" (MSDN)
-            FILE_FLAG_OPEN_REPARSE_POINT      -- "Normal reparse point
-                                                 processing will not occur"
-                                                 (MSDN), so the handle is the
-                                                 directory itself, never
-                                                 whatever a junction points at
-            dwShareMode = FILE_SHARE_READ     -- omitting FILE_SHARE_DELETE
-                                                 and FILE_SHARE_WRITE
-        MSDN on dwShareMode: without FILE_SHARE_DELETE, "no process can open
-        the file or device if it requests delete access", and "delete access
-        allows both delete and RENAME operations". An attacker cannot swap a
-        directory for a junction without first deleting or renaming it, and
-        cannot convert it in place without opening it for write. So while the
-        handle is held, the swap this function is vulnerable to is blocked by
-        the kernel -- not detected after the fact, prevented. Verifying the
-        handle refers to the object that was checked is then
-        GetFileInformationByHandleEx / FILE_ID_INFO (VolumeSerialNumber +
-        128-bit FileId, documented as uniquely identifying a file on one
-        machine).
-
-    NOT IMPLEMENTED HERE, DELIBERATELY, AND THE REASON IS NOT TECHNICAL.
-    It would have to be probe-gated and fail-closed like DIR_FD_SUPPORTED, so
-    a wrong implementation degrades to exactly today's behaviour rather than
-    breaking POSIX -- the design is safe. But it is syscall-level code on the
-    write path that guards ~120 codified attacks, and it cannot be executed
-    on a POSIX development host; only Windows CI can exercise it. This branch
-    has been damaged repeatedly by confident claims nobody re-derived, and
-    landing unrunnable ctypes here would be another. It needs a round that
-    can watch a Windows CI run, not a round that can only reason about one.
-
-    Until then the window is disclosed here, in the module docstring, and via
-    `doctor.sh`'s dir_fd probe, rather than silently weaker. See
-    .superpowers/sdd/2026-07-25-harness-neutral-persistence/fix-p3-toctou-report.md
-    and residuals-research-report.md (Residual 1) for the full citations.
+    See .superpowers/sdd/2026-07-25-harness-neutral-persistence/fix-p3-toctou-report.md
+    and residuals-research-report.md (Residual 1 / Residual A).
 
     Each entry's `dirs` chain (see `_plan`) is walked and mkdir'd/checked one
     level at a time: every directory is created (a no-op if it already
@@ -598,6 +575,7 @@ def _write_all_path(planned: list[tuple[tuple[Path, ...], Path, str, str]]) -> t
     """
     staged: list[tuple[str, Path]] = []
     total = 0
+    pins = _PIN_SET_FACTORY()
     try:
         for dirs, target, mode, content in planned:
             parent: Path | None = None
@@ -617,6 +595,16 @@ def _write_all_path(planned: list[tuple[tuple[Path, ...], Path, str, str]]) -> t
                     _assert_inside(parent, directory)
                 directory.mkdir(parents=True, exist_ok=True)
                 _reject_if_symlink(directory, "store directory")
+                # Pin *after* mkdir (nothing exists to open before it) and
+                # after the path-based check, so the handle-derived verdict
+                # is the authoritative one: from here until close_all() the
+                # kernel refuses any delete/rename/reparse-conversion of this
+                # directory. Root-to-leaf order matters -- once level N-1 is
+                # pinned, resolving the name of level N through it is safe.
+                try:
+                    pins.pin(directory)
+                except win_dir_pin.ReparsePointError as exc:
+                    raise PersistError(str(exc)) from exc
                 parent = directory
             stage_dir = dirs[-1]
 
@@ -652,6 +640,16 @@ def _write_all_path(planned: list[tuple[tuple[Path, ...], Path, str, str]]) -> t
         for tmp_name, _target in staged:
             _cleanup_tmp(tmp_name)
         raise
+    finally:
+        # Held only for the duration of the transaction. Releasing must never
+        # mask a real failure, so close_all() swallows its own errors.
+        pins.close_all()
+
+
+# The one seam tests use to drive the Windows pinning sequence from a POSIX
+# host, where win_dir_pin's CreateFileW backend can never run. Production code
+# never rebinds it; win_dir_pin.PinSet() self-gates on its functional probe.
+_PIN_SET_FACTORY = win_dir_pin.PinSet
 
 
 # ===========================================================================
