@@ -55,24 +55,44 @@ jobs:
         run: brew install jq
 
       # sqlite3 (the CLI, not Python's bundled sqlite3 module) ships with
-      # ubuntu-latest and macos-latest but not windows-latest. Several test
-      # suites and scripts/self-learning-health.sh, scripts/index-session.sh
-      # shell out to the sqlite3 binary directly, so install it explicitly
-      # rather than let those suites fail with a confusing "command not
-      # found" deep inside a subshell.
-      - name: Install sqlite3 (Windows)
+      # ubuntu-latest and macos-latest but not windows-latest. This install is
+      # now a convenience, not a requirement: index-session.sh moved off the
+      # sqlite3 CLI entirely (scripts/lib/session_db.py, via python3's bundled
+      # module) and the only remaining caller degrades to a warning. Kept so
+      # the health check's DB-inspection branch is exercised on Windows when
+      # choco cooperates; the verification step below reports either way and
+      # no longer fails when it does not.
+      - name: Install sqlite3 (Windows, optional)
         if: runner.os == 'Windows'
+        continue-on-error: true
         run: choco install sqlite -y --no-progress
 
       - name: Verify required tools are on PATH
         run: |
           set -euo pipefail
-          for tool in python3 jq sqlite3 bash; do
+          # REQUIRED: absence of any of these means a suite would silently
+          # degrade rather than test anything, so fail loudly and early.
+          for tool in python3 jq bash; do
             if ! command -v "$tool" >/dev/null 2>&1; then
               echo "::error::required tool '$tool' is not resolvable on PATH — failing loudly instead of letting a downstream suite silently degrade" >&2
               exit 1
             fi
           done
+          # OPTIONAL: the sqlite3 CLI is no longer a runtime dependency. The
+          # session index and search moved to python3's bundled sqlite3 module
+          # (scripts/lib/session_db.py) precisely because macOS ships a CLI
+          # built without FTS5, and the only remaining CLI use --
+          # self-learning-health.sh's manual DB inspection -- is `command -v`
+          # guarded and degrades to a warning by design. Requiring it here
+          # contradicted both that code and README's requirements table, and
+          # broke both Windows cells when choco's install stopped landing on
+          # PATH. Report its absence rather than failing on it, so the log
+          # still says which branch of the health check was exercised.
+          if command -v sqlite3 >/dev/null 2>&1; then
+            echo "[capability probe] sqlite3 CLI: AVAILABLE ($(command -v sqlite3)) -- health-check DB inspection will be exercised"
+          else
+            echo "::notice::[capability probe] sqlite3 CLI: UNAVAILABLE -- optional; session search uses python3's bundled module. self-learning-health.sh's DB-inspection branch is not exercised on this runner."
+          fi
 
       - name: Run tests
         run: bash tests/run-all.sh
