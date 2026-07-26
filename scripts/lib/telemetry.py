@@ -1047,6 +1047,104 @@ def _claude_records(path: Path):
 # Public API
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Whole-corpus tool-usage check.
+#
+# MAX_SESSIONS caps the parsed sample. For a RATE that is sound. For an
+# ABSENCE it is not: "no ExitPlanMode in the newest 40 sessions" and "this
+# user has never used plan mode" are different claims, and only the second is
+# worth telling someone. This answers the second, over every session log on
+# disk, for ONE tool name.
+#
+# It is cheap because it does not parse: a byte prefilter rejects almost every
+# file, and only the files whose bytes contain the literal are parsed to
+# confirm. Measured on the development corpus (387 MB, 814 logs, warm cache):
+# 0.14s to scan, 0.30s to confirm 368 candidates. It runs on the review path,
+# alongside a model call, not on the turn hook.
+#
+# THE PREFILTER ALONE WOULD BE WRONG, and not subtly. A transcript contains
+# the harness's own tool LISTING as ordinary text, so the literal
+# "ExitPlanMode" appears in a session that merely had the tool available --
+# and in any session where someone discussed it, including the session that
+# is running this code. Measured on the same corpus: 368 of 739 Claude
+# transcripts contain the literal, and exactly ONE contains it as a real
+# tool_use block. A substring scan would have answered "used" for a user who
+# never touched it, silently switching the rule off forever. So the prefilter
+# only nominates candidates; the answer always comes from the structural
+# check, the same tool_use / tool.execution_start records the parsed path
+# reads.
+#
+# Returns True (used), False (scanned everything, never used), or None
+# (undetermined -- the byte ceiling was hit). None is NOT False: a caller
+# must degrade to the capped sample and say so, never turn "could not tell"
+# into a finding.
+# ---------------------------------------------------------------------------
+
+# Bound on total bytes read by one corpus scan. The development corpus is
+# 387 MB; this leaves headroom without becoming unbounded on a machine with
+# years of history.
+MAX_CORPUS_SCAN_BYTES = 2 * 1024 * 1024 * 1024
+
+
+def _claude_transcript_uses_tool(path: Path, tool_name):
+    for event in _iter_jsonl(path):
+        message = event.get("message")
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if (isinstance(block, dict) and block.get("type") == "tool_use"
+                    and block.get("name") == tool_name):
+                return True
+    return False
+
+
+def _copilot_events_use_tool(path: Path, tool_name):
+    for event in _iter_jsonl(path):
+        if event.get("type") != "tool.execution_start":
+            continue
+        data = event.get("data")
+        if isinstance(data, dict) and data.get("toolName") == tool_name:
+            return True
+    return False
+
+
+def corpus_used_tool(tool_name, env=None):
+    """Was `tool_name` ever actually invoked, anywhere in the full history?
+
+    True / False / None -- see this section's header for why None must not be
+    read as False.
+    """
+    needle = tool_name.encode("utf-8")
+    candidates = [(p, _claude_transcript_uses_tool)
+                  for p in _claude_transcripts(env, limit=None)]
+    candidates += [(p, _copilot_events_use_tool)
+                   for p in _copilot_event_files(env, limit=None)]
+    read = 0
+    for path, confirm in candidates:
+        found_literal = False
+        try:
+            with path.open("rb") as handle:
+                while True:
+                    chunk = handle.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    read += len(chunk)
+                    if read > MAX_CORPUS_SCAN_BYTES:
+                        return None
+                    if needle in chunk:
+                        found_literal = True
+                        break
+        except OSError:
+            continue
+        # The literal is necessary but NOWHERE NEAR sufficient -- see header.
+        if found_literal and confirm(path, tool_name):
+            return True
+    return False
+
+
 def build_turn_requests(env=None, limit=MAX_SESSIONS):
     """One record per user request, across every harness whose store is
     present. Empty list when neither harness has readable state -- callers

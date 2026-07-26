@@ -704,6 +704,92 @@ class CustomInstructionBytesTest(unittest.TestCase):
         self.assertEqual([t["customInstructionsBytes"] for t in turns], [0])
 
 
+class CorpusUsedToolTest(unittest.TestCase):
+    """The whole-corpus existence check behind no-plan-mode's global claim.
+
+    MAX_SESSIONS caps the parsed sample; this deliberately does not, because
+    "never used" is a claim about history, not about the newest 40 logs.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.claude = self.tmp / "claude"
+        self.project = self.claude / "projects" / "-repo"
+        self.project.mkdir(parents=True)
+        self.copilot = self.tmp / "copilot"
+        (self.copilot / "session-state").mkdir(parents=True)
+        self.env = {"CLAUDE_CONFIG_DIR": str(self.claude),
+                    "SL_COPILOT_HOME": str(self.copilot)}
+
+    def claude_file(self, name, blocks):
+        lines = [{
+            "type": "assistant", "requestId": "r-" + name, "cwd": "/repo",
+            "timestamp": "2026-07-25T10:00:00.000Z",
+            "message": {"role": "assistant", "model": "claude-opus-5",
+                        "stop_reason": "end_turn", "content": blocks,
+                        "usage": {"input_tokens": 1, "output_tokens": 1}},
+        }]
+        path = self.project / "{}.jsonl".format(name)
+        with path.open("w") as handle:
+            for line in lines:
+                handle.write(json.dumps(line) + "\n")
+        return path
+
+    def test_a_real_tool_use_is_found(self):
+        self.claude_file("a", [{"type": "tool_use", "name": "ExitPlanMode",
+                                "input": {}}])
+        self.assertIs(telemetry.corpus_used_tool("ExitPlanMode", self.env), True)
+
+    def test_a_mere_mention_of_the_tool_name_is_not_a_use(self):
+        """The byte prefilter nominates candidates; only the structural check
+        answers. A transcript carries the harness's own tool listing as plain
+        text, so on the development corpus 368 of 739 Claude transcripts
+        contain the literal "ExitPlanMode" and exactly ONE contains a real
+        tool_use block. Prefilter-only would answer True for a user who has
+        never touched it, silently switching the rule off forever."""
+        self.claude_file("a", [{"type": "text",
+                                "text": "you could use ExitPlanMode here"}])
+        self.assertIs(telemetry.corpus_used_tool("ExitPlanMode", self.env), False)
+
+    def test_a_use_outside_the_parse_cap_is_still_found(self):
+        """The point of the whole thing: MAX_SESSIONS would hide this."""
+        for index in range(telemetry.MAX_SESSIONS + 5):
+            self.claude_file("n{}".format(index),
+                             [{"type": "tool_use", "name": "Read", "input": {}}])
+        old = self.claude_file("old", [{"type": "tool_use",
+                                        "name": "ExitPlanMode", "input": {}}])
+        os.utime(str(old), (1, 1))  # oldest -> excluded by the cap
+        parsed = telemetry.build_turn_requests(self.env)
+        self.assertNotIn("ExitPlanMode",
+                         [t for rec in parsed for t in rec["toolsUsed"]])
+        self.assertIs(telemetry.corpus_used_tool("ExitPlanMode", self.env), True)
+
+    def test_the_copilot_half_of_the_corpus_is_scanned_too(self):
+        """Harness neutrality is the project's core constraint: an existence
+        check that only looked at one harness would answer "never" for a user
+        who does it constantly in the other."""
+        copilot_session(str(self.copilot), "s0", [
+            ev("tool.execution_start",
+               {"toolCallId": "t1", "toolName": "somethingUnique",
+                "arguments": {}, "turnId": "0"}, _ts(1)),
+        ])
+        self.assertIs(telemetry.corpus_used_tool("somethingUnique", self.env), True)
+
+    def test_hitting_the_byte_ceiling_reports_undetermined_not_never(self):
+        """None is not False. A caller that read the ceiling as "never used"
+        would turn "we could not finish looking" into a finding, which is the
+        exact failure this project treats as worse than a loud skip."""
+        self.claude_file("a", [{"type": "tool_use", "name": "Whatever",
+                                "input": {}}])
+        original = telemetry.MAX_CORPUS_SCAN_BYTES
+        telemetry.MAX_CORPUS_SCAN_BYTES = 1
+        try:
+            self.assertIsNone(
+                telemetry.corpus_used_tool("ExitPlanMode", self.env))
+        finally:
+            telemetry.MAX_CORPUS_SCAN_BYTES = original
+
+
 class RequestsWithTest(unittest.TestCase):
     def test_none_excludes_but_zero_and_empty_list_do_not(self):
         records = [

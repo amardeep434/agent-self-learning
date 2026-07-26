@@ -332,6 +332,11 @@ SAMPLE_SCOPE_NOTE = (
     "read (newest {cap} per harness), not over full history."
 )
 
+CORPUS_SCOPE_NOTE = (
+    "SCOPE: this absence was checked across every session log on disk, not "
+    "only the parsed sample."
+)
+
 ABSENCE_SCOPED_RULES = {
     "no-skills": SAMPLE_SCOPE_NOTE,
     "auto-avoidance": SAMPLE_SCOPE_NOTE,
@@ -341,8 +346,13 @@ ABSENCE_SCOPED_RULES = {
 
 def _scope_note(rule_id, telemetry_source):
     """The scope note for a signal, or "" when the rule is not absence-based."""
+    if telemetry_source is None:
+        return ""
+    recorded = telemetry_source.recorded_scope(rule_id)
+    if recorded:
+        return recorded
     template = ABSENCE_SCOPED_RULES.get(rule_id)
-    if template is None or telemetry_source is None:
+    if template is None:
         return ""
     return template.format(sessions=telemetry_source.session_count,
                            cap=telemetry.MAX_SESSIONS)
@@ -1891,6 +1901,23 @@ def eval_no_plan_mode(rule, tel):
         return None
     if not len(turns) >= t["minReqs"]:
         return None
+    # The sample says "never", which over a capped sample is not the claim
+    # the rule's own wording makes. Upgrade it: ask whether the tool was ever
+    # invoked ANYWHERE on disk. This is the one absence here worth paying for
+    # -- a single marker, byte-prefiltered, structurally confirmed. See
+    # telemetry.corpus_used_tool for why the prefilter alone would be wrong.
+    corpus = telemetry.corpus_used_tool(telemetry.CLAUDE_PLAN_MODE_TOOL, tel.env)
+    if corpus is True:
+        # Used, just not inside the window. The sample-scoped finding would
+        # have been false, and this is the case that makes the scan worth it.
+        return None
+    if corpus is None:
+        # Byte ceiling hit: undetermined, NOT "never". Emit the finding the
+        # sample supports, and say that is all it is.
+        tel.note_scope(rule["id"], SAMPLE_SCOPE_NOTE.format(
+            sessions=tel.session_count, cap=telemetry.MAX_SESSIONS))
+    else:
+        tel.note_scope(rule["id"], CORPUS_SCOPE_NOTE)
     return len(turns)
 
 
@@ -2047,6 +2074,21 @@ class TelemetrySource:
         self._env = env
         self._turns = None
         self._api_calls = None
+        # Scope notes an adapter recorded for itself this run. Needed because
+        # one rule's window depends on what its own scan found: no-plan-mode
+        # makes a whole-corpus claim when the corpus scan completed, and a
+        # sample-scoped one when it could not. A static table cannot say that.
+        self._scopes = {}
+
+    @property
+    def env(self):
+        return self._env
+
+    def note_scope(self, rule_id, text):
+        self._scopes[rule_id] = text
+
+    def recorded_scope(self, rule_id):
+        return self._scopes.get(rule_id, "")
 
     @property
     def turns(self):

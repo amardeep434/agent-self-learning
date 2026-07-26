@@ -1594,6 +1594,43 @@ class SlashAndPlanAdapterTest(CoachRulesEvalBase):
             self.claude_session("c{}".format(index), turns)
         self.assertEqual(self.fired("no-plan-mode"), [])
 
+    def test_no_plan_mode_silent_when_plan_mode_is_used_outside_the_window(self):
+        """The reason the corpus scan exists. telemetry.MAX_SESSIONS caps the
+        parsed sample at 40 logs; a 41st session that DID use plan mode is
+        invisible to the sample, so a sample-scoped rule would report "you
+        never use plan mode" to someone who does."""
+        for index in range(45):
+            self.claude_session("c{}".format(index), [("do the thing", ["Read"])] * 10)
+        self.claude_session("old", [("plan it", ["ExitPlanMode"])] * 2)
+        # Make the plan-mode session the OLDEST, so the cap excludes it.
+        oldest = self.claude / "projects" / "-repo" / "old.jsonl"
+        os.utime(str(oldest), (1, 1))
+        self.assertEqual(self.fired("no-plan-mode"), [])
+
+    def test_no_plan_mode_says_its_claim_covers_the_whole_corpus(self):
+        """When the scan completes and finds nothing, the finding is a global
+        claim and says so -- that is the claim actually worth making."""
+        for index in range(4):
+            self.claude_session("c{}".format(index), [("do the thing", ["Read"])] * 10)
+        signals = self.fired("no-plan-mode")
+        self.assertTrue(signals)
+        self.assertIn("every session log on disk", signals[0]["scope"])
+
+    def test_a_literal_mention_of_the_tool_is_not_a_use_of_it(self):
+        """A transcript carries the harness's own tool listing as ordinary
+        text, so the literal "ExitPlanMode" appears in sessions that merely
+        had the tool available. Measured on the development corpus: 368 of
+        739 transcripts contain the literal and exactly ONE contains a real
+        tool_use. A byte-prefilter-only scan would answer "used" here and
+        switch the rule off forever."""
+        for index in range(4):
+            self.claude_session("c{}".format(index), [
+                ("should I use ExitPlanMode for this?", ["Read"])] * 10)
+        signals = self.fired("no-plan-mode")
+        self.assertTrue(
+            signals,
+            "a mention of the tool name in prompt text was mistaken for a use")
+
     def test_no_plan_mode_silent_below_the_request_floor(self):
         self.claude_session("c0", [("do the thing", ["Read"])] * 10)
         self.assertEqual(self.fired("no-plan-mode"), [])
@@ -1818,6 +1855,65 @@ class SuggestionOverrideAndScopeTest(CoachRulesEvalBase):
             self.assertIn(".scope", text,
                           "a review script renders signals without .scope, so "
                           "the window disclosure never reaches the model")
+
+
+class UndeterminedCorpusScanTest(unittest.TestCase):
+    """What no-plan-mode does when the corpus scan cannot finish.
+
+    Driven in-process with a stubbed scan, because the subprocess boundary
+    cannot express "the byte ceiling was hit" without adding an env knob whose
+    only purpose is testing. The three answers must stay distinct: True means
+    silent, False means a global claim, None means the sample-scoped claim and
+    a note saying so. Collapsing None into False would turn "could not tell"
+    into "never", which is the failure mode this evaluator exists to avoid.
+    """
+
+    class _Source:
+        def __init__(self, turns):
+            self.turns = turns
+            self.api_calls = []
+            self.env = None
+            self._scopes = {}
+
+        session_count = 4
+
+        def note_scope(self, rule_id, text):
+            self._scopes[rule_id] = text
+
+        def recorded_scope(self, rule_id):
+            return self._scopes.get(rule_id, "")
+
+    def setUp(self):
+        self.rule = parse_rule(VENDOR_RULES / "no-plan-mode.md")
+        self.turns = [{
+            "source": "claude", "session_id": "s", "slashCommand": "",
+            "toolsUsed": ["Read"],
+        } for _ in range(60)]
+        self._real = CRE.telemetry.corpus_used_tool
+
+    def tearDown(self):
+        CRE.telemetry.corpus_used_tool = self._real
+
+    def run_with(self, answer):
+        CRE.telemetry.corpus_used_tool = lambda *a, **k: answer
+        source = self._Source(self.turns)
+        count = CRE.eval_no_plan_mode(self.rule, source)
+        return count, source.recorded_scope("no-plan-mode")
+
+    def test_used_anywhere_means_silent(self):
+        count, _ = self.run_with(True)
+        self.assertIsNone(count)
+
+    def test_never_used_makes_a_whole_corpus_claim(self):
+        count, scope = self.run_with(False)
+        self.assertEqual(count, 60)
+        self.assertIn("every session log on disk", scope)
+
+    def test_undetermined_falls_back_to_the_sample_and_says_so(self):
+        count, scope = self.run_with(None)
+        self.assertEqual(count, 60)
+        self.assertIn("session log(s) read", scope)
+        self.assertNotIn("every session log on disk", scope)
 
 
 class TelemetryDetectPinTest(CoachRulesEvalBase):
