@@ -237,10 +237,25 @@ it goes.
   real conversation history in the payload.** The path is verified end-to-end
   with a real paid model call (see the compatibility table); the remaining gap
   needs ordinary day-to-day use, not engineering.
-- **34 of the 45 vendored Coach rules are not evaluated** by the adapted Route
-  A evaluator, because they need per-turn telemetry this project does not
-  capture. Each skips loudly with the exact missing field named. See the
-  compatibility table.
+- **3 of the 45 vendored Coach rules are not evaluated** by the adapted Route
+  A evaluator (42 evaluate). Each skips loudly with a reason that cites
+  either an upstream file and line or a measurement over the local stores,
+  and `tests/test-coach-rules-eval.py` enforces that: a reason with no
+  checkable evidence fails the suite. The three, in full:
+  `no-devcontainer` is genuinely unreachable (upstream's own
+  `computeDevcontainerStats` filters to VS Code harnesses before reading any
+  field); `broken-flow-state` is a deferred ~150-line analyzer port whose
+  inputs are all present; `no-file-context` is reachable but deliberately not
+  shipped under upstream's rule id, because answering it here would require
+  redefining `referencedFiles` for one rule while four shipped adapters
+  depend on the current definition.
+
+  This was "34 not evaluated" until 2026-07-26. An adversarial re-analysis
+  found that twelve of the then-21 skip reasons asserted something about
+  upstream's source or the local data that was false, and that every one of
+  the twelve pointed away from doing work. Most of the gap was unplumbed
+  input described as absent input. Where a rule's CLI mapping differs from
+  upstream's field, the adapter says so and says what differs.
 
 ## Uninstall (single command)
 
@@ -278,7 +293,7 @@ follow-up plan) and no row below claims otherwise.
 | Mid-session turn counting | ✅ PostToolUse hook | ❌ not wired | deliberate: session-end loop is the portable core; covered by `test-turn-counter.sh` |
 | Copilot path independent of Claude Code | — | ✅ | `test-claude-absent.sh` runs the full Copilot review path with no `claude` binary or `~/.claude` present |
 | Session search indexing | ✅ (Claude JSONL) | ❌ planned | Copilot session-state parser is a follow-up plan; not yet exercised by run-all.sh beyond schema tests |
-| Coach signals (Routes A/B) | ✅ Route A (24/45 rules, adapted) + ✅ Route B (full, when the fork is installed) | same | reaches the reviewer prompt: `session-review.sh`/`copilot-session-review.sh` call `coach-signals.py` then append its merged output as a "Coach signals" section of the review prompt when present and <7 days old; covered by `test-coach-signals.py`, `test-coach-rules-eval.py`, and `test-session-review.sh`'s "coach signal id reaches prompt" assertion, which fails if that wiring ever regresses. **Route A is not upstream-equivalent**: `scripts/coach-rules-eval.py` evaluates 24 of the 45 vendored rules - 11 adapted to this project's own `messages`/`sessions` columns, and 13 read from the harnesses' own telemetry stores via `scripts/lib/telemetry.py` (Copilot's `events.jsonl` + `session-store.db`, Claude Code's `projects/*.jsonl`). Of the 21 skipped, 11 are IDE-only - upstream flags exactly those `requiresIdeContext: true` and skips them for non-IDE harnesses too - and 10 are reachable-but-unimplemented with a named cost. Every skip is logged with its specific reason (see `UNSUPPORTED_REASONS` in `coach-rules-eval.py`); `bash tests/run-all.sh` pins the count via `test-coach-rules-eval.py` so a silent coverage drop fails the suite, and `TelemetryAbsentSkipsLoudlyTest` pins that a missing harness store produces skips rather than a false all-clear. Route B, when the maintained fork is installed, bypasses this gap entirely — it reads Coach's own complete analysis (see "AI Engineering Coach integration" below) rather than re-deriving it from our narrower data. |
+| Coach signals (Routes A/B) | ✅ Route A (42/45 rules, adapted) + ✅ Route B (full, when the fork is installed) | same | reaches the reviewer prompt: `session-review.sh`/`copilot-session-review.sh` call `coach-signals.py` then append its merged output as a "Coach signals" section of the review prompt when present and <7 days old; covered by `test-coach-signals.py`, `test-coach-rules-eval.py`, and `test-session-review.sh`'s "coach signal id reaches prompt" assertion, which fails if that wiring ever regresses. **Route A is not upstream-equivalent**: `scripts/coach-rules-eval.py` evaluates 42 of the 45 vendored rules - 11 adapted to this project's own `messages`/`sessions` columns, and 31 read from the harnesses' own telemetry stores via `scripts/lib/telemetry.py` (Copilot's `events.jsonl`, `session-store.db` and `workspace.yaml`, Claude Code's `projects/*.jsonl`). Only 3 are skipped, and each skip reason must cite an upstream file:line or a measurement over the local stores - a reason with no checkable evidence fails the suite. See `UNSUPPORTED_REASONS` in `coach-rules-eval.py` and the "AI Engineering Coach integration" section below for all three, and for the twelve false skip reasons that were removed on 2026-07-26. `bash tests/run-all.sh` pins the count so a silent coverage drop fails, and `TelemetryAbsentSkipsLoudlyTest` pins that a missing harness store produces skips rather than a false all-clear. Route B, when the maintained fork is installed, reads Coach's own complete analysis rather than re-deriving it from our narrower data. |
 | Windows | ✅ green (Git Bash), with skips — see note | ✅ green (Git Bash), with skips — see note | CI results are per-OS (the whole matrix cell passes or fails), not per-harness, so both columns show the same Windows result. **No run id is frozen here** — earlier versions of this row cited one and went stale within hours, twice. Get the current state with `gh run list --branch harness-neutral-persistence` and `gh run view <id>`; the matrix is `{ubuntu, macos, windows}-latest × Python {3.9, 3.13}`, six cells. As of the last run observed while writing this, all six were green with the full suite. **Green ≠ equally covered**: 7 write-path security tests in `test-persist-proposal.py` (symlink, hardlink, `O_NOFOLLOW`) and 3 shell assertions skip on Windows, because creating a real symlink needs Developer Mode or elevation and `chmod` does not deny writes on ACL-governed filesystems. Every skip prints its reason and is gated on a probe that *verifies* the limitation rather than assuming it from the platform name. The symlink/hardlink attack surface is therefore exercised on Linux and macOS only. |
 | macOS | ✅ green | ✅ green | Same per-OS note as the Windows row, including the "no frozen run id" part. No skips on macOS. |
 | Copilot CLI live end-to-end (real session, real file on disk) | n/a | ✅ verified 2026-07-25 (one residual) | Run against whatever `copilot` version was installed on 2026-07-25 (1.0.73 at that moment; it has since auto-updated past that, e.g. 1.0.75 — this project targets "current, authenticated `copilot` on PATH," never a pinned version, so treat any specific number here as a point-in-time observation, not a requirement) with a real paid model call. `copilot-session-review.sh` completed end-to-end and the writer accepted a valid empty proposal (correct — headless `-p` has no transcript to mine); the same OUTPUT CONTRACT with a transcript produced a conforming proposal and **real content persisted** to `<store>/memory/MEMORY.md`, append mode, 0600, nothing written outside the store. Residual: no genuine *interactive* session has fired the `sessionEnd` hook with real conversation history in the payload yet — that needs ordinary use. |
@@ -298,21 +313,40 @@ Enable either or both in the resolved store's `self-learning.conf` (see
 When both are enabled, signals are merged and deduplicated by rule id; Route B
 (export) data wins because it comes from Coach's complete analyzer.
 
-**Route A evaluates 24 of the 45 vendored rules (measured, pinned by tests -
-see the Coach signals row above). Those 19 come from two data sources and are
-still ADAPTATIONS, not re-implementations of the upstream rule.**
+**Route A evaluates 42 of the 45 vendored rules (measured, pinned by tests -
+see the Coach signals row above). They come from two data sources and are
+still ADAPTATIONS, not re-implementations of the upstream rules.**
 
-*Corrected 2026-07-26.* This section previously said Route A reached 11 rules
-because the other 34 needed "VS Code Copilot Chat telemetry this project does
-not capture". Half of that was wrong. Upstream
-(`microsoft/AI-Engineering-Coach`) is not a VS Code-internals consumer - its
-own README is *"any harness, one dashboard"*, and `src/core/parser-vscode-cli.ts`
-parses Copilot CLI's `~/.copilot/session-state/<id>/events.jsonl` while
-`src/core/parser-claude.ts` parses Claude Code's `~/.claude/projects/*.jsonl`.
-Those are the same files this project already reads for the reviewer's
-conversation digest. The telemetry was unplumbed here, not unobtainable.
+*Corrected twice.* This section said 11 rules until 2026-07-26, then 24, and
+now says 42. Both corrections went the same direction, and the reason is worth
+recording because it is a failure mode rather than an accident.
 
-The two sources are now:
+The first correction: upstream (`microsoft/AI-Engineering-Coach`) is not a VS
+Code-internals consumer - its own README is *"any harness, one dashboard"*,
+`src/core/parser-vscode-cli.ts` parses Copilot CLI's
+`~/.copilot/session-state/<id>/events.jsonl`, and `src/core/parser-claude.ts`
+parses Claude Code's `~/.claude/projects/*.jsonl`. Those are the files this
+project already reads for the reviewer's digest. The telemetry was unplumbed
+here, not unobtainable.
+
+The second correction came from an adversarial re-analysis of the 21 skips
+that survived the first one. **Twelve of the twenty-one skip messages asserted
+something about upstream's source or about the local data that is false, and
+every one of the twelve pointed away from doing work.** A random error rate
+would have created work about half the time. Two arguments did most of the
+damage and are now banned in the skip table's header:
+
+- *`requiresIdeContext: true` proves the rule is unreachable.* It does not.
+  Upstream computes `skipIdeDetectors` only when a harness FILTER is applied
+  to the dashboard (`src/core/analyzer-patterns.ts:262`); in the default view
+  all 45 detectors run over a corpus that includes CLI sessions. The flag is
+  about attributing a finding in a mixed-harness view, not about the input
+  being absent.
+- *A conjunct that is constant here makes the rule a constant.* A
+  universally-true clause inside a conjunction is a NO-OP; the discriminating
+  work is done by the other clauses. Three rules were skipped on this.
+
+The data sources are:
 
 1. **The project's own index** (`SL_SEARCH_DB`) - per-message role/content/
    timestamp. Feeds 11 rules, each narrowing "requests" scope to
@@ -322,36 +356,79 @@ The two sources are now:
    for `mcp-tool-bloat`, which loses arguments and paths).
 2. **`scripts/lib/telemetry.py`** - the harnesses' own stores, read-only:
    Copilot's `events.jsonl` and `session-store.db` (`assistant_usage_events`),
-   and Claude Code's transcripts. Feeds 8 rules: `model-overreliance`,
-   `reasoning-effort-overuse`, `cache-hit-starvation`, `slow-responses`,
-   `verbose-output`, `high-cancellation`, `runaway-agent-loops`,
-   `excessive-file-context`.
+   its per-session `workspace.yaml`, and Claude Code's transcripts. Feeds the
+   other 31 rules.
 
-The 26 rules still skipped split into two honest groups, and the skip log names
-which:
+`vendor/coach-rules/tables/` holds three artefacts vendored the same way the
+rule files are, and pinned by SHA-256 in `scripts/lib/coachtables.py`:
+upstream's `MODEL_TIERS` and `WORK_TYPE_PATTERNS` (verbatim TypeScript slices,
+extracted with a loud failure if the anchor is missing) and the
+`leo-profanity` 1.9.0 dictionary upstream itself depends on, stored as SHA-256
+hashes rather than plaintext. Hashing is behaviour-preserving because
+`leoProfanity.check()` is exact whole-word set membership, and it keeps this
+repository free of the wordlist - the property Microsoft wanted when they
+pushed the list into an external package. A table that changes stops the
+adapters that read it until a human updates the pin, which is the same
+contract `_pin()` enforces for a rule's detect block, and the mechanism is
+tested by executing the mutation rather than asserting it.
 
-- **11 are IDE-only and correctly skipped.** Upstream marks exactly these
-  `requiresIdeContext: true` and drops them itself when analysing a non-IDE
-  harness (`src/core/detector-registry.ts`). They key off VS Code surfaces with
-  no CLI analogue - the ask/agent mode toggle, chat-attached file context,
-  slash commands, workspace custom instructions, tool auto-approval. Reachable
-  through **Route B** only, and then only for sessions actually run in VS Code.
-  Two of them (`yolo-mode`, `auto-approve-terminal`) are additionally
-  unmeasurable from CLI logs on their own merits: an auto-approved call emits
-  no permission event at all, so an auto-approve *rate* computed from what a
-  CLI records would have a permanently zero numerator.
-- **15 are reachable but not implemented**, each skipped with a named cost -
-  mostly `aiCode.loc` (upstream reconstructs generated code from tool
-  arguments; doing that here would hold whole file bodies in memory) or a
-  maintained upstream table this project would have to snapshot and let rot
-  (the premium-model tier list, the profanity wordlist, the work-type
-  taxonomy).
+**The three rules still skipped**, in full:
 
-No rule is enabled unless it is shown firing on a fixture built from real event
-shapes: a rule that evaluates but can never fire hides a gap instead of
-reporting it, which is worse than a loud skip. When a harness store is absent
-entirely (CI), all 8 telemetry rules skip loudly naming the missing source
-rather than reporting a clean bill of health from no data.
+- **`no-devcontainer` - genuinely unreachable**, and the only one for which
+  that is true. Not because of `requiresIdeContext`: because upstream's own
+  `computeDevcontainerStats` opens with
+  `sessions.filter(s => VSCODE_HARNESSES.has(...))`
+  (`src/core/dsl/interpreter.ts:579-583`), so for a CLI harness the scored
+  population is empty inside upstream's function, by a hardcoded gate, before
+  any field of ours is consulted.
+- **`broken-flow-state` - reachable, deferred, cost stated accurately.** It
+  needs a four-component weighted per-session score with hardcoded breakpoints
+  (`src/core/analyzer-flow.ts:41`). Every input is captured; this is a
+  ~150-line analyzer port, not a data gap. It was the one entry in the old
+  table whose reason was already honest.
+- **`no-file-context` - reachable, deliberately not shipped under this rule
+  id.** Upstream means *context the human attached to the prompt*, which
+  Copilot records as `user.message.data.attachments`; but `telemetry.py`
+  populates `referencedFiles` from tool arguments, mirroring upstream's own
+  CLI parser, and four shipped adapters depend on that definition. Answering
+  under upstream's id with a different input is exactly the drift `_pin()`
+  exists to prevent. It wants a locally-named signal, not a redefinition.
+
+**Adaptations are declared, not glossed.** Where a CLI mapping differs from
+upstream's field the adapter says so and says what differs - the Claude
+`CLAUDE.md`-for-`copilot-instructions.md` substitution; `approved-for-location`
+as Copilot's analogue of `autoApproveScope: 'always'` (Copilot has no
+session-scoped approval, so upstream's `'session'` arm is dead here, and
+Claude Code records no confirmations at all); `ExitPlanMode` as Claude Code's
+plan-mode marker, because `permissionMode` never carries the value `plan`
+even in sessions that plainly used it; and per-request `customInstructions`
+redefined as "this workspace has an instruction file", which loses upstream's
+ability to tell two requests in one workspace apart.
+
+**One thing was measured, works, and is still not shipped**, recorded here
+rather than chosen silently: defining auto-approval by subtracting permission
+events from tool executions (1046 `bash` executions against 219 `shell`
+permission requests) puts `yolo-mode` at ~0.96 and fires it loudly. It is
+rejected under upstream's rule id because Copilot CLI has an unpublished
+built-in allow-list of safe read-only commands, so "no permission event"
+conflates "the user auto-approved this" with "Copilot never asks about `ls`".
+
+**Two rules ship with replaced remediation text.** `no-slash-commands` and
+`agent-mode-for-asks` are genuine findings, but upstream's "How to Improve"
+names `/fix`, `/explain`, `/tests`, `/doc` and an Ask/Chat mode, none of which
+exist in either CLI - and that text is what gets written into the user's
+memory file. Skipping would discard a finding to avoid a text problem;
+emitting it would persist bad advice. `SUGGESTION_OVERRIDES` in
+`coach-rules-eval.py` substitutes CLI-accurate text, marked `ADAPTED FOR CLI`,
+with the rule id and count still upstream's.
+
+No rule is enabled unless it is shown firing on a fixture built from real
+event shapes, and every rule keeps a fire/no-fire test PAIR: a rule that
+evaluates but can never fire hides a gap instead of reporting it, which is
+worse than a loud skip - and the inverse, shipping dead rules to raise a
+number, is the failure this section's own history warns about. When a harness
+store is absent entirely (CI), the telemetry rules skip loudly naming the
+missing source rather than reporting a clean bill of health from no data.
 
 Route A's `detect` parser is a deliberately narrow subset of upstream's DSL
 (upstream ships a ~4,300-line lexer/parser/interpreter under `src/core/dsl/`);
