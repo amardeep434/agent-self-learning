@@ -36,12 +36,25 @@ re-measurement. Both mattered.
 plan-mode test onto Claude Code's `permissionMode`, reporting `plan` 0 alongside
 `dontAsk` 3378 and treating the zero as "the rule would fire as a true positive".
 Re-measured over 727 local transcripts: `permissionMode` is `default` 377,
-`acceptEdits` 853, `auto` 901, `dontAsk` 3378 — and **never once `plan`**, while
-the `ExitPlanMode` tool appears **780 times**. Plan mode is plainly used; the field
-simply does not record it. Mapping the rule onto `permissionMode` would have
-produced a rule that fires on every corpus forever — the always-fires failure the
-audit itself flags for `no-custom-instructions`, reintroduced two sections later.
-The `ExitPlanMode` tool use is the correct marker, and is what shipped.
+`acceptEdits` 853, `auto` 901, `dontAsk` 3378 — and **never once `plan`**.
+Mapping the rule onto `permissionMode` would have produced a rule that fires on
+every corpus forever — the always-fires failure the audit itself flags for
+`no-custom-instructions`, reintroduced two sections later. The `ExitPlanMode`
+tool use is the correct marker, and is what shipped.
+
+> **Correction, added in the follow-up round.** The sentence that used to sit here
+> — "the `ExitPlanMode` tool appears **780 times**. Plan mode is plainly used" —
+> was itself wrong, and wrong in exactly the way this section criticises. 780 was a
+> raw `grep -c`; the coordinator independently got 822 the same way. Transcripts
+> carry the harness's own tool listing as ordinary text, so the literal appears in
+> every session that merely had the tool available. Structurally: **368 of 739
+> transcripts contain the literal, and exactly ONE contains a real `tool_use`
+> block.** Plan mode is barely used here, so the finding is very likely TRUE. I
+> made the same class of error I had just flagged in the audit's `<command-name>`
+> count, one section later, and did not catch it until a scan for an impossible
+> marker string returned a hit — from the transcript of the session running the
+> scan. `telemetry.py` reads `tool_use` structurally, so the shipped rule was
+> always counting real uses; only the report's evidence sentence was wrong.
 
 The brief inherited this and went further, offering `permissionMode` as "a real
 ask/agent analogue" for `agent-mode-for-asks` and `agentic-no-tools`. It was not
@@ -194,3 +207,112 @@ The standing principle is unchanged and was not used as cover in either
 direction: no rule joined the evaluated set without a fire/no-fire test pair over
 fixtures built from real event shapes, and the three that remain skipped are
 skipped for reasons that survive being checked.
+
+
+---
+
+# Follow-up round — persisted-artifact verification and absence scoping
+
+Two items from the coordinator, after the 42/45 work landed. Branch tip was
+`fddcc4a` (three commits of theirs, none touching Coach files; CI run
+`30210446428` green on all six cells).
+
+| SHA | What |
+|---|---|
+| `0608bb8` | overrides fit the sanitize cap; absence findings disclose their window |
+| `b6189b0` | `no-plan-mode`'s absence becomes a whole-corpus claim |
+
+43 suites, count unchanged, all green. Python suites under
+`~/.pyenv/versions/3.9.24/bin/python3.9`. Coverage unchanged at 42/45.
+
+## 1. Does `ADAPTED FOR CLI` survive into persisted output?
+
+**The marker did. The advice did not.** Verified by running the real
+`coach-signals.py` merge and reading `coach-signals.json`, not by reading code —
+which is the only reason this was found.
+
+`coach-signals.py` sanitizes every suggestion to **240 characters** before it can
+reach a reviewer prompt or the memory file. `no-slash-commands`' override was 380+,
+so what got persisted ended:
+
+```
+... Define project-level ones for the tasks you repeat (Claude Code: .claude/com
+```
+
+Cut mid-word. The `ADAPTED FOR CLI` prefix survived because it is first; the half
+that says what to do *instead* did not. That inverts the argument for the
+substitution: marking the adaptation was what made replacing Microsoft's text
+honest, and the replacement never arrived. It was worse than either shipping
+upstream's text or skipping the rule.
+
+Both overrides are now under the cap (233 and 219 chars) and arrive whole;
+`OVERRIDE_MAX_CHARS` is a tested contract, and a test asserts the **final
+sentence** of the persisted string, not just the prefix, so a re-lengthened
+override fails even though the marker would still survive. The cap itself is
+untouched — it is a security control on untrusted input.
+
+Two of *upstream's own* suggestions (`instruction-bloat`,
+`reasoning-effort-overuse`) are still truncated at 240. That is upstream's advice
+being shortened, which is a cost; ours being cut in half changed what it said,
+which was a defect.
+
+**Not verifiable without a paid model call, and not claimed:** the final hop from
+the reviewer prompt into `MEMORY.md` is model-authored. What is proven is that the
+complete override text reaches `coach-signals.json` and is rendered into the
+prompt line the reviewer reads.
+
+## 2. Absence over a capped window
+
+Both options were implemented, because they answer different halves.
+
+**Option 1, generally** (`0608bb8`). `MAX_SESSIONS` caps the parsed sample. For a
+**rate** that is sound — a rate over the newest N sessions is an estimate of a
+rate, which is what a sample is for. For an **absence** it is not. The three rules
+whose check is driven by a never-happened boolean (`no-skills`, `auto-avoidance`,
+`context-engineering-gaps`) now carry a scope note naming the **actual** number of
+logs read, not the cap, so a corpus smaller than 40 is not described as "the
+newest 40". Rate-driven rules deliberately get no note — annotating those too
+would make the note noise and teach the reader to skip it.
+
+The note travels in **its own field**, not appended to `suggestion`. Appended, it
+would fall past the same 240-character cap that mangled the overrides and vanish.
+A caveat that can be truncated away is worse than no caveat, because the claim
+survives without it. Both review scripts' jq renders it: a field the renderer
+drops is a field that does not exist.
+
+**Option 2, for the one marker where it is sound and cheap** (`b6189b0`).
+`MAX_SESSIONS` is untouched. `telemetry.corpus_used_tool()` answers one narrow
+question over every log on disk. Measured on the development corpus (387 MB, 814
+logs, warm cache): **0.20s when the answer is no, 0.98s worst case**, on the review
+path beside a model call.
+
+**The obvious implementation would have been silently wrong.** A trial scan for a
+marker string that could not exist returned a hit — from the transcript of the
+session running the scan, which contained the string because it had just been
+typed. Following that up produced the correction at the top of this report: 368 of
+739 transcripts contain the literal `ExitPlanMode`, exactly **one** contains a real
+`tool_use`. A substring scan would have answered "used" for anyone who merely had
+the tool available and switched the rule off permanently and silently — a
+dead-rule outcome dressed as a fix for a vacuity problem. The prefilter now only
+nominates candidates; the answer always comes from the structural records.
+
+Three answers kept distinct, all three driven by tests: **used anywhere** → silent;
+**never used** → whole-corpus claim with a scope note saying so; **ceiling hit** →
+the finding the sample supports, with a note saying that is all it is. `None` is
+not `False`.
+
+**Why only this rule got a scan.** It has a single unambiguous marker. The other
+three are ratio- or multi-marker-shaped; a per-marker scan for each would cost
+several corpus passes to answer what the disclosure already answers honestly. The
+inconsistency between them is *disclosed* — one says "every session log on disk",
+the others name their window — which is the point.
+
+## Mutation
+
+18 mutants across the two commits, **18 killed, 0 survived**. Five survived a
+first round and every one was a real gap: truncating an override past the cap;
+dropping `scope` in the merge step; dropping it in the renderer; the byte ceiling;
+the Copilot half of the corpus scan; and the undetermined path. Closed by a
+telemetry unit suite (`CorpusUsedToolTest`) and an in-process test that drives the
+three scan answers directly, because the subprocess boundary cannot express "the
+ceiling was hit" without an env knob whose only purpose would be testing.
