@@ -298,7 +298,7 @@ Enable either or both in the resolved store's `self-learning.conf` (see
 When both are enabled, signals are merged and deduplicated by rule id; Route B
 (export) data wins because it comes from Coach's complete analyzer.
 
-**Route A evaluates 19 of the 45 vendored rules (measured, pinned by tests -
+**Route A evaluates 24 of the 45 vendored rules (measured, pinned by tests -
 see the Coach signals row above). Those 19 come from two data sources and are
 still ADAPTATIONS, not re-implementations of the upstream rule.**
 

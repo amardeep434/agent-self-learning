@@ -30,15 +30,18 @@ under active contention (tests/test-adversarial-sweep.py's TestTOCTOU; see
 .superpowers/sdd/2026-07-25-harness-neutral-persistence/fix-p3-toctou-report.md).
 Windows has no dir_fd support in the stdlib `os` module at all (`os.mkdir`
 etc. raise NotImplementedError there), so on Windows this module uses the
-path-based implementation (_write_all_path) -- but no longer with the race
-naked. There, every directory in the chain is *pinned*: held open root-to-leaf
-via CreateFileW (ctypes, stdlib) with FILE_FLAG_BACKUP_SEMANTICS |
+path-based implementation (_write_all_path). There, every directory in the
+chain is *pinned* where the platform allows it: held open root-to-leaf via
+CreateFileW (ctypes, stdlib) with FILE_FLAG_BACKUP_SEMANTICS |
 FILE_FLAG_OPEN_REPARSE_POINT and a share mode omitting FILE_SHARE_DELETE and
-FILE_SHARE_WRITE, which makes the kernel refuse the swap outright for the
-duration of the write. See lib/win_dir_pin.py for the MSDN citations and
-_write_all_path's docstring for how it is sequenced. Pinning is gated on a
-functional probe, never a platform name, and degrades to the older unpinned
-behaviour if a directory cannot be opened -- see also `doctor.sh`'s probes.
+FILE_SHARE_WRITE, so the kernel refuses the swap outright for the duration of
+the write. Pinning is gated on a functional probe that MEASURES that
+guarantee -- it renames a pinned throwaway directory and requires the attempt
+to fail, with a control experiment so an unwritable volume cannot look like
+protection. Where the guarantee does not hold, pinning is off and this
+module's TOCTOU window on that platform is exactly as previously disclosed.
+See lib/win_dir_pin.py for the MSDN citations, the correction of record from
+CI run 30184253819, and _write_all_path's docstring for the sequencing.
 
 CONCURRENCY: the plan+write transaction (everything from reading an existing
 MEMORY.md or `.usage.json` through renaming the staged files into place) is
@@ -532,25 +535,34 @@ def _write_all_path(planned: list[tuple[tuple[Path, ...], Path, str, str]]) -> t
     above checks `st_reparse_tag`. That check is correct but is a *check*, and
     therefore still racy.
 
-    lib/win_dir_pin.py now closes that window on Windows with documented Win32
-    rather than ntdll: every directory in the chain is opened root-to-leaf
-    with CreateFileW using FILE_FLAG_BACKUP_SEMANTICS |
+    lib/win_dir_pin.py attempts to close that window on Windows with
+    documented Win32 rather than ntdll: every directory in the chain is opened
+    root-to-leaf with CreateFileW using FILE_FLAG_BACKUP_SEMANTICS |
     FILE_FLAG_OPEN_REPARSE_POINT and a share mode of FILE_SHARE_READ *only*.
     Omitting FILE_SHARE_DELETE means no other process can obtain delete
     access, and MSDN states delete access "allows both delete and rename
     operations"; omitting FILE_SHARE_WRITE blocks in-place conversion via
-    FSCTL_SET_REPARSE_POINT. While the handles are held the swap is prevented
-    by the kernel rather than detected after the fact. See that module's
-    docstring for the full citations, the reason holding the handles does not
-    block our own writes into those directories, and the fail-safe posture
-    (unavailable or unopenable -> today's unpinned behaviour; a handle that
-    reports a reparse point -> hard refusal).
+    FSCTL_SET_REPARSE_POINT.
 
-    Pinning is gated on `win_dir_pin.available()`, a real functional probe, so
-    it is inert on POSIX -- where `_write_all_fd` runs instead anyway -- and
-    cannot become a platform-name branch. `_PIN_SET_FACTORY` below is the
-    single injection point tests use to exercise the sequencing on a host
-    where the Win32 backend can never run.
+    "ATTEMPTS TO" IS DELIBERATE WORDING. That design is documented-correct and
+    nevertheless did not hold the first time it was executed: on Windows CI a
+    pinned directory was renamed anyway, because the pin requested only
+    FILE_READ_ATTRIBUTES and Windows engages its share-access accounting only
+    for opens requesting read/write/delete access. See win_dir_pin's
+    PIN_DESIRED_ACCESS for the citation and the fix.
+
+    Because of that, `win_dir_pin.available()` no longer means "CreateFileW
+    worked" -- it means "a pinned directory was MEASURED to be un-renameable
+    on this machine" (win_dir_pin.verify_pin_blocks_rename, including a
+    control experiment so an unwritable volume cannot masquerade as
+    protection). If the guarantee does not hold, pinning is disabled and this
+    function keeps exactly the race documented above: disclosed, not
+    silently papered over.
+
+    Fail-safe posture: unavailable or unopenable -> today's unpinned
+    behaviour; a handle that reports a reparse point -> hard refusal.
+    `_PIN_SET_FACTORY` below is the single injection point tests use to
+    exercise the sequencing on a host where the Win32 backend can never run.
 
     See .superpowers/sdd/2026-07-25-harness-neutral-persistence/fix-p3-toctou-report.md
     and residuals-research-report.md (Residual 1 / Residual A).

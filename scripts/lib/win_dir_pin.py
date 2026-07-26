@@ -54,6 +54,22 @@ FSCTL_SET_REPARSE_POINT (needs write access -> blocked). So while the handle
 is held the swap is *prevented by the kernel*, not detected afterwards. That
 is strictly stronger than a check.
 
+CORRECTION OF RECORD (2026-07-26): the paragraph above is the DESIGN, and it
+was wrong once in practice. The first version of this module requested
+`FILE_READ_ATTRIBUTES` as its desired access. On Windows CI it opened the
+handle, read the attributes back correctly, reported AVAILABLE -- and a
+pinned directory was renamed anyway. The share mode was reaching the kernel
+intact; the open simply never entered the kernel's share-access accounting,
+because that accounting is engaged only for opens requesting read, write or
+delete access. See PIN_DESIRED_ACCESS below for the citation and the fix.
+
+The lesson is encoded structurally, not just in prose: `available()` no
+longer means "CreateFileW worked", it means "a pinned directory was measured
+to be un-renameable on this machine" (see verify_pin_blocks_rename). If the
+guarantee does not hold, pinning is DISABLED and `_write_all_path` keeps its
+previously documented race. A race we describe honestly is better than a
+protection we advertise and do not have.
+
 WHY HOLDING THE HANDLE DOES NOT BLOCK OUR OWN WRITES
 ----------------------------------------------------
 The share mode governs subsequent opens *of that same object* -- the
@@ -107,6 +123,10 @@ import tempfile
 
 # --- Win32 constants (documented values; see module docstring for citations)
 FILE_READ_ATTRIBUTES = 0x0080
+# 0x0001 is FILE_READ_DATA on a file and FILE_LIST_DIRECTORY on a directory --
+# the same bit. Requesting it is what makes the open participate in the
+# kernel's share-access accounting at all; see PIN_DESIRED_ACCESS below.
+FILE_LIST_DIRECTORY = 0x0001
 FILE_SHARE_READ = 0x00000001
 OPEN_EXISTING = 3
 FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
@@ -121,6 +141,37 @@ _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 # forgotten flag, and lets a test assert the value directly.
 PIN_SHARE_MODE = FILE_SHARE_READ
 PIN_FLAGS = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT
+
+# WHY FILE_LIST_DIRECTORY IS HERE AND NOT JUST FILE_READ_ATTRIBUTES.
+#
+# The first version of this module requested FILE_READ_ATTRIBUTES alone --
+# minimal privilege, and enough for GetFileInformationByHandle. Every test
+# passed on Windows CI except the one that mattered: a pinned directory could
+# still be renamed. The share mode was reaching the kernel correctly; the
+# problem was our OWN desired access.
+#
+# Windows tracks sharing in a per-file SHARE_ACCESS structure (OpenCount,
+# Readers, Writers, Deleters, SharedRead, SharedWrite, SharedDelete), and the
+# check is only engaged for opens that request read, write or delete access.
+# Microsoft documents this by way of the flag that overrides it --
+# IoCheckLinkShareAccess's IO_CHECK_SHARE_ACCESS_FORCE_CHECK (0x00000020),
+# "indicate to force check share access even if the request is not
+# read/write/delete access":
+# https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-iochecklinkshareaccess
+#
+# That flag only makes sense because the DEFAULT is to skip the check for
+# requests that are not read/write/delete. FILE_READ_ATTRIBUTES (0x0080) is
+# none of those, so a pin opened with it alone never registered in the
+# directory's share-access accounting -- it held a handle that no other
+# opener's sharing check ever consulted. FILE_LIST_DIRECTORY (0x0001) is the
+# directory spelling of FILE_READ_DATA, so requesting it makes the open a
+# genuine reader and puts it into the accounting a subsequent rename's
+# DELETE-access open has to clear.
+#
+# This is a REASONED fix to a MEASURED failure, and reasoning is exactly what
+# produced the original bug. So it is not trusted: available() now verifies
+# the guarantee by attempting a real rename (see verify_pin_blocks_rename).
+PIN_DESIRED_ACCESS = FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES
 
 
 class ReparsePointError(Exception):
@@ -283,7 +334,7 @@ def open_pin(path: str) -> Pin:
 
     handle = win32.CreateFileW(
         extended_path(path),
-        FILE_READ_ATTRIBUTES,
+        PIN_DESIRED_ACCESS,
         PIN_SHARE_MODE,
         None,
         OPEN_EXISTING,
@@ -364,43 +415,109 @@ class PinSet:
         self._pins.clear()
 
 
-def _probe() -> bool:
-    """Real functional probe: pin a throwaway directory and read it back.
+GUARANTEE_HELD = "verified: a pinned directory could not be renamed"
+GUARANTEE_NO_BACKEND = "no kernel32 -- expected on POSIX"
+GUARANTEE_NOT_ENFORCED = (
+    "kernel32 present, but the kernel did NOT block a rename of a pinned "
+    "directory -- pinning disabled, the write path keeps its documented race")
+GUARANTEE_INCONCLUSIVE = (
+    "kernel32 present, but the control rename failed too -- cannot tell "
+    "protection from an unwritable volume, so pinning is disabled")
+
+
+def verify_pin_blocks_rename(directory, moved, opener=None, rename=None):
+    """Measure whether pinning `directory` actually prevents renaming it.
+
+    Returns one of the GUARANTEE_* reason constants. This is THE contract of
+    the module, and it is measured rather than assumed -- the first version
+    of this file shipped a design that was correct according to MSDN's
+    share-mode wording and did not hold on a real Windows runner. Every test
+    passed except this property, because nothing tested this property.
+
+    Three outcomes, deliberately distinguished:
+
+      * rename fails while pinned, succeeds after release -> HELD.
+      * rename SUCCEEDS while pinned                      -> NOT_ENFORCED.
+      * rename fails while pinned AND after release       -> INCONCLUSIVE.
+        Without this control experiment a read-only volume, a permission
+        problem or an antivirus lock would look exactly like protection --
+        the module would report AVAILABLE on the strength of a failure that
+        had nothing to do with the pin.
+
+    `opener`/`rename` are injectable so the decision logic is executable on a
+    POSIX host, where CreateFileW cannot run. They default to the real ones.
+    """
+    opener = opener or open_pin
+    rename = rename or os.rename
+
+    pin = opener(directory)
+    try:
+        try:
+            rename(directory, moved)
+        except OSError:
+            blocked = True
+        else:
+            blocked = False
+            rename(moved, directory)  # restore, so the control below is fair
+    finally:
+        pin.close()
+
+    if not blocked:
+        return GUARANTEE_NOT_ENFORCED
+    try:
+        rename(directory, moved)
+    except OSError:
+        return GUARANTEE_INCONCLUSIVE
+    return GUARANTEE_HELD
+
+
+def _probe() -> "tuple[bool, str]":
+    """Functional probe for the GUARANTEE, not merely for the plumbing.
 
     Mirrors persist-proposal's `_probe_dir_fd_support` in spirit and for the
-    same reason -- this codebase has been bitten repeatedly by assuming what a
-    platform *name* implies. A capability that cannot complete an actual
-    open/verify/close cycle is not a capability.
+    same reason -- this codebase has been bitten repeatedly by assuming what
+    a platform *name* implies. It goes further than that probe because this
+    module has already been wrong once in a way an open/verify/close cycle
+    could not detect: the handle opened, the attributes read back correctly,
+    and the directory was renamed out from under it anyway.
+
+    So availability now MEANS "the kernel demonstrably refuses the swap".
+    Anything else disables pinning, which returns `_write_all_path` to
+    exactly its previous behaviour -- a documented race rather than an
+    advertised protection that is not there.
     """
     if _win32() is None:
-        return False
+        return (False, GUARANTEE_NO_BACKEND)
     try:
         with tempfile.TemporaryDirectory() as d:
-            sub = os.path.join(d, "probe-dir")
-            os.mkdir(sub)
-            pin = open_pin(sub)
-            try:
-                # An identity of (0, 0) means the filesystem does not report
-                # file IDs; the *pin* still works, so this is not fatal, but
-                # a failed open or a bogus attribute set is.
-                pin.identity()
-            finally:
-                pin.close()
-        return True
-    except (OSError, ReparsePointError, ValueError):
-        return False
+            target = os.path.join(d, "probe-dir")
+            os.mkdir(target)
+            reason = verify_pin_blocks_rename(target, os.path.join(d, "probe-moved"))
+        return (reason == GUARANTEE_HELD, reason)
+    except (OSError, ReparsePointError, ValueError) as exc:
+        return (False, "probe raised {}: {}".format(type(exc).__name__, exc))
 
 
-_AVAILABLE: "bool | None" = None
+_PROBE: "tuple[bool, str] | None" = None
+
+
+def probe_detail() -> "tuple[bool, str]":
+    """Cached (available, reason). The reason is what CI logs, so a run can
+    never look green while the guarantee silently does not hold."""
+    global _PROBE
+    if _PROBE is None:
+        _PROBE = _probe()
+    return _PROBE
 
 
 def available() -> bool:
-    """Cached functional probe result. Never a platform-name check."""
-    global _AVAILABLE
-    if _AVAILABLE is None:
-        _AVAILABLE = _probe()
-    return _AVAILABLE
+    """Cached functional probe result. Never a platform-name check.
+
+    True means the guarantee was measured and held on THIS machine.
+    """
+    return probe_detail()[0]
 
 
 if __name__ == "__main__":  # pragma: no cover - diagnostic surface
-    print("AVAILABLE" if available() else "UNAVAILABLE")
+    ok, why = probe_detail()
+    print("{} ({})".format("AVAILABLE" if ok else "UNAVAILABLE", why))

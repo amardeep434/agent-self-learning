@@ -27,6 +27,30 @@ The fake opener used for the sequencing tests is intentionally dumb: it
 records and returns, so a test failure means the *caller's* sequencing is
 wrong, which is the only part of this that a POSIX host can be authoritative
 about.
+
+WHY THE WINDOWS HALF IS SHAPED THE WAY IT IS (learned the hard way)
+------------------------------------------------------------------
+CI run 30184253819 passed 38 of 39 tests on both Windows cells and failed the
+only one that encoded the point: a pinned directory was renamed anyway. The
+plumbing tests all passed because they tested plumbing.
+
+So the Windows half now has three layers, and the middle one is the important
+one:
+
+  1. `test_guarantee_holds_on_this_runner` -- the headline property, measured
+     directly, never conditional and never relaxed. If the guarantee cannot
+     be delivered, this test going red is the correct outcome and the module
+     should be downgraded rather than the assertion softened.
+  2. `test_probe_agrees_with_the_measured_guarantee` -- fails if
+     `available()` claims MORE than the machine delivers, and also if it
+     claims less. This is what makes a green run mean something: the module
+     can no longer be live while advertising protection it does not have.
+  3. The narrower properties (rmdir, writes-inside, reparse refusal, release),
+     each separated so CI reports which one held.
+
+`available()` itself was changed to mean "the guarantee was measured and
+held", not "CreateFileW returned a handle" -- see win_dir_pin's
+verify_pin_blocks_rename.
 """
 import importlib.util
 import json
@@ -46,10 +70,9 @@ import win_dir_pin  # noqa: E402
 # CI log answers the one question a POSIX host cannot: does CreateFileW
 # directory pinning actually work on the runner? UNAVAILABLE on Windows would
 # mean the write path silently fell back to the old unpinned race.
-print("[capability probe] win32 directory pinning: {}".format(
-    "AVAILABLE" if win_dir_pin.available()
-    else "UNAVAILABLE (no kernel32 -- expected on POSIX, a defect on Windows)"),
-    flush=True)
+_PIN_OK, _PIN_WHY = win_dir_pin.probe_detail()
+print("[capability probe] win32 directory pinning: {} ({})".format(
+    "AVAILABLE" if _PIN_OK else "UNAVAILABLE", _PIN_WHY), flush=True)
 
 
 def _load_writer_module():
@@ -117,6 +140,21 @@ class ConstantsTest(unittest.TestCase):
     def test_pin_flags_include_backup_semantics_and_open_reparse_point(self):
         self.assertTrue(win_dir_pin.PIN_FLAGS & 0x02000000)  # BACKUP_SEMANTICS
         self.assertTrue(win_dir_pin.PIN_FLAGS & 0x00200000)  # OPEN_REPARSE_POINT
+
+    def test_desired_access_requests_read_not_only_attributes(self):
+        """The regression that shipped once and must not ship again.
+
+        FILE_READ_ATTRIBUTES alone does not enter the kernel's share-access
+        accounting -- Microsoft documents this via the override flag
+        IO_CHECK_SHARE_ACCESS_FORCE_CHECK, "force check share access even if
+        the request is not read/write/delete access". With attributes-only
+        access the handle was held, the share mode was correct, and a pinned
+        directory was renamed anyway on Windows CI.
+        """
+        self.assertTrue(win_dir_pin.PIN_DESIRED_ACCESS & win_dir_pin.FILE_LIST_DIRECTORY,
+                        "the pin must request read access or the share mode is never "
+                        "consulted by a subsequent opener")
+        self.assertTrue(win_dir_pin.PIN_DESIRED_ACCESS & win_dir_pin.FILE_READ_ATTRIBUTES)
 
     def test_documented_constant_values(self):
         self.assertEqual(win_dir_pin.OPEN_EXISTING, 3)
@@ -190,6 +228,165 @@ class InterpretInfoTest(unittest.TestCase):
     def test_high_index_word_is_not_truncated(self):
         _serial, index = win_dir_pin.interpret_info("C:\\s", self.D, 0, 0xFFFFFFFF, 0xFFFFFFFF)
         self.assertEqual(index, (1 << 64) - 1)
+
+
+class VerifyGuaranteeTest(unittest.TestCase):
+    """`verify_pin_blocks_rename`'s decision logic, driven with fakes.
+
+    This is the function that decides whether the module is allowed to claim
+    anything at all, so it is the one piece that most needs to be executable
+    where the Win32 backend cannot run.
+    """
+
+    def _run(self, rename_impl):
+        log = []
+        pin = FakePin("/d/dir", log)
+        result = win_dir_pin.verify_pin_blocks_rename(
+            "/d/dir", "/d/moved", opener=lambda p: pin, rename=rename_impl)
+        return result, pin, log
+
+    def test_blocked_while_pinned_and_allowed_after_release_is_held(self):
+        state = {"released": False}
+        pin_holder = {}
+
+        def rename(src, dst):
+            if not state["released"]:
+                raise OSError(32, "sharing violation")
+
+        def opener(path):
+            pin = FakePin(path, [])
+            original_close = pin.close
+
+            def close():
+                state["released"] = True
+                original_close()
+            pin.close = close
+            pin_holder["pin"] = pin
+            return pin
+
+        result = win_dir_pin.verify_pin_blocks_rename(
+            "/d/dir", "/d/moved", opener=opener, rename=rename)
+        self.assertEqual(result, win_dir_pin.GUARANTEE_HELD)
+        self.assertTrue(pin_holder["pin"].closed)
+
+    def test_rename_succeeding_while_pinned_is_not_enforced(self):
+        """The exact Windows CI failure. Must disable the module, not be
+        rounded up to 'probably fine'."""
+        result, pin, _log = self._run(lambda src, dst: None)
+        self.assertEqual(result, win_dir_pin.GUARANTEE_NOT_ENFORCED)
+        self.assertTrue(pin.closed)
+
+    def test_rename_failing_both_times_is_inconclusive_not_held(self):
+        """A read-only volume, a permission problem or an antivirus lock
+        fails the rename for reasons that have nothing to do with the pin.
+        Without the control experiment that reads as protection."""
+        def always_fails(src, dst):
+            raise OSError(5, "access denied")
+        result, pin, _log = self._run(always_fails)
+        self.assertEqual(result, win_dir_pin.GUARANTEE_INCONCLUSIVE)
+        self.assertTrue(pin.closed)
+
+    def test_the_directory_is_restored_before_the_control_experiment(self):
+        """When the rename is NOT blocked the directory has moved; leaving it
+        moved would make the control run against a path that no longer
+        exists, and the answer would be an artefact of the probe."""
+        calls = []
+        win_dir_pin.verify_pin_blocks_rename(
+            "/d/dir", "/d/moved", opener=lambda p: FakePin(p, []),
+            rename=lambda src, dst: calls.append((src, dst)))
+        self.assertEqual(calls, [("/d/dir", "/d/moved"), ("/d/moved", "/d/dir")])
+
+    def test_pin_is_released_even_if_rename_raises_something_unexpected(self):
+        pin = FakePin("/d/dir", [])
+
+        def explode(src, dst):
+            raise RuntimeError("not an OSError")
+        with self.assertRaises(RuntimeError):
+            win_dir_pin.verify_pin_blocks_rename(
+                "/d/dir", "/d/moved", opener=lambda p: pin, rename=explode)
+        self.assertTrue(pin.closed, "a leaked handle would make the directory "
+                                    "undeletable for the life of the process")
+
+    def test_reason_constants_are_distinct(self):
+        reasons = {win_dir_pin.GUARANTEE_HELD, win_dir_pin.GUARANTEE_NO_BACKEND,
+                   win_dir_pin.GUARANTEE_NOT_ENFORCED,
+                   win_dir_pin.GUARANTEE_INCONCLUSIVE}
+        self.assertEqual(len(reasons), 4)
+
+
+class ProbeVerdictMappingTest(unittest.TestCase):
+    """`_probe`'s verdict -> availability mapping, executed on any platform.
+
+    Without this the mapping is only reachable on Windows, and a mutation
+    making `_probe` return available regardless of the measured verdict
+    survived the whole suite: on POSIX the function returns early at the
+    no-backend branch and never reaches the line. That is precisely the
+    "module claims protection it does not have" failure this round exists to
+    prevent, so it must be provable here.
+    """
+
+    def setUp(self):
+        self._orig_win32 = win_dir_pin._win32
+        self._orig_verify = win_dir_pin.verify_pin_blocks_rename
+        self._orig_cache = win_dir_pin._PROBE
+
+        def restore():
+            win_dir_pin._win32 = self._orig_win32
+            win_dir_pin.verify_pin_blocks_rename = self._orig_verify
+            win_dir_pin._PROBE = self._orig_cache
+        self.addCleanup(restore)
+
+    def _probe_with(self, reason):
+        win_dir_pin._win32 = lambda: object()          # pretend kernel32 exists
+        win_dir_pin.verify_pin_blocks_rename = lambda *a, **k: reason
+        return win_dir_pin._probe()
+
+    def test_held_is_the_only_verdict_that_yields_available(self):
+        ok, why = self._probe_with(win_dir_pin.GUARANTEE_HELD)
+        self.assertTrue(ok)
+        self.assertEqual(why, win_dir_pin.GUARANTEE_HELD)
+
+    def test_not_enforced_yields_unavailable(self):
+        ok, why = self._probe_with(win_dir_pin.GUARANTEE_NOT_ENFORCED)
+        self.assertFalse(ok, "a kernel that allows the swap must disable pinning")
+        self.assertEqual(why, win_dir_pin.GUARANTEE_NOT_ENFORCED)
+
+    def test_inconclusive_yields_unavailable(self):
+        ok, _why = self._probe_with(win_dir_pin.GUARANTEE_INCONCLUSIVE)
+        self.assertFalse(ok, "an unmeasurable guarantee is not a guarantee")
+
+    def test_no_backend_short_circuits_without_touching_the_filesystem(self):
+        win_dir_pin._win32 = lambda: None
+
+        def must_not_run(*a, **k):
+            raise AssertionError("verification attempted with no backend")
+        win_dir_pin.verify_pin_blocks_rename = must_not_run
+        ok, why = win_dir_pin._probe()
+        self.assertFalse(ok)
+        self.assertEqual(why, win_dir_pin.GUARANTEE_NO_BACKEND)
+
+    def test_an_exception_during_verification_is_unavailable_not_a_crash(self):
+        win_dir_pin._win32 = lambda: object()
+
+        def boom(*a, **k):
+            raise OSError(5, "access denied")
+        win_dir_pin.verify_pin_blocks_rename = boom
+        ok, why = win_dir_pin._probe()
+        self.assertFalse(ok)
+        self.assertIn("OSError", why)
+
+    def test_probe_detail_caches_and_available_agrees_with_it(self):
+        win_dir_pin._PROBE = None
+        win_dir_pin._win32 = lambda: object()
+        calls = []
+
+        def once(*a, **k):
+            calls.append(1)
+            return win_dir_pin.GUARANTEE_NOT_ENFORCED
+        win_dir_pin.verify_pin_blocks_rename = once
+        self.assertFalse(win_dir_pin.available())
+        self.assertFalse(win_dir_pin.probe_detail()[0])
+        self.assertEqual(len(calls), 1, "the probe must run at most once per process")
 
 
 class ProbeTest(unittest.TestCase):
@@ -483,10 +680,77 @@ class EndToEndUnpinnedTest(unittest.TestCase):
 class WindowsBackendTest(unittest.TestCase):
     """The half only Windows CI can execute. Skipped loudly elsewhere."""
 
-    def test_probe_reports_available(self):
-        self.assertTrue(win_dir_pin.available(),
-                        "CreateFileW directory pinning must work on Windows; "
-                        "if this fails the fallback is silently the old race")
+    @staticmethod
+    def _measure_guarantee(directory):
+        """Directly measure whether a pinned directory can be renamed.
+
+        Deliberately does NOT go through win_dir_pin.available() -- this is
+        the independent measurement that available() is checked against.
+        """
+        parent = os.path.dirname(directory)
+        moved = os.path.join(parent, "measured-move")
+        pin = win_dir_pin.open_pin(directory)
+        try:
+            try:
+                os.rename(directory, moved)
+            except OSError as exc:
+                return True, exc
+            os.rename(moved, directory)
+            return False, None
+        finally:
+            pin.close()
+
+    def test_guarantee_holds_on_this_runner(self):
+        """THE headline property. Not weakened, not conditional.
+
+        If this fails, the module's entire value proposition does not hold on
+        this platform and the honest response is to downgrade or remove it --
+        never to relax this assertion. It failed once already, on CI run
+        30184253819, with FILE_READ_ATTRIBUTES-only desired access.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            sub = os.path.join(d, "real")
+            os.mkdir(sub)
+            blocked, exc = self._measure_guarantee(sub)
+            self.assertTrue(
+                blocked,
+                "a pinned directory was RENAMED while its handle was held. "
+                "The share mode denies FILE_SHARE_DELETE and MSDN says delete "
+                "access covers rename, so either the desired access still does "
+                "not engage the kernel's share-access accounting, or renaming a "
+                "directory does not take delete access on the directory itself. "
+                "Either way this module cannot claim kernel-level protection. "
+                "Measured error: {!r}".format(exc))
+
+    def test_probe_agrees_with_the_measured_guarantee(self):
+        """available() must never claim more than the machine delivers.
+
+        This is the guard that makes a green run meaningful in BOTH
+        directions: it fails if the module reports AVAILABLE while the kernel
+        allows the swap, and equally if it reports UNAVAILABLE while the
+        kernel blocks it (which would silently give up real protection).
+        """
+        with tempfile.TemporaryDirectory() as d:
+            sub = os.path.join(d, "real")
+            os.mkdir(sub)
+            blocked, _exc = self._measure_guarantee(sub)
+        ok, why = win_dir_pin.probe_detail()
+        self.assertEqual(
+            ok, blocked,
+            "probe says available={} ({!r}) but the measured guarantee was "
+            "blocked={}".format(ok, why, blocked))
+
+    def test_module_is_inert_when_the_guarantee_does_not_hold(self):
+        """If the property is not delivered, nothing may be pinned -- the
+        write path must fall back to its documented race rather than run
+        while advertising a protection it does not have."""
+        if win_dir_pin.available():
+            self.skipTest("[skip] guarantee holds here; inertness is the other branch")
+        pins = win_dir_pin.PinSet()
+        self.assertFalse(pins.enabled)
+        with tempfile.TemporaryDirectory() as d:
+            pins.pin(d)
+        self.assertEqual(pins.pinned_paths(), [])
 
     def test_pin_a_real_directory_and_read_its_identity(self):
         with tempfile.TemporaryDirectory() as d:
@@ -516,20 +780,36 @@ class WindowsBackendTest(unittest.TestCase):
             finally:
                 pin.close()
 
-    def test_pinned_directory_cannot_be_renamed_or_removed(self):
-        """The kernel-level guarantee this module buys."""
+    def test_pinned_directory_cannot_be_removed(self):
+        """Split out from the rename assertion on purpose.
+
+        They were one test, and the rename failed first -- so CI never
+        reported whether rmdir was blocked. Deletion and rename are enforced
+        by different mechanisms on Windows (an open handle blocks directory
+        deletion outright; rename goes through the share-access check), so
+        one holding tells you nothing about the other.
+        """
         with tempfile.TemporaryDirectory() as d:
             sub = os.path.join(d, "real")
             os.mkdir(sub)
             pin = win_dir_pin.open_pin(sub)
             try:
                 with self.assertRaises(OSError):
-                    os.rename(sub, os.path.join(d, "swapped"))
-                with self.assertRaises(OSError):
                     os.rmdir(sub)
             finally:
                 pin.close()
-            os.rename(sub, os.path.join(d, "swapped"))  # released -> allowed
+            os.rmdir(sub)  # released -> allowed
+
+    def test_rename_is_allowed_again_once_the_pin_is_released(self):
+        """The control experiment, as a test: protection that never lifts is
+        indistinguishable from an unwritable volume."""
+        with tempfile.TemporaryDirectory() as d:
+            sub = os.path.join(d, "real")
+            os.mkdir(sub)
+            pin = win_dir_pin.open_pin(sub)
+            pin.close()
+            os.rename(sub, os.path.join(d, "swapped"))
+            self.assertTrue(os.path.isdir(os.path.join(d, "swapped")))
 
     def test_a_reparse_point_is_refused_by_the_handle(self):
         with tempfile.TemporaryDirectory() as d:
