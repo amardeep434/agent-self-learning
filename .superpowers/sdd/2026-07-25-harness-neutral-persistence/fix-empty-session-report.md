@@ -408,3 +408,107 @@ addendum — both fixes are in tests.
   the test's own temp dir, with no `#`-delimiter or bracket-expression
   constructs that differ between GNU/BSD/MSYS `sed` — but this branch has been
   burned by `sed` and `date` portability before.
+
+---
+
+# Addendum 2 — the last red cell: windows-latest 3.13 (CI run `30214330505`)
+
+5 of 6 green. `windows-latest / 3.9` ran the identical 175 tests in **30.5s and
+passed**; `windows-latest / 3.13` emitted nothing and was killed at 120s.
+
+## Hang or slowness? — not established, and I will not claim otherwise
+
+The coordinator's caveat is the right one and I could not get past it from
+Linux. What I *did* establish narrows it, without settling it:
+
+- **My stream redirection is not the explanation for the silence.**
+  `unittest.TextTestRunner` binds its stream at construction, before any test
+  runs, so `contextlib.redirect_stderr` inside `eval_in_process` cannot swallow
+  the dots. Verified directly.
+- **On Linux, dots survive a `SIGKILL`.** `sys.stderr.line_buffering` is `True`
+  (stdout's is `False`), so progress reaches the pipe line by line. SIGKILLing
+  the pre-change suite mid-run left 54 bytes of dots, not nothing.
+- If Windows CPython behaves the same way — same default since 3.9 — then "no
+  dots at all" leans toward the suite **not reaching its first test**, i.e. an
+  import-time or startup hang. **But I am not calling that established.** The
+  path differs in ways I cannot test here: MSYS `timeout` signalling a native
+  Windows process, GitHub's own log capture, and `timeout` sending `TERM` (which
+  Python does not flush on) five seconds before `KILL`. This is exactly the
+  "confident reading of partial evidence" that has already produced two wrong
+  hypotheses in this round, including mine.
+
+**So the deliverable is the instrument, not a verdict.** The next run answers it
+mechanically instead of by inference.
+
+## What I changed for observability (`35ef79c`)
+
+- `run-all.sh` runs every Python suite under `-u` + `PYTHONUNBUFFERED=1`. Block
+  buffering to a pipe is what makes "ran fine for 119s then killed"
+  indistinguishable from "hung instantly".
+- Each test's id is written to `sys.__stderr__` and **flushed before the test
+  runs** — so the last line printed names the test in flight when the process
+  died. `sys.__stderr__`, not `sys.stderr`, so it is immune to
+  `eval_in_process`'s redirection.
+- **Import is announced in three phases.** Import happens before `unittest`
+  exists, so an import hang and a first-test hang are otherwise identical in a
+  killed job. This is the check that will confirm or kill the import-hang lean
+  above, in one run.
+- The slowest 10 tests print at the end, so if it is merely slow the list says
+  where the time went.
+
+Demonstrated by SIGKILLing the suite mid-run with output to a pipe:
+
+```
+after:  ...[run] __main__.PermissionAdapterTest.test_auto_approve_terminal_silent_on_one_shot_shell_approvals
+before: [......................................................]   (54 bytes, anonymous)
+```
+
+## Root-cause candidates: ruled in, ruled out, or defused
+
+| candidate | verdict |
+|---|---|
+| **Spawns inheriting stdin** (coordinator's #1) | Neither `coach-rules-eval.py` nor `coach-signals.py` reads stdin, so this was not *active*. **Defused anyway** — every spawn now passes `stdin=DEVNULL`, verified against a child that *does* read stdin: it gets EOF (0 bytes) immediately instead of blocking. The class is gone regardless of whether it was the cause. |
+| **Redirection vs 3.13's I/O stack** | Ruled out as the cause of the *silence* (runner binds its stream first — verified). Cannot be ruled out as a cause of a hang, but nothing in the redirected region reads stdin. |
+| **`os.environ.clear()` churn** — mine, introduced by the in-process refactor | **Real waste, measured, fixed — but not claimed as the cause.** ~32,000 `putenv`/`unsetenv` syscalls (113 vars × 2 × 143 calls) to restore two keys. Isolated microbenchmark: 0.063s on Linux, nowhere near 120s. Suite-level effect was larger than the microbenchmark predicted (~2.45s → ~1.84s, ~25%), and environment manipulation is markedly more expensive on Windows, so it is a plausible *amplifier* on a slow-not-hung reading. `clear()` also blanks `PATH`/`TEMP` process-wide, which nothing here needs. |
+| Something 3.13-specific in the evaluator | Not ruled out. Imports cost 0.030s on Linux and touch no real telemetry store, so the module bodies are not obviously suspect; the phase markers will localize it if it is there. |
+
+## Per-spawn timeout (`a023903`)
+
+Every spawn now goes through one `run_script()` helper with `timeout=60s`. A hung
+child fails **its own test**, with the command in the message, instead of
+consuming the whole per-suite budget and taking the run down as an anonymous
+`exit 124`. Verified against a child that loops forever: raises at the ceiling
+with the command named. 60s is ~75× a real spawn here (<1s Linux, ~0.8s Windows),
+so it can only fire on a genuine hang, never on slowness.
+
+## Timings (Linux, `~/.pyenv/versions/3.9.24/bin/python3.9`)
+
+| stage | time | tests |
+|---|---|---|
+| before the in-process refactor | 11.999 / 11.266 / 11.597s | 172 |
+| after in-process refactor | 2.715 / 2.537 / 2.470s | 175 |
+| after targeted environ patching | 1.829 / 1.853 / 1.836s | 175 |
+| after adding the progress reporter (final) | 2.175 / 2.274 / 2.265s | 175 |
+
+Net vs. the original: **~5.2× faster** with 3 more tests, of which ~0.4s is the
+reporter — deliberately paid, since being able to diagnose the next failure is
+worth more than the last half-second.
+
+## Suite state
+
+43 suites, all pass. All 14 Python suites exit 0 on 3.9.24. No production code
+changed in this addendum; everything is in `tests/`.
+
+## What only the Windows runner can confirm
+
+- **Hang vs. slowness.** Genuinely open. The next 3.13 run resolves it: three
+  `[phase]` lines and no `[run]` line ⇒ import-time hang; a `[run]` line ⇒ that
+  named test; a full run plus a `[timing]` list ⇒ it was slowness, with the
+  offenders named.
+- **Whether the fix is already in.** If the cause was the stdin class or a single
+  hung spawn, `stdin=DEVNULL` and the 60s ceiling have already removed it and the
+  cell simply goes green. If it was slowness, the ~25% environ saving helps but
+  may not be sufficient on its own — the `[timing]` list is then the input to the
+  next decision, and I would rather bring you numbers than nudge the ceiling.
+- **That Windows CPython line-buffers stderr as Linux does.** The whole
+  import-hang lean rests on it and I could not test it.
