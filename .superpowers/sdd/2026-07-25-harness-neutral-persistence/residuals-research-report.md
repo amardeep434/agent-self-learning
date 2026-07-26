@@ -526,3 +526,465 @@ Stated plainly, as requested:
    upstream's public history; HEAD is `766d0f2`. Re-syncing would tell us
    whether any pinned `detect` block has drifted — and the new pin test would
    surface it loudly rather than silently.
+
+---
+---
+
+# Residuals closeout round — A/B/C/D (2026-07-26, second pass)
+
+Suite at start: 42 green. **Suite at end: 43 green** (one added:
+`tests/test-win-dir-pin.py`). Every Python suite re-run individually under
+`~/.pyenv/versions/3.9.24/bin/python3.9`: 14/14 OK.
+
+| Residual | Outcome |
+|---|---|
+| A — Windows TOCTOU hardening | **Closed, pending CI confirmation.** Design validated against primary sources, then implemented, probe-gated, with the security decision refactored so it is mutation-testable on Linux. |
+| B — the `aiCode.loc` Coach cluster | **Closed.** All five rules implemented and firing. Coverage **19 → 24 of 45**. The recorded reason for deferring them was wrong about what upstream counts. |
+| C — re-vendoring the Coach rules | **Closed, and the premise was false.** `9b4deb1` is a direct ancestor of upstream HEAD; the six intervening commits are all Dependabot bumps. Re-vendored at HEAD; rule files byte-identical. |
+| D — `test-ps1-wrappers.sh` null-byte warning | **Closed.** Fixed on the bash side and now exercised on every platform. |
+
+Commits:
+
+| SHA | Subject |
+|---|---|
+| `5f6ccac` | `feat(persist): close the Windows write-path TOCTOU with held directory handles` |
+| `23f54a9` | `fix(test): stop the "ignored null byte" warning in the Windows CI log` |
+| `8111bb8` | `chore(coach): re-vendor rules at upstream HEAD 766d0f2 (byte-identical)` |
+| `0878dd6` | `feat(coach): implement the aiCode.loc cluster — 19 of 45 rules to 24` |
+
+---
+
+## Residual A — Windows TOCTOU hardening
+
+### Validating the prior round's design before building on it
+
+The design was *reasoned*, not tested. Three claims were load-bearing and all
+three were re-derived from primary sources.
+
+**1. The share-mode quotes are exact.** Fetched
+<https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew>
+and matched the table rows verbatim:
+
+> **FILE_SHARE_DELETE** (0x00000004) — "Enables subsequent open operations on
+> a file or device to request delete access. Otherwise, no process can open
+> the file or device if it requests delete access. … **Note** Delete access
+> allows both delete and rename operations."
+
+> **FILE_SHARE_WRITE** (0x00000002) — "… Otherwise, no process can open the
+> file or device if it requests write access."
+
+> **FILE_FLAG_BACKUP_SEMANTICS** (0x02000000) — "You must set this flag to
+> obtain a handle to a directory."
+
+> **FILE_FLAG_OPEN_REPARSE_POINT** (0x00200000) — "Normal reparse point
+> processing will not occur; **CreateFile** will attempt to open the reparse
+> point. … If the file is not a reparse point, then this flag is ignored."
+
+Also, from the same page's Remarks: "To open a directory using **CreateFile**,
+specify the **FILE_FLAG_BACKUP_SEMANTICS** flag as part of
+*dwFlagsAndAttributes*."
+
+**2. The make-or-break question the prior round never asked.** Holding a
+directory handle with a share mode that denies delete and write is only
+useful if it does not *also* block our own staging and renaming inside that
+directory. Nothing in the design addressed this, and if the answer had been
+"it blocks us too", the whole approach was dead.
+
+It does not, and Windows itself is the dispositive precedent: the OS holds an
+open handle to every process's current directory for the life of the process.
+Raymond Chen, *The curse of the current directory*:
+
+> "The primary consequence of this curse is that you can't delete a directory
+> if it is the current directory of a running process."
+
+<https://devblogs.microsoft.com/oldnewthing/20101109-00/?p=12323>
+
+Every process on the machine creates files in its own working directory while
+that handle is held. Sharing is enforced per *file object*; creating or
+renaming a child opens the child, not the parent.
+
+**3. A simpler verification API than the design proposed.** The design
+specified `GetFileInformationByHandleEx` + `FileIdInfo`. `GetFileInformationByHandle`
++ `BY_HANDLE_FILE_INFORMATION` is sufficient and available since Windows XP:
+its `dwFileAttributes` carries both `FILE_ATTRIBUTE_REPARSE_POINT` and
+`FILE_ATTRIBUTE_DIRECTORY`, and the doc states "The identifier (low and high
+parts) and the volume serial number uniquely identify a file on a single
+computer."
+<https://learn.microsoft.com/en-us/windows/win32/api/fileapi/ns-fileapi-by_handle_file_information>
+
+### What was implemented
+
+`scripts/lib/win_dir_pin.py` (new). `persist-proposal.py`'s `_write_all_path`
+pins every directory in the chain root-to-leaf as it `mkdir`s down it, holds
+every handle for the whole check → stage → rename transaction, and releases
+them in a `finally`.
+
+Ordering is deliberate and documented at the call site: pin *after* `mkdir`
+and *after* the existing path-based check, so the handle-derived verdict is
+the authoritative one. Once level N-1 is pinned, resolving level N's name
+through it is safe — which is what makes root-to-leaf order load-bearing
+rather than incidental.
+
+**Fail-safe posture, asymmetric on purpose:**
+
+| Condition | Behaviour | Why |
+|---|---|---|
+| `available()` false (any POSIX host) | `PinSet.pin()` is a no-op | POSIX runs `_write_all_fd` anyway; zero change to the stronger path |
+| Directory cannot be opened (`OSError`) | degrade to today's unpinned write | turning a working Windows install into a failing one to close a race is a worse regression than the race |
+| Handle reports a reparse point | `PersistError`, hard refusal | attack signal; same verdict `_reject_if_symlink` already returns, but derived from the opened object rather than a path string |
+
+Availability is a real functional probe — open a throwaway directory, verify
+it, close it. A test tokenizes the module (stripping comments *and* string
+literals, since the docstrings discuss `sys.platform` precisely to explain why
+it is not used) and asserts no `sys.platform` / `os.name` / `platform.system`
+appears in executable code.
+
+### Structuring it to be testable from a POSIX host
+
+`ctypes.WinDLL` does not exist on Linux, so the backend cannot run here at
+all. Two seams make the important parts provable anyway:
+
+* **`interpret_info(path, attributes, volume_serial, index_high, index_low)`** —
+  the security *verdict*, extracted as a pure function. Before this split,
+  deleting the reparse-point refusal was a mutation nothing here could kill.
+* **`PinSet(opener=..., enabled=...)`** and `persist-proposal._PIN_SET_FACTORY` —
+  the sequencing (pin order, dedupe, refusal propagation, release-on-failure)
+  driven by a recording fake through the real writer.
+
+`tests/test-win-dir-pin.py`: 39 tests, 5 skipped on POSIX. `WindowsBackendTest`
+holds the four assertions only CI can make and is skipped loudly elsewhere. A
+`[capability probe] win32 directory pinning: AVAILABLE|UNAVAILABLE` line is
+printed unconditionally.
+
+### Mutation results (Residual A)
+
+12 mutants, **11 killed, 1 equivalent**:
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | `FILE_SHARE_DELETE` added back to the share mode | killed |
+| M2 | `FILE_FLAG_OPEN_REPARSE_POINT` dropped | killed |
+| M3 | `pin()` swallows `ReparsePointError` | killed |
+| M4 | `pin()` re-raises `OSError` instead of degrading | killed |
+| M5 | `close_all()` does not close | killed |
+| M6 | `pins.close_all()` removed from the writer's `finally` | killed |
+| M7 | probe skips the backend-presence gate | **equivalent** — with no `WinDLL`, `open_pin` raises `OSError`, which the probe already catches; the gate is a fast path, not a correctness guard |
+| M8 | reparse-point refusal removed | survived → `interpret_info` extracted + tested → killed |
+| M9 | writer never pins | killed |
+| M10 | dedupe removed (double-open leaks a handle) | killed |
+| M11 | non-directory refusal removed | killed |
+| M12 | identity truncates the high index word | killed |
+
+Regression: `test-persist-proposal.py` 32/32, `test-adversarial-sweep.py` 96
+attacks executed (floor 55, 1 loud skip needing a case-insensitive
+filesystem), `test-persist-concurrency.py` 0 lost entries.
+
+### What only CI can confirm
+
+1. `CreateFileW` with `FILE_READ_ATTRIBUTES` + `FILE_SHARE_READ` +
+   `BACKUP_SEMANTICS|OPEN_REPARSE_POINT` opens a directory handle on
+   windows-latest → the probe line prints AVAILABLE.
+2. Staging and `os.replace` inside a pinned directory still succeed.
+3. `os.rename`/`os.rmdir` of a pinned directory raise, and succeed after
+   release.
+4. Opening a directory symlink with the reparse flag yields
+   `ReparsePointError`.
+
+All four are `WindowsBackendTest`. **If the probe prints UNAVAILABLE on
+windows-latest, the pinning silently did not engage** and the write path fell
+back to the old race — that line is the thing to read first in the CI log.
+
+---
+
+## Residual B — the `aiCode.loc` cluster
+
+### The recorded reason for deferring was wrong
+
+The prior report's Bucket C said upstream "reconstructs generated code from
+tool arguments (`file_text`/`new_str`/`content`); doing so here means holding
+whole file bodies in memory per indexed session."
+
+Read from upstream source at `766d0f2`, `src/core/parser-shared.ts`:
+
+```ts
+export const CODE_BLOCK_RE = /```(\w+)?\n([\s\S]*?)```/g;
+const MAX_CODE_SCAN_CHARS = 128_000;
+aiCode: overrides.aiCode ?? extractCodeBlocks(textForCodeScan(rawResp)),
+// loc = code.trim() ? code.trim().split('\n').length : 0
+```
+
+`aiCode` is **markdown fenced code blocks in the assistant's response text**.
+Tool arguments reach it only because both parsers *synthesise a fence* and
+push it into that same text:
+
+```ts
+// parser-vscode-cli.ts, FILE_EDIT_TOOLS = {edit, create}
+const code = args.file_text ?? args.content ?? args.new_str
+           ?? args.newString ?? args.code;
+turn.responseChunks.push(`\`\`\`${ext}\n${code}\n\`\`\``);
+
+// parser-claude.ts, CLAUDE_WRITE_TOOLS = {Write, Edit, MultiEditTool}
+const code = input.content ?? input.new_str;
+data.assistantTexts.push(`\`\`\`${ext}\n${code}\n\`\`\``);
+```
+
+Three consequences the old note missed, each of which changes what the rules
+mean:
+
+* **Added lines only.** `old_str` is never read. "AI LoC" is lines produced,
+  not diff size. A pure deletion contributes nothing.
+* **Prose fences count identically** to written files.
+* **Language is the fence info string** — the file *extension* for synthesised
+  fences — lowercased and mapped through `LANG_ALIASES`.
+
+### On-disk evidence, gathered before writing any code
+
+Over the six largest real sessions per harness:
+
+| Harness | total aiCode LoC | top languages |
+|---|---|---|
+| Copilot CLI | **29,819** | py 19,000 · md 6,540 · html 3,434 · json 94 · bash 65 |
+| Claude Code | **11,391** | md 6,803 · kt 2,637 · py 1,033 · sh 423 · sql 139 |
+
+Tool census in those Copilot sessions: `edit` ×379 (all with `new_str`),
+`create` ×91 (88 with `file_text`), `assistant.message` with non-empty
+`content` ×1,204. The input is real and large.
+
+Workspace identity, needed by `low-markdown-ratio`, also exists in both:
+Copilot `session.start.data.context.{gitRoot,cwd}`, Claude the `cwd` field on
+every transcript line. Five distinct workspaces on this machine.
+
+### The streaming pass — evaluated, and it is the better design
+
+The prior round's suggestion holds. `telemetry._CodeScan` scans each chunk as
+it comes off the event stream and retains only `(language, loc)` pairs, so a
+22 MB `events.jsonl` is never resident. Upstream's `MAX_CODE_SCAN_CHARS`
+budget is reproduced (including charging the join separators against it) so
+identical input yields identical answers.
+
+**The one divergence, stated rather than hidden:** a fence opened in one chunk
+and closed in a later one is found by upstream's join-then-scan and not by
+this. Harness events carry complete messages and complete tool arguments, so
+this is not a shape either harness emits; if that changes it under-counts,
+which is the safe direction for rules that fire on *too much* AI code.
+
+### The five rules
+
+Upstream's DSL helpers were transcribed with their source locations named:
+`computeSpeedAcceptPairs` (interpreter.ts:374), `computeLangExploration`
+(:476), `computeMdRatio` (:518).
+
+Two upstream quirks were kept **deliberately**, and are commented as such:
+
+* `computeMdRatio` hardcodes `ratio < 0.05` instead of reading
+  `thresholds.markdownRatio`, which holds the same 0.05. Reading the
+  threshold would silently diverge the day upstream retunes one and not the
+  other.
+* `computeLangExploration`'s week key is
+  `${year}-W${ceil((dayOfMonth + firstWeekdayOfMonth)/7)}` — a *week-of-month*
+  number concatenated with the year, so weeks from different months collide.
+  Reimplementing it as a correct ISO week would make this project answer
+  differently from upstream for the same input.
+
+One adaptation, reported because it moves the numerator:
+`no-language-exploration` unions `aiCode` and `userCode` upstream; this
+project has no `userCode` (upstream's own CLI parser never sets it either),
+so only `aiCode` languages count. That can only make "no new language" *more*
+likely to fire.
+
+Against real telemetry on this machine, all five evaluate; three fire:
+`speed-accept` 32, `low-markdown-ratio` 1, `no-language-exploration` 3.
+`vibe-coding` and `copy-paste-blindness` evaluate and are correctly silent.
+
+### Coverage
+
+**19 → 24 of 45.** Coverage line verified live:
+`coach-rules-eval: 24 of 45 vendored rules evaluated ... 21 skipped`.
+`EXPECTED_TELEMETRY_ADAPTERS` raised 8 → 13; `README.md` corrected.
+
+The remaining 21: 11 IDE-only by upstream's own `requiresIdeContext: true`
+flag (a correct permanent skip — upstream skips them for CLI harnesses too),
+and **10 reachable-but-unimplemented**, down from 15:
+
+| Cost | Rules |
+|---|---|
+| A maintained upstream table this project would have to snapshot and let rot | `premium-waste`, `premium-for-lookup-questions`, `auto-avoidance` (model-tier list), `profanity` (wordlist), `session-drift` (work-type taxonomy) |
+| An upstream analyzer the vendored rule file does not carry | `broken-flow-state` (`flowScoreStats`, analyzer-flow.ts) |
+| Blocked on one IDE-only field | `context-engineering-gaps` (needs `customInstructions`) |
+| Would change the rule's meaning if partially evaluated | `no-spec-driven-development` (2 of 3 OR-branches dead) |
+| Structurally constant for CLI | `no-spec-structure` |
+| Pattern set not carried in the vendored file | `verbose-prompt-no-compression` |
+
+### Mutation results (Residual B)
+
+18 mutants, **all killed** — but three survived the first pass, and each
+exposed a test that was passing for the wrong reason. That is the more useful
+result than the final tally.
+
+| # | Mutation | Result |
+|---|---|---|
+| B1 | `LANG_ALIASES` normalisation dropped | killed |
+| B2 | empty fence body counts as 1 line | killed |
+| B3 | `MAX_CODE_SCAN_CHARS` budget removed | killed |
+| B4 | join separators not charged to the budget | **survived** → test resized so the fence fits exactly when the separator is free → killed |
+| B5 | arg-key precedence becomes alphabetical | killed |
+| B6 | `vibe-coding` ignores the spec-shaped-prompt exemption | killed |
+| B7 | `copy-paste-blindness` ignores refinement prompts | killed |
+| B8 | `copy-paste-blindness` ignores later edits | killed |
+| B9 | `slice(requests, 1)` includes the first request | killed |
+| B10 | `speed-accept` drops the gap test | **survived** → see below → killed |
+| B11 | `speed-accept` drops the LoC floor | **survived** → see below → killed |
+| B12 | `low-markdown-ratio` never counts markdown | killed |
+| B13 | `low-markdown-ratio` drops the `minTotalLoc` floor | killed |
+| B14 | `no-language-exploration` counts markup/data formats | killed |
+| B15 | `no-language-exploration` ignores `recentNew` | **survived** → see below → killed |
+| B16 | `aiCode` selection no longer skips loudly | killed |
+| B17 | `speed-accept` accepts negative gaps | survived initially → out-of-order-timestamp test added → killed |
+| B18 | off-by-one in `weeksSinceNew` | killed |
+
+**B10 and B11 shared one root cause, and it is worth recording.** The
+`speed-accept` fixtures used the existing `TFIX._ts()` helper, which formats
+*only* a seconds field: `"2026-07-25T22:40:{:02d}.000Z"`. Any offset above 59
+produced `"22:40:200"`, which `parse_iso` correctly returns `None` for. So
+every timestamp-dependent predicate in those fixtures was unreachable, and
+both the gap check and the LoC floor could be deleted with the suite still
+green. Fixed with a `_restamp()` helper that produces valid ISO across
+minutes, plus separate gap-varying and LoC-varying no-fire cases.
+
+**B15 was a subprocess-boundary blind spot.** `main()` emits a signal only
+when `count is not None and count > 0`. `no-language-exploration` returns
+`weeksSinceNew`, which is **0 in exactly the case where the rule must not
+fire** — so deleting the `recentNew == 0` condition produced a return of 0
+instead of `None`, and the end-to-end test could not tell them apart. Fixed
+by adding `NoLanguageExplorationUnitTest`, which calls the adapter in-process
+and asserts the return value itself.
+
+---
+
+## Residual C — re-vendoring: the premise was false
+
+The brief and the prior report both stated that the vendored commit
+`9b4deb1` is "gone from upstream's public history". It is not.
+
+```
+$ gh api repos/microsoft/AI-Engineering-Coach/compare/9b4deb1...766d0f2
+   status: "ahead"   ahead_by: 6   behind_by: 0   files: 9
+```
+
+`behind_by: 0` with `status: ahead` means `9b4deb1` is a **direct ancestor** of
+HEAD. It was reachable all along; the earlier `gh api commits/<sha>` lookup
+that prompted the claim must have been misread.
+
+**All six intervening commits are Dependabot bumps:**
+
+| SHA | Subject |
+|---|---|
+| `2cc96a61` | build(deps-dev): bump linkify-it 5.0.1 → 5.0.2 |
+| `c220b1d1` | build(deps): bump chartjs-chart-treemap 3.1.0 → 4.2.0 |
+| `8bef627e` | build(deps-dev): bump eslint-plugin-unicorn 71.1.0 → 72.0.0 |
+| `5ff611ac` | build(deps): bump preact (production-dependencies group) |
+| `b346d8a4` | build(deps): bump softprops/action-gh-release 3.0.1 → 3.0.2 |
+| `766d0f29` | build(deps): bump actions/checkout 7.0.0 → 7.0.1 |
+
+The nine changed files are seven workflow YAMLs, `package.json` and
+`package-lock.json`. **Nothing under `src/core/rules`, `src/core/dsl`, or any
+parser changed.** So: no `detect` DSL evolution, no rule semantics change, no
+rules added or removed.
+
+### The tool, and the guard
+
+`scripts/sync-coach-rules.sh` was run live against HEAD. It fetched all 45
+rule files and produced **byte-identical** content — `git diff` showed only
+`UPSTREAM.md`'s commit and timestamp. So the script works and provenance
+updates correctly.
+
+The predicate-pinning guard was verified by mutation rather than by reading
+it: replacing `_pin()`'s two comparisons with `pass` makes
+`TelemetryDetectPinTest` fail. Its fixture is exactly the scenario asked
+about — a rewritten `detect` block under an unchanged rule name
+(`high-cancellation`'s `match:` gains an `AND agentMode == "ask"` clause) — and
+the evaluator skips loudly with "detect block changed" instead of answering
+with the old predicate. Note the guard covers `match`/`check` *text* only;
+threshold **values** are read live from the rule file by design, so a retuned
+threshold flows through rather than tripping the guard.
+
+### Recommendation, and what was done
+
+**Re-vendored now, at `766d0f2`.** This is the safest possible version of
+"re-vendor": the judgement call the brief posed — re-sync versus stay on a
+known-good snapshot — dissolves once the diff is known to be empty. There is
+no semantic change to call out because there is no semantic change. What the
+update buys is honest provenance: `UPSTREAM.md` now records a commit that
+matches upstream's current HEAD, so the next person diffing them starts from
+zero drift instead of six commits of unexplained distance.
+
+Two source comments carrying the false "no longer reachable" claim were
+corrected in place (`scripts/lib/telemetry.py`, `scripts/coach-rules-eval.py`).
+
+---
+
+## Residual D — the null-byte warning
+
+`OUT="$(pwsh ... 2>&1)"` printed
+`bash: warning: command substitution: ignored null byte in input` on every
+Windows run. PowerShell's console output encoding on Windows is UTF-16LE,
+whose ASCII characters carry a 0x00 high byte, and bash strips NULs from
+command substitution with exactly that warning.
+
+Fixed on the **bash** side — temp file plus `tr -d '\0'` — rather than by
+setting `[Console]::OutputEncoding` in the `.ps1` files. This host has no
+`pwsh`, so a PowerShell-side fix could not be executed before landing, and
+that is the failure mode this branch keeps repeating.
+
+**The temp file is load-bearing, not incidental.** The obvious one-liner
+`OUT="$(pwsh ... | tr -d '\0')"` yields *`tr`'s* exit status, which is always
+0 — a PowerShell parse error would have been reported as a pass.
+
+The helper now runs on **every** platform against a stub `pwsh` that emits
+UTF-16-shaped bytes and exits 7, so the fix is not verifiable only on Windows.
+
+Mutation: **2/2 killed.**
+
+| Mutation | Result |
+|---|---|
+| `tr -d '\0'` → `cat` | killed — and it reproduces the exact CI warning text locally: `warning: command substitution: ignored null byte in input` |
+| temp file → `pwsh \| tr` pipeline | killed — exit status became 0 instead of 7 |
+
+One assertion detail worth recording: the *text* check alone is not enough. A
+bash string cannot hold a NUL, so `$(...)` over UTF-16 output still *yields*
+`"PARSE OK"` — it just prints the warning while doing so. The assertion that
+actually pins the fix is on **stderr being empty**.
+
+---
+
+## Premises in the brief that were wrong
+
+1. **"`9b4deb1` is gone from upstream's public history" — false.** It is a
+   direct ancestor of HEAD (`behind_by: 0`), and the six commits since are all
+   Dependabot bumps touching no source.
+2. **"upstream reconstructs generated code from tool arguments … holding whole
+   file bodies in memory" — half right, and the missing half changed the
+   answer.** `aiCode` is fenced code blocks in the assistant's response text;
+   tool arguments reach it only as synthesised fences. The memory cost was an
+   artefact of upstream's join-then-scan, not of the metric.
+3. **"the biggest cluster needs `aiCode.loc`" — correct**, and it was the
+   single highest-value item: five rules, no new data source, and the enabling
+   extraction is ~60 lines.
+4. **Three of this round's own tests passed for the wrong reason** and were
+   caught only by mutation, not by review — two on an unparseable-timestamp
+   fixture, one on a subprocess boundary that cannot distinguish `None` from
+   `0`. Recorded because the pattern (a green test proving nothing) is the one
+   this branch keeps being damaged by.
+
+## Needs a decision
+
+1. **Windows CI for Residual A.** Read the
+   `[capability probe] win32 directory pinning:` line first. AVAILABLE means
+   the hardening engaged; UNAVAILABLE means it silently fell back to the old
+   race and `WindowsBackendTest` was skipped rather than run.
+2. **The remaining 10 Coach rules.** Five need a snapshot of an upstream table
+   (model tiers, profanity wordlist, work-type taxonomy) that would rot
+   silently. My recommendation is to leave those alone: a stale table
+   answering under an upstream rule's name is the same failure class as a
+   drifted predicate, and unlike the predicate there is no pin that would
+   catch it.
