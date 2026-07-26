@@ -675,6 +675,176 @@ class TelemetryAdapterTest(CoachRulesEvalBase):
         self.assertEqual(self.fired("excessive-file-context"), [])
 
 
+class RestoredAdapterTest(CoachRulesEvalBase):
+    """Fire/no-fire pairs for the rules restored on 2026-07-26.
+
+    Each of these was previously in UNSUPPORTED_REASONS on a claim the skip
+    re-analysis falsified. A rule that evaluates but can never fire is worse
+    than a loud skip, so no rule joins TELEMETRY_ADAPTERS without BOTH a
+    case that fires it and a case that keeps it silent, over fixtures built
+    from the same real-shaped event builders the telemetry suite uses.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = Path(self.tmp) / "search.db"
+        conn = make_db(str(self.db))
+        insert_session(conn, "s0", 1)
+        conn.commit()
+        conn.close()
+        self.store = Path(self.tmp) / "store"
+        (self.store / "session-state").mkdir(parents=True)
+
+    def copilot(self, session_id, events):
+        return TFIX.copilot_session(str(self.store), session_id, events)
+
+    def fired(self, rule_id):
+        signals, stderr = self.run_eval(VENDOR_RULES, self.db, telemetry_home=self.store)
+        self.assertNotIn(
+            "skipping {} ".format(rule_id), stderr,
+            "{} skipped when it should have evaluated:\n{}".format(rule_id, stderr))
+        return [s for s in signals if s["id"] == rule_id]
+
+    # -- no-skills ---------------------------------------------------------
+    def _plain_turns(self, count, per_session=10):
+        """`count` turns spread over several sessions.
+
+        Deliberately NOT one turn per session: telemetry.MAX_SESSIONS caps
+        the walk at 40 session logs, so a 60-single-turn-session fixture
+        silently delivers 40 records and a rule with a 50-request floor can
+        never fire. Found the first time this test was run.
+        """
+        sessions = (count + per_session - 1) // per_session
+        made = 0
+        for index in range(sessions):
+            events = []
+            for turn in range(min(per_session, count - made)):
+                events.extend(TFIX.simple_turn(str(turn), user="x"))
+                made += 1
+            self.copilot("s{}".format(index), events)
+
+    def test_no_skills_fires_when_no_turn_anywhere_used_a_skill(self):
+        self._plain_turns(60)
+        self.assertTrue(self.fired("no-skills"))
+
+    def test_no_skills_silent_when_even_one_turn_used_a_skill(self):
+        """check is `count == total`, so a SINGLE skill invocation anywhere
+        must silence the rule. This is the case that proves the adapter
+        reads skillsUsed rather than just counting turns."""
+        self._plain_turns(60)
+        self.copilot("sk", TFIX.simple_turn(
+            "0", user="x", tools=[("skill", {"skill": "brainstorming"})]))
+        self.assertEqual(self.fired("no-skills"), [])
+
+    def test_no_skills_silent_below_the_request_floor(self):
+        self._plain_turns(20)
+        self.assertEqual(self.fired("no-skills"), [])
+
+    # -- agentic-no-tools --------------------------------------------------
+    def test_agentic_no_tools_fires_on_many_turns_that_called_nothing(self):
+        for i in range(15):
+            self.copilot("s{}".format(i), TFIX.simple_turn("0", user="x"))
+        self.assertTrue(self.fired("agentic-no-tools"))
+
+    def test_agentic_no_tools_silent_when_turns_actually_use_tools(self):
+        for i in range(15):
+            self.copilot("s{}".format(i), TFIX.simple_turn(
+                "0", user="x", tools=[("bash", {"command": "ls"})]))
+        self.assertEqual(self.fired("agentic-no-tools"), [])
+
+    # -- verbose-prompt-no-compression -------------------------------------
+    FLUFFY = ("please could you kindly help me, thanks -- basically this is "
+              "essentially a very long prompt. " * 12)
+    TERSE = "add(a,b) " * 120
+
+    def test_verbose_prompt_fires_on_long_fluffy_prompts(self):
+        self.assertGreaterEqual(len(self.FLUFFY), 800)
+        for i in range(20):
+            self.copilot("s{}".format(i), TFIX.simple_turn("0", user=self.FLUFFY))
+        self.assertTrue(self.fired("verbose-prompt-no-compression"))
+
+    def test_verbose_prompt_silent_on_long_prompts_without_filler(self):
+        """Same length, no filler words. Without this case the rule would
+        look like a plain message-length alarm."""
+        self.assertGreaterEqual(len(self.TERSE), 800)
+        for i in range(20):
+            self.copilot("s{}".format(i), TFIX.simple_turn("0", user=self.TERSE))
+        self.assertEqual(self.fired("verbose-prompt-no-compression"), [])
+
+    def test_verbose_prompt_silent_when_one_filler_word_appears_once(self):
+        """Upstream requires the alternation to match TWICE. A single
+        "please" in a long prompt is not the pattern."""
+        once = "please write the parser. " + ("tokenize the input stream. " * 40)
+        self.assertGreaterEqual(len(once), 800)
+        for i in range(20):
+            self.copilot("s{}".format(i), TFIX.simple_turn("0", user=once))
+        self.assertEqual(self.fired("verbose-prompt-no-compression"), [])
+
+    def test_verbose_prompt_silent_on_short_fluffy_prompts(self):
+        """The minMessageLength floor. Politeness in a one-line prompt costs
+        nothing; the rule is about long prompts. Mutation testing showed
+        deleting the floor left every other case green."""
+        for i in range(20):
+            self.copilot("s{}".format(i), TFIX.simple_turn(
+                "0", user="please could you kindly fix this, thanks"))
+        self.assertEqual(self.fired("verbose-prompt-no-compression"), [])
+
+    def test_verbose_prompt_silent_when_a_compression_skill_is_in_the_corpus(self):
+        """hasSkillByPattern takes allReqs, not the matched subset: one
+        caveman/cavecrew invocation ANYWHERE turns the whole rule off. That
+        corpus-wide scope is easy to get wrong as a per-record test."""
+        for i in range(20):
+            self.copilot("s{}".format(i), TFIX.simple_turn("0", user=self.FLUFFY))
+        self.copilot("sk", TFIX.simple_turn(
+            "0", user="x", tools=[("skill", {"skill": "caveman-compress"})]))
+        self.assertEqual(self.fired("verbose-prompt-no-compression"), [])
+
+    # -- no-spec-structure -------------------------------------------------
+    def _session_of_three(self, session_id, first_prompt):
+        events = []
+        for turn in range(3):
+            events.extend(TFIX.simple_turn(
+                str(turn), user=first_prompt if turn == 0 else "carry on"))
+        self.copilot(session_id, events)
+
+    def test_no_spec_structure_fires_when_sessions_open_unstructured(self):
+        for i in range(8):
+            self._session_of_three("s{}".format(i), "make it work")
+        self.assertTrue(self.fired("no-spec-structure"))
+
+    def test_no_spec_structure_silent_when_sessions_open_with_a_spec(self):
+        for i in range(8):
+            self._session_of_three("s{}".format(i),
+                                   "- requirement one\n- requirement two")
+        self.assertEqual(self.fired("no-spec-structure"), [])
+
+    def test_no_spec_structure_counts_a_four_line_prompt_as_structured(self):
+        """The lineCount >= 4 OR-branch. It was MISSING from eval_vibe_coding
+        (which carries the identical branch list) until this was written, so
+        this case guards a real defect, not a hypothetical one."""
+        for i in range(8):
+            self._session_of_three("s{}".format(i), "one\ntwo\nthree\nfour")
+        self.assertEqual(self.fired("no-spec-structure"), [])
+
+    def test_no_spec_structure_silent_below_the_session_floor(self):
+        for i in range(3):
+            self._session_of_three("s{}".format(i), "make it work")
+        self.assertEqual(self.fired("no-spec-structure"), [])
+
+    def test_vibe_coding_now_honours_the_line_count_branch(self):
+        """Regression guard for the defect the line above describes: a
+        four-line opening prompt with no bullets, heading or requirement
+        keyword is spec-shaped by upstream's fifth OR-branch, so a big-output
+        session that started that way is NOT vibe coding."""
+        for index in range(4):
+            self.copilot("v{}".format(index), TFIX.simple_turn(
+                "0", user="one\ntwo\nthree\nfour",
+                tools=[("edit", {"path": "/r/a.py", "old_str": "x",
+                                 "new_str": "\n".join(
+                                     "line{}".format(n) for n in range(200))})]))
+        self.assertEqual(self.fired("vibe-coding"), [])
+
+
 class TelemetryDetectPinTest(CoachRulesEvalBase):
     """Each telemetry adapter hardcodes one rule's predicate, so it must
     refuse to run if that rule's `detect` block ever changes shape.
@@ -1001,6 +1171,8 @@ class TelemetryAbsentSkipsLoudlyTest(CoachRulesEvalBase):
         "runaway-agent-loops", "excessive-file-context",
         "vibe-coding", "copy-paste-blindness", "speed-accept",
         "low-markdown-ratio", "no-language-exploration",
+        "no-skills", "agentic-no-tools", "verbose-prompt-no-compression",
+        "no-spec-structure",
     ]
 
     def test_all_telemetry_rules_skip_with_a_source_naming_reason(self):
@@ -1127,7 +1299,7 @@ class CoverageAssertionTest(CoachRulesEvalBase):
     # skip. TelemetryAdapterTest covers them with a store present, and
     # TelemetryAbsentSkipsLoudlyTest pins that they skip without one.
     EXPECTED_EVALUATED = 11
-    EXPECTED_TELEMETRY_ADAPTERS = 13
+    EXPECTED_TELEMETRY_ADAPTERS = 17
     EXPECTED_TOTAL_RULES = 45
 
     def test_coverage_count_pinned(self):

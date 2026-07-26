@@ -266,25 +266,7 @@ UNSUPPORTED_REASONS = {
         "questions') names a UI neither CLI has -- and the suggestion is "
         "what gets written into memory",
 
-    "agentic-no-tools": "reachable; not yet built. Same logic error as "
-        "agent-mode-for-asks. [vendored agentic-no-tools.md detect block] is "
-        "match: (agentMode == 'agent' OR "
-        "agentName != '') AND toolsUsed.length == 0. With the disjunction "
-        "universally true for a CLI the rule reduces to 'turns that used no "
-        "tools', which is live, captured and discriminating -- broader than "
-        "upstream's and correctly so, because in a CLI every turn genuinely "
-        "IS agent mode",
 
-    "no-spec-structure": "reachable; not yet built. The previous reason "
-        "('the condition is universally true and the rule is a constant') "
-        "is a logic error. In [vendored no-spec-structure.md detect block], "
-        "someWhere(requests,'agentMode','agent') is ONE "
-        "of three conjuncts; the other two are a requestCount >= 3 floor "
-        "and five regex tests on the session's FIRST user message "
-        "(bullets, numbered list, heading, requirement keywords, "
-        "lineCount >= 4). All are live and captured. The rule measures what "
-        "fraction of sessions opened with an unstructured prompt -- a "
-        "varying quantity",
 
     "no-spec-driven-development": "reachable; not yet built. The previous "
         "reason said 'two of the rule's three OR branches would be dead'. "
@@ -311,13 +293,6 @@ UNSUPPORTED_REASONS = {
         "is the ExitPlanMode tool use. Copilot CLI has no plan mode and for "
         "that harness the rule is genuinely unreachable",
 
-    "no-skills": "reachable; not yet built, and no argument was ever "
-        "offered against it. [vendored no-skills.md detect block] is match: "
-        "skillsUsed.length == 0, check: count == total AND total > 50. "
-        "skillsUsed is captured for BOTH harnesses (Copilot's `skill` tool "
-        "and skill.invoked; Claude's Skill tool) -- the previous reason "
-        "said so itself one clause before concluding the opposite. Nothing "
-        "about 'did you ever use a skill' is IDE-shaped",
 
     "no-slash-commands": "reachable; not yet built. The previous "
         "measurement (0 of 136 Copilot user.message events began with a "
@@ -330,15 +305,6 @@ UNSUPPORTED_REASONS = {
         "than a task command, and the remediation ('try /fix, /explain, "
         "/tests, /doc') names commands neither CLI has",
 
-    "verbose-prompt-no-compression": "reachable; not yet built, and the "
-        "cheapest item on this list. The previous reason ('the rule's "
-        "pattern set is not carried in the vendored rule file') is FALSE: "
-        "both regexes are literals INSIDE [vendored "
-        "verbose-prompt-no-compression.md detect block] -- the "
-        "filler-word alternation, required to match twice, and "
-        "hasSkillByPattern(allReqs, '(?i)cavecrew|caveman|compress'). "
-        "There is no patterns: frontmatter because none is needed. "
-        "messageLength, messageText and skillsUsed are all captured",
 
     "profanity": "reachable; not yet built. The previous reason "
         "('evaluating it would mean inventing a moderation wordlist') is "
@@ -427,6 +393,29 @@ UNSUPPORTED_REASONS = {
 }
 
 
+def _join_continuations(text):
+    """Physical lines folded on a trailing backslash into logical lines.
+
+    `a AND \\\n  b` becomes `a AND b`. Continuation whitespace is collapsed
+    to one space so a pin does not depend on how upstream indents.
+    """
+    out = []
+    pending = None
+    for line in text.splitlines():
+        stripped = line.rstrip()
+        piece = stripped[:-1].rstrip() if stripped.endswith("\\") else stripped
+        if pending is None:
+            pending = piece
+        else:
+            pending = pending + " " + piece.strip()
+        if not stripped.endswith("\\"):
+            out.append(pending)
+            pending = None
+    if pending is not None:
+        out.append(pending)
+    return out
+
+
 def parse_rule(path):
     """Parse frontmatter (flat keys + one-level `thresholds:`/`patterns:`
     maps), the `# How to Improve` section, and the ```detect block."""
@@ -482,7 +471,13 @@ def parse_rule(path):
     detect = {}
     m = re.search(r"```detect\s*\n(.*?)```", body, re.S)
     if m:
-        for dline in m.group(1).splitlines():
+        # Upstream continues a long clause with a trailing backslash (seven
+        # of the 45 rules do it). Splitting on raw lines would hand _pin()
+        # only the FIRST physical line of such a clause, so an upstream edit
+        # to any continuation line would slip past the drift guard
+        # unnoticed. Join them first, collapsing the fold to a single space
+        # so the pinned string is stable against indentation churn.
+        for dline in _join_continuations(m.group(1)):
             key, sep, val = dline.partition(":")
             if sep:
                 detect[key.strip()] = val.strip()
@@ -1109,14 +1104,37 @@ LANG_EXPLORATION_IGNORE = {
     "ini", "env", "markdown", "md",
 }
 
-# vibe-coding's spec-shaped first-prompt patterns, from its own detect block.
-VIBE_SPEC_PATTERNS = (
+# The "was the first prompt spec-shaped?" branch, shared verbatim by
+# vibe-coding and no-spec-structure -- both rules carry the SAME five OR
+# branches in their own detect blocks, and both are pinned on the full
+# folded text below, so a drift in either upstream file is caught.
+SPEC_SHAPED_PATTERNS = (
     re.compile(r"^[-*]\s", re.M),
     re.compile(r"^\d+[.)]\s", re.M),
     re.compile(r"^#+\s", re.M),
     re.compile(r"(?i)\b(requirements?|spec|acceptance criteria|user stories?|"
                r"given|when|then|should|must)\b"),
 )
+
+# Upstream's lineCount() is a plain newline count, so a one-line prompt is 1.
+SPEC_SHAPED_MIN_LINES = 4
+
+
+def _line_count(text):
+    """Transcribes lineCount (dsl/interpreter.ts): text.split('\n').length."""
+    return len(text.split("\n"))
+
+
+def _is_spec_shaped(text):
+    """The fifth OR branch -- lineCount >= 4 -- was MISSING from
+    eval_vibe_coding until 2026-07-26, which made that rule over-fire: a
+    session whose opening prompt was a four-line paragraph with no bullets,
+    heading or requirement keyword counted as "unstructured" when upstream
+    would have excluded it. Found by transcribing the branch list for
+    no-spec-structure and diffing it against the code already here."""
+    if any(pattern.search(text) for pattern in SPEC_SHAPED_PATTERNS):
+        return True
+    return _line_count(text) >= SPEC_SHAPED_MIN_LINES
 
 COPY_PASTE_REFINEMENT_RE = re.compile(
     r"(?i)\b(change|fix|modify|update|refactor|wrong|instead|actually|revert|"
@@ -1147,7 +1165,7 @@ def eval_vibe_coding(rule, tel):
         if session["requestCount"] > t["maxUserPrompts"]:
             continue
         first = session["requests"][0].get("messageText") or ""
-        if any(pattern.search(first) for pattern in VIBE_SPEC_PATTERNS):
+        if _is_spec_shaped(first):
             continue
         matched += 1
     if not matched >= t["minSessions"]:
@@ -1298,6 +1316,151 @@ def eval_no_language_exploration(rule, tel):
     return weeks_since_new
 
 
+# ---------------------------------------------------------------------------
+# Rules restored on 2026-07-26 after the skip re-analysis. Each of these was
+# previously skipped on a reason the audit falsified; none of them needed a
+# new data source. Where the CLI mapping differs from upstream's field it is
+# marked ADAPTATION and the difference is spelled out -- silently answering a
+# vendored rule id with a different input is exactly the drift _pin() exists
+# to prevent.
+#
+# The specific error that produced three of these skips: "a conjunct that is
+# universally true here makes the rule a constant". It does not. A
+# universally-true clause inside a conjunction is a NO-OP; the discriminating
+# work is done by the other clauses. The reduction is stated at each site.
+# ---------------------------------------------------------------------------
+
+def eval_no_skills(rule, tel):
+    """No adaptation at all: skillsUsed is captured natively for both
+    harnesses (Copilot's `skill` tool and skill.invoked events; Claude
+    Code's Skill tool). The previous skip reason asserted that "the rule
+    fires on the ABSENCE of skill usage across an IDE session population,
+    which a CLI-only corpus cannot represent" -- a restatement of upstream's
+    requiresIdeContext flag, not a reason. Nothing about "did you ever use a
+    skill" is IDE-shaped."""
+    _pin(rule, match="skillsUsed.length == 0",
+               check="count == total AND total > thresholds.minReqs")
+    t = _thresholds(rule, "minReqs")
+    turns = _require_records(
+        telemetry.requests_with(tel.turns, "skillsUsed"), rule["id"], "skillsUsed")
+    matched = sum(1 for r in turns if len(r["skillsUsed"]) == 0)
+    if not (matched == len(turns) and len(turns) > t["minReqs"]):
+        return None
+    return matched
+
+
+def eval_agentic_no_tools(rule, tel):
+    """ADAPTATION: `agentMode == "agent"` is universally true for a CLI
+    harness, so the disjunction (agentMode == "agent" OR agentName != "")
+    is a tautology and the predicate reduces to `toolsUsed.length == 0`.
+
+    What differs from upstream: on a mixed corpus upstream would count only
+    the subset of no-tool turns that were agentic. Here every turn is
+    agentic -- Copilot CLI and Claude Code have no ask mode -- so the count
+    is over ALL no-tool turns. That is broader than upstream's number and
+    correct for this data, not a silent no-op: the second conjunct does all
+    the discriminating and is fully captured.
+    """
+    _pin(rule, match='(agentMode == "agent" OR agentName != "") AND '
+                     "toolsUsed.length == 0",
+               check="count > thresholds.minSample")
+    t = _thresholds(rule, "minSample")
+    turns = _require_records(
+        telemetry.requests_with(tel.turns, "toolsUsed"), rule["id"], "toolsUsed")
+    matched = sum(1 for r in turns if len(r["toolsUsed"]) == 0)
+    if not matched > t["minSample"]:
+        return None
+    return matched
+
+
+# verbose-prompt-no-compression's filler alternation, transcribed from its
+# own detect block. Upstream requires it to match TWICE in the same message
+# (the pattern is the alternation, `.*`, then the alternation again), so a
+# single "please" does not make a prompt fluffy.
+VERBOSE_FILLER_RE = re.compile(
+    r"(?i)\b(please|kindly|thanks|thank you|basically|essentially|definitely|"
+    r"absolutely|simply|very|quite|somewhat|certainly|actually|literally)\b")
+
+# hasSkillByPattern(allReqs, "(?i)cavecrew|caveman|compress"), also a literal
+# in the detect block.
+COMPRESSION_SKILL_RE = re.compile(r"(?i)cavecrew|caveman|compress")
+
+
+def eval_verbose_prompt_no_compression(rule, tel):
+    """The previous skip reason -- "the rule's pattern set is not carried in
+    the vendored rule file" -- was false. Both regexes are literals inside
+    the detect block; there is no `patterns:` frontmatter because none is
+    needed. messageLength, messageText and skillsUsed are all captured.
+
+    hasSkillByPattern is a CORPUS-WIDE predicate (upstream passes `allReqs`,
+    not the matched subset): if the user has a compression skill anywhere in
+    the corpus, the rule is off entirely. Transcribed from
+    dsl/interpreter.ts:1635.
+    """
+    _pin(rule, check="ratio > thresholds.maxRatio AND count > thresholds.minSample")
+    t = _thresholds(rule, "minMessageLength", "minSample", "maxRatio")
+    turns = _require_records(
+        telemetry.requests_with(tel.turns, "messageText", "messageLength", "skillsUsed"),
+        rule["id"], "messageText/messageLength/skillsUsed")
+    for record in turns:
+        if any(COMPRESSION_SKILL_RE.search(s) for s in record["skillsUsed"]):
+            return None
+    matched = 0
+    for record in turns:
+        if record["messageLength"] < t["minMessageLength"]:
+            continue
+        if len(VERBOSE_FILLER_RE.findall(record["messageText"])) < 2:
+            continue
+        matched += 1
+    ratio = matched / len(turns)
+    if not (ratio > t["maxRatio"] and matched > t["minSample"]):
+        return None
+    return matched
+
+
+def eval_no_spec_structure(rule, tel):
+    """ADAPTATION: `someWhere(requests, "agentMode", "agent")` is
+    universally true for a CLI harness, so it is dropped as a no-op. The
+    previous skip reason concluded from that same observation that "the rule
+    is a constant", which is a logic error -- the clause sits inside a
+    conjunction with a requestCount floor and five regex tests on the
+    session's FIRST user message, all of which are live and captured.
+
+    What differs from upstream: `agentSessionTotal` is
+    countWhere(all, "requestCount", ">=", 3) in upstream's own detect block,
+    i.e. it does NOT filter on agent mode either -- so on this data the
+    denominator is identical to upstream's and only the numerator widens, by
+    exactly the sessions upstream would also have counted.
+    """
+    _pin(rule,
+         match='requestCount >= 3 AND someWhere(requests, "agentMode", "agent") '
+               'AND NOT ( matches(first(requests).messageText, "(?m)^[-*]\\\\s") OR '
+               'matches(first(requests).messageText, "(?m)^\\\\d+[.)]\\\\s") OR '
+               'matches(first(requests).messageText, "(?m)^#+\\\\s") OR '
+               'matches(first(requests).messageText, "(?i)\\\\b(requirements?|spec|'
+               'acceptance criteria|user stories?|given|when|then|should|must)'
+               '\\\\b") OR lineCount(first(requests).messageText) >= 4)',
+         check="agentSessionTotal >= thresholds.minAgentSessions AND "
+               "count / agentSessionTotal > (1 - thresholds.structuredRate)")
+    t = _thresholds(rule, "minAgentSessions", "structuredRate")
+    turns = _require_records(
+        telemetry.requests_with(tel.turns, "messageText"), rule["id"], "messageText")
+    sessions = telemetry.build_sessions(turns)
+    eligible = [s for s in sessions if s["requestCount"] >= 3]
+    if not eligible:
+        return None
+    matched = 0
+    for session in eligible:
+        first = session["requests"][0].get("messageText") or ""
+        if _is_spec_shaped(first):
+            continue
+        matched += 1
+    if not (len(eligible) >= t["minAgentSessions"]
+            and matched / len(eligible) > (1 - t["structuredRate"])):
+        return None
+    return matched
+
+
 TELEMETRY_ADAPTERS = {
     "vibe-coding": eval_vibe_coding,
     "copy-paste-blindness": eval_copy_paste_blindness,
@@ -1312,6 +1475,10 @@ TELEMETRY_ADAPTERS = {
     "verbose-output": eval_verbose_output,
     "high-cancellation": eval_high_cancellation,
     "runaway-agent-loops": eval_runaway_agent_loops,
+    "no-skills": eval_no_skills,
+    "agentic-no-tools": eval_agentic_no_tools,
+    "verbose-prompt-no-compression": eval_verbose_prompt_no_compression,
+    "no-spec-structure": eval_no_spec_structure,
 }
 
 
