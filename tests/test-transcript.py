@@ -208,12 +208,12 @@ class TestSummarizeClaudeEvents(unittest.TestCase):
 
 class TestBuildClaudeSessionDigest(unittest.TestCase):
     def test_no_transcript_path(self):
-        digest, reason = transcript.build_claude_session_digest("")
+        digest, reason, _ = transcript.build_claude_session_digest("")
         self.assertEqual(digest, "")
         self.assertIn("no transcript_path", reason)
 
     def test_missing_file(self):
-        digest, reason = transcript.build_claude_session_digest("/nonexistent/does-not-exist.jsonl")
+        digest, reason, _ = transcript.build_claude_session_digest("/nonexistent/does-not-exist.jsonl")
         self.assertEqual(digest, "")
         self.assertIn("not found", reason)
 
@@ -221,7 +221,7 @@ class TestBuildClaudeSessionDigest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "t.jsonl"
             p.write_text("", encoding="utf-8")
-            digest, reason = transcript.build_claude_session_digest(str(p))
+            digest, reason, _ = transcript.build_claude_session_digest(str(p))
             self.assertEqual(digest, "")
             self.assertIn("empty", reason)
 
@@ -229,7 +229,7 @@ class TestBuildClaudeSessionDigest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "t.jsonl"
             p.write_text(_claude_line("system", extra={"subtype": "x"}) + "\n", encoding="utf-8")
-            digest, reason = transcript.build_claude_session_digest(str(p))
+            digest, reason, _ = transcript.build_claude_session_digest(str(p))
             self.assertEqual(digest, "")
             self.assertIn("no user/assistant text content", reason)
 
@@ -237,7 +237,7 @@ class TestBuildClaudeSessionDigest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "t.jsonl"
             p.write_text("\n".join(_realistic_claude_session_lines()) + "\n", encoding="utf-8")
-            digest, reason = transcript.build_claude_session_digest(str(p))
+            digest, reason, _ = transcript.build_claude_session_digest(str(p))
             self.assertEqual(reason, "")
             self.assertIn("PLACEHOLDER_USER_TEXT", digest)
             self.assertIn("PLACEHOLDER_ASSISTANT_TEXT", digest)
@@ -247,7 +247,7 @@ class TestBuildClaudeSessionDigest(unittest.TestCase):
             p = Path(tmp) / "t.jsonl"
             lines = [_claude_line("user", {"role": "user", "content": 'api_key: "abcdefghijklmnopqrstuvwx"'})]
             p.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            digest, reason = transcript.build_claude_session_digest(str(p))
+            digest, reason, _ = transcript.build_claude_session_digest(str(p))
             self.assertEqual(reason, "")
             self.assertNotIn("abcdefghijklmnopqrstuvwx", digest)
 
@@ -259,7 +259,7 @@ class TestBuildClaudeSessionDigest(unittest.TestCase):
                 for i in range(200)
             ]
             p.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            digest, reason = transcript.build_claude_session_digest(str(p), max_chars=2000)
+            digest, reason, _ = transcript.build_claude_session_digest(str(p), max_chars=2000)
             self.assertEqual(reason, "")
             self.assertLessEqual(len(digest), 2200)
             self.assertIn("turn 199", digest)
@@ -294,10 +294,10 @@ class TestHarnessParity(unittest.TestCase):
             ]
             claude_path.write_text("\n".join(claude_lines) + "\n", encoding="utf-8")
 
-            copilot_digest, copilot_reason = transcript.build_copilot_session_digest(
+            copilot_digest, copilot_reason, _ = transcript.build_copilot_session_digest(
                 "s1", {"SL_COPILOT_HOME": tmp}
             )
-            claude_digest, claude_reason = transcript.build_claude_session_digest(str(claude_path))
+            claude_digest, claude_reason, _ = transcript.build_claude_session_digest(str(claude_path))
 
             self.assertEqual(copilot_reason, "")
             self.assertEqual(claude_reason, "")
@@ -338,10 +338,10 @@ class TestHarnessParity(unittest.TestCase):
             ]
             claude_path.write_text("\n".join(claude_lines) + "\n", encoding="utf-8")
 
-            copilot_digest, copilot_reason = transcript.build_copilot_session_digest(
+            copilot_digest, copilot_reason, _ = transcript.build_copilot_session_digest(
                 "s1", {"SL_COPILOT_HOME": tmp}, max_chars=cap
             )
-            claude_digest, claude_reason = transcript.build_claude_session_digest(
+            claude_digest, claude_reason, _ = transcript.build_claude_session_digest(
                 str(claude_path), max_chars=cap
             )
 
@@ -498,22 +498,29 @@ class TestFindEventsFile(unittest.TestCase):
 
 class TestBuildCopilotSessionDigest(unittest.TestCase):
     def test_no_session_id(self):
-        digest, reason = transcript.build_copilot_session_digest("", {"SL_COPILOT_HOME": "/tmp/x"})
+        digest, reason, _ = transcript.build_copilot_session_digest("", {"SL_COPILOT_HOME": "/tmp/x"})
         self.assertEqual(digest, "")
         self.assertIn("no sessionId", reason)
 
     def test_missing_session_state_dir(self):
+        # No state dir at all is a genuine failure, NOT the benign
+        # no-conversation case: Copilot creates the dir at session start, so
+        # its absence means a wrong state root or an externally deleted
+        # session -- exactly what persist-failures.log is for.
         with tempfile.TemporaryDirectory() as tmp:
-            digest, reason = transcript.build_copilot_session_digest("nope", {"SL_COPILOT_HOME": tmp})
+            digest, reason, outcome = transcript.build_copilot_session_digest(
+                "nope", {"SL_COPILOT_HOME": tmp}
+            )
             self.assertEqual(digest, "")
-            self.assertIn("not found", reason)
+            self.assertIn("no session-state dir", reason)
+            self.assertEqual(outcome, transcript.OUTCOME_FAILURE)
 
     def test_empty_events_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp) / "session-state" / "s1"
             d.mkdir(parents=True)
             (d / "events.jsonl").write_text("", encoding="utf-8")
-            digest, reason = transcript.build_copilot_session_digest("s1", {"SL_COPILOT_HOME": tmp})
+            digest, reason, _ = transcript.build_copilot_session_digest("s1", {"SL_COPILOT_HOME": tmp})
             self.assertEqual(digest, "")
             self.assertIn("empty", reason)
 
@@ -522,7 +529,7 @@ class TestBuildCopilotSessionDigest(unittest.TestCase):
             d = Path(tmp) / "session-state" / "s1"
             d.mkdir(parents=True)
             (d / "events.jsonl").write_text(_event("session.start", {}) + "\n", encoding="utf-8")
-            digest, reason = transcript.build_copilot_session_digest("s1", {"SL_COPILOT_HOME": tmp})
+            digest, reason, _ = transcript.build_copilot_session_digest("s1", {"SL_COPILOT_HOME": tmp})
             self.assertEqual(digest, "")
             self.assertIn("no user/assistant messages", reason)
 
@@ -532,9 +539,94 @@ class TestBuildCopilotSessionDigest(unittest.TestCase):
             d.mkdir(parents=True)
             lines = _realistic_session_lines()
             (d / "events.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
-            digest, reason = transcript.build_copilot_session_digest("s1", {"SL_COPILOT_HOME": tmp})
+            digest, reason, _ = transcript.build_copilot_session_digest("s1", {"SL_COPILOT_HOME": tmp})
             self.assertEqual(reason, "")
             self.assertIn("PLACEHOLDER", digest)
+
+
+def _make_started_but_silent_session(root, session_id="s1"):
+    """Reproduce, byte-for-byte in shape, a real Copilot session-state dir
+    for a session that started and ended without ever taking a turn.
+
+    Taken from the actual dirs that produced the false persistence failures:
+    `checkpoints/index.md`, empty `files/` and `research/`, and a
+    `workspace.yaml` with no `name:` key -- and crucially NEITHER
+    `events.jsonl` NOR `session.db`.
+    """
+    d = root / "session-state" / session_id
+    (d / "checkpoints").mkdir(parents=True)
+    (d / "files").mkdir()
+    (d / "research").mkdir()
+    (d / "checkpoints" / "index.md").write_text("# checkpoints\n", encoding="utf-8")
+    (d / "workspace.yaml").write_text(
+        "id: {0}\ncwd: /tmp\nclient_name: github/cli\n"
+        "user_named: false\nsummary_count: 0\n".format(session_id),
+        encoding="utf-8",
+    )
+    return d
+
+
+class TestEmptySessionClassification(unittest.TestCase):
+    """fix-empty-session. A session that never conversed is a benign no-op,
+    not a persistence failure; a session that DID converse but whose
+    transcript is gone still is one. These two properties are the whole
+    point of the change and are asserted separately.
+    """
+
+    def test_started_but_silent_session_is_not_a_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _make_started_but_silent_session(Path(tmp))
+            digest, reason, outcome = transcript.build_copilot_session_digest(
+                "s1", {"SL_COPILOT_HOME": tmp}
+            )
+            self.assertEqual(digest, "")
+            self.assertEqual(outcome, transcript.OUTCOME_NO_CONVERSATION)
+            self.assertIn("without a turn", reason)
+
+    def test_session_db_without_events_is_still_a_failure(self):
+        # The property most at risk from this change: a session that DID
+        # converse (Copilot created its per-session conversation DB) but
+        # whose transcript is missing must stay loud. If the discriminator
+        # ever loosens to "no events.jsonl => empty", this test fails.
+        with tempfile.TemporaryDirectory() as tmp:
+            d = _make_started_but_silent_session(Path(tmp))
+            (d / "session.db").write_bytes(b"SQLite format 3\x00")
+            digest, reason, outcome = transcript.build_copilot_session_digest(
+                "s1", {"SL_COPILOT_HOME": tmp}
+            )
+            self.assertEqual(digest, "")
+            self.assertEqual(outcome, transcript.OUTCOME_FAILURE)
+            self.assertIn("events.jsonl not found", reason)
+
+    def test_unparseable_events_file_is_still_a_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = _make_started_but_silent_session(Path(tmp))
+            (d / "session.db").write_bytes(b"SQLite format 3\x00")
+            (d / "events.jsonl").write_text("not json at all\n{{{\n", encoding="utf-8")
+            _, _, outcome = transcript.build_copilot_session_digest(
+                "s1", {"SL_COPILOT_HOME": tmp}
+            )
+            self.assertEqual(outcome, transcript.OUTCOME_FAILURE)
+
+    def test_conversed_predicate_needs_only_one_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = _make_started_but_silent_session(Path(tmp))
+            self.assertFalse(transcript.copilot_session_conversed(d))
+            (d / "events.jsonl").write_text("{}\n", encoding="utf-8")
+            self.assertTrue(transcript.copilot_session_conversed(d))
+            (d / "events.jsonl").unlink()
+            (d / "session.db").write_bytes(b"x")
+            self.assertTrue(transcript.copilot_session_conversed(d))
+
+    def test_claude_path_never_reports_no_conversation(self):
+        # The Claude Stop hook only fires after a turn, so there is no
+        # benign-empty class there; every degraded transcript stays loud.
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "t.jsonl"
+            p.write_text("", encoding="utf-8")
+            for identifier in ("", "/nonexistent/ghost.jsonl", str(p)):
+                _, _, outcome = transcript.build_claude_session_digest(identifier)
+                self.assertEqual(outcome, transcript.OUTCOME_FAILURE, identifier)
 
 
 class TestCli(unittest.TestCase):
@@ -563,7 +655,7 @@ class TestCli(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0)
             self.assertEqual(result.stdout, "")
-            self.assertIn("not found", log_file.read_text())
+            self.assertIn("no session-state dir", log_file.read_text())
 
     def test_real_session_prints_digest_on_stdout_with_no_log_entry(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -620,6 +712,38 @@ class TestCli(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
             self.assertIn("PLACEHOLDER_ASSISTANT_TEXT", result.stdout)
             self.assertFalse(log_file.exists())
+
+    def test_empty_session_goes_to_notice_log_never_to_failure_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _make_started_but_silent_session(Path(tmp))
+            log_file = Path(tmp) / "persist-failures.log"
+            notice = Path(tmp) / "persist.log"
+            result = self._run(
+                ["s1", "--home", tmp, "--log-file", str(log_file), "--notice-log", str(notice)]
+            )
+            self.assertEqual(result.returncode, transcript.EXIT_NO_CONVERSATION)
+            self.assertEqual(result.stdout, "")
+            self.assertFalse(log_file.exists(), "a benign empty session must not be a failure")
+            self.assertTrue(notice.is_file(), "it must still be visible somewhere")
+            record = json.loads(notice.read_text().strip())
+            self.assertEqual(record["skipped"], ["no-conversation"])
+            self.assertEqual(record["written"], [])
+            self.assertEqual(record["component"], "copilot-session-review")
+
+    def test_genuine_failure_still_goes_to_failure_log_even_with_notice_log_set(self):
+        # Mutation guard: --notice-log must not become a catch-all that
+        # quietly diverts real failures out of persist-failures.log.
+        with tempfile.TemporaryDirectory() as tmp:
+            d = _make_started_but_silent_session(Path(tmp))
+            (d / "session.db").write_bytes(b"SQLite format 3\x00")
+            log_file = Path(tmp) / "persist-failures.log"
+            notice = Path(tmp) / "persist.log"
+            result = self._run(
+                ["s1", "--home", tmp, "--log-file", str(log_file), "--notice-log", str(notice)]
+            )
+            self.assertEqual(result.returncode, 0)
+            self.assertIn("events.jsonl not found", log_file.read_text())
+            self.assertFalse(notice.exists())
 
     def test_default_harness_is_copilot_unaffected_by_claude_addition(self):
         # Backward compatibility: existing copilot-session-review.sh callers

@@ -75,6 +75,65 @@ not_contains "a non-trailing streak of no-proposal results is not flagged" "$OUT
 check "a non-trailing streak does not fail the run" "0" "$STATUS"
 rm -rf "$TMP_HOME"
 
+## 5. fix-empty-session. A store whose ONLY history is sessions that ended
+##    without a turn is HEALTHY. This is the defect that prompted the change:
+##    ~53% of Copilot sessions never converse, and reporting them as
+##    persistence failures made doctor read UNHEALTHY on a perfectly fine
+##    machine -- which trains the user to ignore the one channel a genuinely
+##    broken detached review can reach.
+NO_CONVERSATION_LINE='{"bytes": 0, "component": "copilot-session-review", "reason": "not applicable -- session ended without a turn", "skipped": ["no-conversation"], "timestamp": "2026-07-26T17:26:48Z", "written": []}'
+TMP_HOME="$(mktemp -d)"
+mkdir -p "${TMP_HOME}/store/logs"
+for _ in 1 2 3 4 5; do printf '%s\n' "$NO_CONVERSATION_LINE"; done \
+    >> "${TMP_HOME}/store/logs/persist.log"
+OUT="$(run_doctor "$TMP_HOME" "${TMP_HOME}/store")"
+STATUS=$?
+not_contains "empty sessions alone are not SUSPICIOUS" "$OUT" "SUSPICIOUS"
+not_contains "empty sessions alone are not a PERSISTENCE FAILURE" "$OUT" "PERSISTENCE FAILURE"
+contains "empty sessions are still reported, not invisible" "$OUT" "ended without a turn"
+check "a store whose only history is empty sessions is healthy" "0" "$STATUS"
+rm -rf "$TMP_HOME"
+
+## 6. no-conversation lines must be EXCLUDED from the streak window, not
+##    counted in it and not allowed to break it. Interleaving them with a
+##    real trailing run of no-proposal results must still be flagged --
+##    otherwise this change would silently disable the check from case 3.
+TMP_HOME="$(mktemp -d)"
+mkdir -p "${TMP_HOME}/store/logs"
+{
+    printf '%s\n' "$WRITTEN_LINE"
+    printf '%s\n' "$NO_PROPOSAL_LINE"
+    printf '%s\n' "$NO_CONVERSATION_LINE"
+    printf '%s\n' "$NO_PROPOSAL_LINE"
+    printf '%s\n' "$NO_CONVERSATION_LINE"
+    printf '%s\n' "$NO_CONVERSATION_LINE"
+    printf '%s\n' "$NO_PROPOSAL_LINE"
+    printf '%s\n' "$NO_CONVERSATION_LINE"
+} >> "${TMP_HOME}/store/logs/persist.log"
+OUT="$(run_doctor "$TMP_HOME" "${TMP_HOME}/store")"
+STATUS=$?
+contains "no-conversation lines do not break a real no-proposal streak" "$OUT" "SUSPICIOUS"
+check "an interleaved real streak still flips the exit code" "1" "$STATUS"
+rm -rf "$TMP_HOME"
+
+## 7. ...and they must not be counted AS no-proposal results either: a tail
+##    of nothing but empty sessions plus two real no-proposal runs is below
+##    the threshold and must stay quiet.
+TMP_HOME="$(mktemp -d)"
+mkdir -p "${TMP_HOME}/store/logs"
+{
+    printf '%s\n' "$NO_CONVERSATION_LINE"
+    printf '%s\n' "$NO_PROPOSAL_LINE"
+    printf '%s\n' "$NO_CONVERSATION_LINE"
+    printf '%s\n' "$NO_PROPOSAL_LINE"
+    printf '%s\n' "$NO_CONVERSATION_LINE"
+} >> "${TMP_HOME}/store/logs/persist.log"
+OUT="$(run_doctor "$TMP_HOME" "${TMP_HOME}/store")"
+STATUS=$?
+not_contains "empty sessions are not counted as no-proposal results" "$OUT" "SUSPICIOUS"
+check "two real no-proposal runs padded with empty sessions stay healthy" "0" "$STATUS"
+rm -rf "$TMP_HOME"
+
 if [[ "$FAILURES" -gt 0 ]]; then
     exit 1
 fi

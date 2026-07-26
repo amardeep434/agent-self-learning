@@ -373,39 +373,62 @@ echo
 # small: false positives here just mean "look at review-stderr.log", while
 # false negatives mean this section is the same kind of blind spot
 # persist-failures.log alone already was.
+#
+# fix-empty-session: persist.log now also carries
+# {"skipped": ["no-conversation"], ...} lines, written by
+# scripts/lib/transcript.py when a session ended without ever taking a turn
+# (~53% of Copilot sessions on the machine that surfaced this). Those are
+# NOT review runs, so they are excluded from the tail window entirely before
+# the streak is measured -- if they were left in they would both dilute the
+# 10-run window until real review outcomes fell out of it, and break a
+# genuine no-proposal streak in the middle, silently disabling this check.
+# They are counted and printed separately so the benign case stays visible
+# rather than invisible: "the hook never ran" leaves no line at all.
 # ---------------------------------------------------------------------------
 PERSIST_LOG="${SL_LOG_DIR}/persist.log"
 PERSIST_LOG_TAIL_N=10
 NO_PROPOSAL_STREAK_THRESHOLD=3
+NO_CONVERSATION_MARK='"skipped": ["no-conversation"]'
 echo "persist.log outcomes (last ${PERSIST_LOG_TAIL_N} runs, ${PERSIST_LOG}):"
 if [[ ! -e "$PERSIST_LOG" ]]; then
     echo "  ABSENT -- the review pipeline has never completed a persist-proposal.py run yet."
 elif [[ ! -s "$PERSIST_LOG" ]]; then
     echo "  present, EMPTY."
 else
-    TAIL_LINES="$(tail -n "$PERSIST_LOG_TAIL_N" "$PERSIST_LOG")"
-    TOTAL_LINES="$(printf '%s\n' "$TAIL_LINES" | grep -c '' || echo 0)"
-    # Reverse (most-recent-first) with the classic POSIX sed idiom -- `tac`
-    # is GNU-only and stock macOS ships neither it nor GNU sed by default.
-    REVERSED="$(printf '%s\n' "$TAIL_LINES" | sed '1!G;h;$!d')"
-    STREAK=0
-    while IFS= read -r line; do
-        case "$line" in
-            *'"skipped": ["no-proposal"]'*) STREAK=$((STREAK + 1)) ;;
-            *) break ;;
-        esac
-    done <<< "$REVERSED"
-    echo "  ${TOTAL_LINES} run(s) examined; ${STREAK} consecutive no-proposal result(s) most recently."
-    if [[ "$STREAK" -ge "$NO_PROPOSAL_STREAK_THRESHOLD" ]]; then
-        echo "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-        echo "  !!! SUSPICIOUS: ${STREAK} consecutive no-proposal results. This is"
-        echo "  !!! byte-identical to the reviewer's output being wrapped in a way"
-        echo "  !!! persist-proposal.py cannot extract a proposal from -- the exact"
-        echo "  !!! defect class this project exists to eliminate. Check"
-        echo "  !!! \${SL_LOG_DIR}/reviews/*.log and review-stderr.log, and consider a"
-        echo "  !!! manual review run to confirm the reviewer is actually emitting JSON."
-        echo "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-        STATUS=1
+    NO_CONV_COUNT="$(grep -cF "$NO_CONVERSATION_MARK" "$PERSIST_LOG" 2>/dev/null)" || NO_CONV_COUNT=0
+    TAIL_LINES="$(grep -vF "$NO_CONVERSATION_MARK" "$PERSIST_LOG" 2>/dev/null | tail -n "$PERSIST_LOG_TAIL_N")" || TAIL_LINES=""
+    if [[ -n "$NO_CONV_COUNT" && "$NO_CONV_COUNT" -gt 0 ]]; then
+        echo "  ${NO_CONV_COUNT} session(s) ended without a turn (no conversation to review)."
+        echo "  These are benign no-ops, not failures, and are excluded from the streak below."
+    fi
+    if [[ -z "$TAIL_LINES" ]]; then
+        echo "  0 review run(s) examined -- no completed review has been recorded yet."
+        TOTAL_LINES=0
+        STREAK=0
+    else
+        TOTAL_LINES="$(printf '%s\n' "$TAIL_LINES" | grep -c '' || echo 0)"
+        # Reverse (most-recent-first) with the classic POSIX sed idiom -- `tac`
+        # is GNU-only and stock macOS ships neither it nor GNU sed by default.
+        REVERSED="$(printf '%s\n' "$TAIL_LINES" | sed '1!G;h;$!d')"
+        STREAK=0
+        while IFS= read -r line; do
+            case "$line" in
+                *'"skipped": ["no-proposal"]'*) STREAK=$((STREAK + 1)) ;;
+                *) break ;;
+            esac
+        done <<< "$REVERSED"
+        echo "  ${TOTAL_LINES} run(s) examined; ${STREAK} consecutive no-proposal result(s) most recently."
+        if [[ "$STREAK" -ge "$NO_PROPOSAL_STREAK_THRESHOLD" ]]; then
+            echo "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+            echo "  !!! SUSPICIOUS: ${STREAK} consecutive no-proposal results. This is"
+            echo "  !!! byte-identical to the reviewer's output being wrapped in a way"
+            echo "  !!! persist-proposal.py cannot extract a proposal from -- the exact"
+            echo "  !!! defect class this project exists to eliminate. Check"
+            echo "  !!! \${SL_LOG_DIR}/reviews/*.log and review-stderr.log, and consider a"
+            echo "  !!! manual review run to confirm the reviewer is actually emitting JSON."
+            echo "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+            STATUS=1
+        fi
     fi
 fi
 echo

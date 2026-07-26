@@ -12,7 +12,7 @@ TMP=$(mktemp -d)
 # fix-p6: sl_rm_rf_retry, not a bare `rm -rf`, on this trap -- defense in
 # depth alongside sl_wait_for_review_complete used below (see
 # tests/lib/wait-for-review.sh for why both layers exist).
-trap 'sl_rm_rf_retry "$TMP"; sl_rm_rf_retry "${TMP_HOME:-}"; sl_rm_rf_retry "${FAKE_BIN:-}"; sl_rm_rf_retry "${TMP8:-}"; sl_rm_rf_retry "${FAKE_BIN8:-}"; sl_rm_rf_retry "${TMP9:-}"' EXIT
+trap 'sl_rm_rf_retry "$TMP"; sl_rm_rf_retry "${TMP_HOME:-}"; sl_rm_rf_retry "${FAKE_BIN:-}"; sl_rm_rf_retry "${TMP8:-}"; sl_rm_rf_retry "${FAKE_BIN8:-}"; sl_rm_rf_retry "${TMP9:-}"; sl_rm_rf_retry "${TMP10:-}"; sl_rm_rf_retry "${FAKE_BIN10:-}"' EXIT
 export SL_HOME="$TMP" SL_STATE_DIR="$TMP/state" SL_LOG_DIR="$TMP/logs" SL_CONFIG_FILE="/nonexistent"
 mkdir -p "$TMP/state" "$TMP/bin"
 FAILURES=0
@@ -251,6 +251,79 @@ echo '{"sessionId":"session-with-no-transcript-on-disk","reason":"complete"}' \
 FAILURE_LOG="${TMP9}/store/logs/persist-failures.log"
 check "missing transcript logged to persist-failures.log" "yes" \
     "$([[ -f "$FAILURE_LOG" ]] && grep -q 'transcript unavailable' "$FAILURE_LOG" && echo yes || echo no)"
+
+# 10) fix-empty-session. A session that started and ended without ever taking
+# a turn is NOT a persistence failure. `sessionEnd` fires for those too, and
+# on the machine that surfaced this they were 95 of 179 sessions; routing them
+# into persist-failures.log flipped doctor to UNHEALTHY on a healthy store and
+# devalued the one channel a genuinely broken detached review can reach.
+#
+# The fixture is the real shape of such a dir (checkpoints/, empty files/ and
+# research/, a workspace.yaml with no `name:` key, and NEITHER events.jsonl
+# NOR session.db), taken from the dirs behind the reported failures.
+make_silent_session_dir() {
+    local root="$1" sid="$2" dir
+    dir="${root}/.copilot/session-state/${sid}"
+    mkdir -p "${dir}/checkpoints" "${dir}/files" "${dir}/research"
+    printf '# checkpoints\n' > "${dir}/checkpoints/index.md"
+    printf 'id: %s\ncwd: /tmp\nclient_name: github/cli\nuser_named: false\nsummary_count: 0\n' \
+        "$sid" > "${dir}/workspace.yaml"
+    printf '%s' "$dir"
+}
+
+TMP10="$(mktemp -d)"
+FAKE_BIN10="$(mktemp -d)"
+cat > "${FAKE_BIN10}/copilot" <<'EOF'
+#!/usr/bin/env bash
+printf 'SPAWNED\n' >> "${FAKE_COPILOT_SPAWN_LOG}"
+printf '{"version": 1}\n'
+EOF
+chmod +x "${FAKE_BIN10}/copilot"
+SPAWN_LOG="${TMP10}/spawned.log"
+
+SILENT_ID="aaaaaaaa-0000-4000-8000-00000000000a"
+make_silent_session_dir "$TMP10" "$SILENT_ID" >/dev/null
+sl_clear_review_marker "${TMP10}/store/logs"
+echo "{\"sessionId\":\"${SILENT_ID}\",\"reason\":\"complete\"}" \
+    | env -i HOME="$TMP10" PATH="${FAKE_BIN10}:${PATH}" \
+        AGENT_LEARNING_HOME="${TMP10}/store" SL_CONFIG_FILE="/nonexistent/x.conf" \
+        FAKE_COPILOT_SPAWN_LOG="$SPAWN_LOG" \
+        bash "${SCRIPT_DIR}/scripts/copilot-session-review.sh" >/dev/null 2>&1 || true
+
+check "empty session writes NOTHING to persist-failures.log" "yes" \
+    "$([[ ! -s "${TMP10}/store/logs/persist-failures.log" ]] && echo yes || echo no)"
+check "empty session is still visible in persist.log" "yes" \
+    "$(grep -q '"skipped": \["no-conversation"\]' "${TMP10}/store/logs/persist.log" 2>/dev/null && echo yes || echo no)"
+# It must not burn a paid model call reviewing a session with nothing in it.
+# Give the (correctly suppressed) detached spawn a chance to appear before
+# asserting its absence, so this negative is not vacuously green.
+check "empty session does not spawn the reviewer" "yes" \
+    "$(sl_expect_no_review_spawned "${TMP10}/store/logs" && [[ ! -s "$SPAWN_LOG" ]] && echo yes || echo no)"
+
+# 11) MUTATION GUARD for 10: the same dir, plus session.db -- i.e. a session
+# that genuinely DID converse but whose events.jsonl is gone. This must stay
+# loud. If the discriminator ever loosens to "no events.jsonl => empty", this
+# case is what fails.
+CONVERSED_ID="bbbbbbbb-0000-4000-8000-00000000000b"
+CONVERSED_DIR="$(make_silent_session_dir "$TMP10" "$CONVERSED_ID")"
+printf 'SQLite format 3\000' > "${CONVERSED_DIR}/session.db"
+rm -f "${TMP10}/store/logs/persist-failures.log" "${TMP10}/store/logs/persist.log"
+sl_clear_review_marker "${TMP10}/store/logs"
+echo "{\"sessionId\":\"${CONVERSED_ID}\",\"reason\":\"complete\"}" \
+    | env -i HOME="$TMP10" PATH="${FAKE_BIN10}:${PATH}" \
+        AGENT_LEARNING_HOME="${TMP10}/store" SL_CONFIG_FILE="/nonexistent/x.conf" \
+        FAKE_COPILOT_SPAWN_LOG="$SPAWN_LOG" \
+        bash "${SCRIPT_DIR}/scripts/copilot-session-review.sh" >/dev/null 2>&1 || true
+
+check "lost transcript for a session that DID converse is still a failure" "yes" \
+    "$(grep -q 'transcript unavailable' "${TMP10}/store/logs/persist-failures.log" 2>/dev/null && echo yes || echo no)"
+# The reviewer IS still spawned on the failure path (unchanged behavior), so
+# persist.log may legitimately gain a line from persist-proposal.py. What must
+# never appear there is a no-conversation classification for a session that
+# actually conversed.
+check "a genuine failure is NOT reclassified as no-conversation" "yes" \
+    "$(grep -q 'no-conversation' "${TMP10}/store/logs/persist.log" 2>/dev/null && echo no || echo yes)"
+rm -rf "$TMP10" "$FAKE_BIN10"
 
 if [[ "$FAILURES" -gt 0 ]]; then exit 1; fi
 echo "All copilot-session-review tests passed."

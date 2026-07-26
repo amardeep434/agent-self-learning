@@ -27,11 +27,32 @@ mkdir -p "$LOG_DIR"
 # --- Resolve the session transcript from the sessionEnd payload's sessionId ---
 # Without this, the reviewer spawned below is asked to review a session it
 # has zero information about -- see scripts/lib/transcript.py's module
-# docstring. A missing/empty/unparseable transcript is logged to
-# persist-failures.log (doctor.sh surfaces it), never silently swallowed.
+# docstring. A missing/empty/unparseable transcript for a session that DID
+# converse is logged to persist-failures.log (doctor.sh surfaces it), never
+# silently swallowed.
+#
+# fix-empty-session: a session that never took a turn is a different thing
+# entirely. `sessionEnd` fires for those too, and on the machine this was
+# found on they were ~53% of all sessions (95 of 179). Routing them into
+# persist-failures.log made a healthy store read UNHEALTHY and devalued the
+# one channel a genuinely broken detached review can reach. transcript.py
+# now classifies them separately, records them in persist.log as a skipped
+# outcome, and exits EXIT_NO_CONVERSATION (20). Note the failure path below
+# is deliberately UNCHANGED -- a real transcript failure still logs loudly
+# AND still spawns the review; only the provably-empty case short-circuits.
+TRANSCRIPT_STATUS=0
 TRANSCRIPT_DIGEST="$(python3 "${LIB_DIR}/transcript.py" "${COPILOT_HOOK_SESSION_ID}" \
     --log-file "${SL_LOG_DIR}/persist-failures.log" \
-    2>>"${LOG_DIR}/transcript.err" || true)"
+    --notice-log "${SL_LOG_DIR}/persist.log" \
+    2>>"${LOG_DIR}/transcript.err")" || TRANSCRIPT_STATUS=$?
+
+# Nothing was said, so there is provably nothing to learn: skip the paid
+# model call rather than spend one reviewing an empty session. The
+# persist.log line written above is what keeps this distinguishable from
+# "the hook never ran", which leaves no line anywhere.
+if [[ "${TRANSCRIPT_STATUS}" -eq 20 ]]; then
+    exit 0
+fi
 
 REVIEW_PROMPT="$(cat <<RPEOF
 You are a Background Review agent performing an end-of-session review.
