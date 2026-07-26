@@ -287,7 +287,12 @@ class StagedReplaceProbeTest(unittest.TestCase):
             self.assertEqual(sorted(os.listdir(d)), ["pin-probe-target"])
 
     def test_raises_oserror_when_the_directory_is_unwritable(self):
-        if os.geteuid() == 0:
+        # os.geteuid() is POSIX-only -- absent on Windows, where an unguarded
+        # call raises AttributeError and turns this into an ERROR rather than
+        # a skip (observed on both windows-latest cells, CI run 30185385971).
+        # Probe for the capability instead of the platform name, the same
+        # discipline this module's own backend detection uses.
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
             self.skipTest("[skip] running as root; mode bits do not deny writes")
         with tempfile.TemporaryDirectory() as d:
             sub = os.path.join(d, "ro")
