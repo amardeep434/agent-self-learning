@@ -34,10 +34,56 @@ check() { if [[ "$2" == "$3" ]]; then echo "PASS: $1"; else echo "FAIL: $1 (expe
 COPILOT_SCRIPT="${SCRIPT_DIR}/scripts/copilot-session-review.sh"
 CLAUDE_SCRIPT="${SCRIPT_DIR}/scripts/session-review.sh"
 
+# Feature-detect the timeout wrapper instead of calling `timeout` directly.
+# Stock macOS has no `timeout` (GNU-only); Homebrew coreutils installs it as
+# `gtimeout`. Every call site here is guarded by `|| true` or `&& ... || ...`,
+# so a missing `timeout` does NOT abort under `set -e` -- it does something
+# quieter and worse: the capture becomes the shell's own "timeout: command
+# not found" text, every grep against it misses, and the suite reports up to
+# seven spurious FAILs that read exactly like "the CLI dropped a flag".
+# A false negative wearing the costume of a real finding.
+#
+# CI cannot catch this: neither `copilot` nor `claude` is installed on the
+# runners, so both guarded blocks skip entirely and these lines never run.
+# It would only ever bite a developer on macOS who has the CLIs -- i.e. the
+# exact person this suite exists to serve. Reported by Copilot's review of
+# PR #2 (comment 3652407788); the mechanism it named (a `set -e` abort) was
+# wrong, the conclusion was right.
+#
+# Same detection as tests/run-all.sh:54-70, which this suite should have
+# reused from the start -- an earlier round of this branch explicitly
+# rejected a bare `timeout` wrapper for this reason (see progress.md), and
+# this file reintroduced it.
+#
+# A function, not an array: macOS ships bash 3.2, where "${arr[@]}" on an
+# empty array errors under `set -u`.
+SL_TIMEOUT_BIN=""
+if command -v timeout >/dev/null 2>&1; then
+    SL_TIMEOUT_BIN="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+    SL_TIMEOUT_BIN="gtimeout"
+else
+    echo "[capability probe] timeout wrapper: UNAVAILABLE (neither 'timeout' nor" >&2
+    echo "  'gtimeout' resolvable) -- CLI probes below run UNWRAPPED. A hung CLI" >&2
+    echo "  will hang this suite with no automatic recovery. Install GNU coreutils" >&2
+    echo "  ('brew install coreutils' on macOS) to restore it." >&2
+fi
+
+# run_probe <seconds> <command...> -- wrapped when a wrapper exists, direct
+# otherwise, so the captured output is always the command's own.
+run_probe() {
+    local secs="$1"; shift
+    if [[ -n "$SL_TIMEOUT_BIN" ]]; then
+        "$SL_TIMEOUT_BIN" "$secs" "$@"
+    else
+        "$@"
+    fi
+}
+
 # --- GitHub Copilot CLI ----------------------------------------------------
 if command -v copilot >/dev/null 2>&1; then
     echo "[capability probe] copilot: AVAILABLE"
-    COPILOT_HELP="$(timeout 60 copilot --help 2>&1 || true)"
+    COPILOT_HELP="$(run_probe 60 copilot --help 2>&1 || true)"
 
     for flag in "--allow-tool" "--model" "-p, --prompt" "-s, --silent"; do
         check "copilot --help documents '${flag}'" "yes" \
@@ -66,15 +112,15 @@ if command -v copilot >/dev/null 2>&1; then
     # the flag and the number: if either moves upstream, the knob's
     # validation is wrong and this must say so rather than silently drift.
     check "copilot documents '--max-ai-credits' (help topic: limits)" "yes" \
-        "$(timeout 60 copilot help limits 2>&1 | grep -qF -- '--max-ai-credits' && echo yes || echo no)"
+        "$(run_probe 60 copilot help limits 2>&1 | grep -qF -- '--max-ai-credits' && echo yes || echo no)"
     check "copilot's documented credit minimum is still 30" "yes" \
-        "$(timeout 60 copilot help limits 2>&1 | grep -qiE 'minimum: *30' && echo yes || echo no)"
+        "$(run_probe 60 copilot help limits 2>&1 | grep -qiE 'minimum: *30' && echo yes || echo no)"
     # Control experiment, same shape as the Claude one below: prove the CLI
     # rejects unknown options, so "accepted" means something.
-    COPILOT_UNKNOWN="$(timeout 60 copilot --sl-definitely-not-a-real-flag -p "" </dev/null 2>&1 || true)"
+    COPILOT_UNKNOWN="$(run_probe 60 copilot --sl-definitely-not-a-real-flag -p "" </dev/null 2>&1 || true)"
     check "copilot control: unknown flags DO error" "yes" \
         "$(printf '%s' "$COPILOT_UNKNOWN" | grep -qi "unknown option" && echo yes || echo no)"
-    COPILOT_CREDITS_ERR="$(timeout 60 copilot --max-ai-credits 30 -p "" </dev/null 2>&1 || true)"
+    COPILOT_CREDITS_ERR="$(run_probe 60 copilot --max-ai-credits 30 -p "" </dev/null 2>&1 || true)"
     check "copilot accepts --max-ai-credits 30" "yes" \
         "$(printf '%s' "$COPILOT_CREDITS_ERR" | grep -qi "unknown option" && echo no || echo yes)"
 
@@ -94,8 +140,8 @@ fi
 
 # --- Claude Code CLI -------------------------------------------------------
 if command -v claude >/dev/null 2>&1; then
-    echo "[capability probe] claude: AVAILABLE ($(timeout 30 claude --version 2>/dev/null | head -1 || echo 'version unknown'))"
-    CLAUDE_HELP="$(timeout 60 claude --help 2>&1 || true)"
+    echo "[capability probe] claude: AVAILABLE ($(run_probe 30 claude --version 2>/dev/null | head -1 || echo 'version unknown'))"
+    CLAUDE_HELP="$(run_probe 60 claude --help 2>&1 || true)"
     check "claude --help documents '--output-format'" "yes" \
         "$(printf '%s' "$CLAUDE_HELP" | grep -qF -- "--output-format" && echo yes || echo no)"
 
@@ -105,8 +151,8 @@ if command -v claude >/dev/null 2>&1; then
     # produce "unknown option", and the flag under test must not. Both runs
     # use an empty prompt, which the CLI rejects before contacting any
     # model -- no tokens are spent.
-    UNKNOWN_ERR="$(timeout 60 claude --sl-definitely-not-a-real-flag -p "" </dev/null 2>&1 || true)"
-    MAXTURNS_ERR="$(timeout 60 claude --max-turns 16 -p "" </dev/null 2>&1 || true)"
+    UNKNOWN_ERR="$(run_probe 60 claude --sl-definitely-not-a-real-flag -p "" </dev/null 2>&1 || true)"
+    MAXTURNS_ERR="$(run_probe 60 claude --max-turns 16 -p "" </dev/null 2>&1 || true)"
     CONTROL_OK="$(printf '%s' "$UNKNOWN_ERR" | grep -qi "unknown option" && echo yes || echo no)"
     if [[ "$CONTROL_OK" == "yes" ]]; then
         check "claude accepts --max-turns (control: unknown flags DO error)" "yes" \
@@ -131,7 +177,7 @@ if command -v claude >/dev/null 2>&1; then
             "$(printf '%s' "$CLAUDE_HELP" | grep -qF -- "$flag" && echo yes || echo no)"
     done
     if [[ "$CONTROL_OK" == "yes" ]]; then
-        RESTRICT_ERR="$(timeout 60 claude --allowedTools "Read,Glob,Grep" \
+        RESTRICT_ERR="$(run_probe 60 claude --allowedTools "Read,Glob,Grep" \
             --disallowedTools "Write,Edit,NotebookEdit" -p "" </dev/null 2>&1 || true)"
         check "claude accepts the tool-restriction argv session-review.sh builds" "yes" \
             "$(printf '%s' "$RESTRICT_ERR" | grep -qi "unknown option" && echo no || echo yes)"
