@@ -988,3 +988,204 @@ actually pins the fix is on **stderr being empty**.
    answering under an upstream rule's name is the same failure class as a
    drifted predicate, and unlike the predicate there is no pin that would
    catch it.
+
+---
+
+## Residual A, round 2 — CI disagreed with the design, and CI was right
+
+CI run `30184253819` on `d63b619`. Ubuntu ×2 and macOS ×2 green. Both Windows
+cells: **38 of 39 passed**, and the failure was the only assertion that
+encoded the module's reason to exist.
+
+```
+windows: [capability probe] win32 directory pinning: AVAILABLE
+FAIL: test_pinned_directory_cannot_be_renamed_or_removed (WindowsBackendTest)
+  tests\test-win-dir-pin.py, line 526
+    with self.assertRaises(OSError):
+  AssertionError: OSError not raised
+```
+
+Line 526 is the **rename**. The `os.rmdir` assertion two lines below was never
+reached, so that run says nothing about deletion — a resolution problem in the
+test that is fixed below.
+
+The probe printing AVAILABLE is the damning part: the module was **live** on
+both Windows cells, and what it reported as a working capability was a handle
+nobody's sharing check consulted.
+
+### Diagnosis against the coordinator's four hypotheses
+
+| Hypothesis | Verdict |
+|---|---|
+| Handle not actually open/held at rename time | **No.** `test_pin_a_real_directory_and_read_its_identity` and the probe both passed, which requires a valid handle from the same `open_pin` on the same path; `pin.close()` was in a `finally` after the assertion. |
+| Share mode not reaching `CreateFileW` as intended | **Partly — but not as stated.** `dwShareMode` was passed correctly (`wintypes.DWORD` argtype, value `FILE_SHARE_READ`, no truncation possible). The defect was one parameter to its left. |
+| Rename path bypasses the sharing check | **No** — but the reason it did not engage is adjacent to this. |
+| Guarantee applies to the parent's directory entry, not the directory | **Not needed to explain it.** The simpler explanation is sufficient and documented. |
+
+### Root cause
+
+Windows keeps per-file sharing state in a `SHARE_ACCESS` structure
+(`OpenCount`, `Readers`, `Writers`, `Deleters`, `SharedRead`, `SharedWrite`,
+`SharedDelete`), and **the share-access check is engaged only for opens
+requesting read, write or delete access.**
+
+Microsoft documents this by way of the flag that exists to defeat it.
+`IoCheckLinkShareAccess`, `IoShareAccessFlags`:
+
+> **IO_CHECK_SHARE_ACCESS_FORCE_CHECK** (0x00000020) indicate to force check
+> share access even if the request is not read/write/delete access.
+
+<https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-iochecklinkshareaccess>
+
+A flag whose entire purpose is "force the check even when the request is not
+read/write/delete" only makes sense because the **default is to skip it**.
+
+The pin requested `FILE_READ_ATTRIBUTES` (0x0080) — chosen for minimal
+privilege, and sufficient for `GetFileInformationByHandle`. It is not
+`FILE_READ_DATA` (0x0001), not `FILE_WRITE_DATA`, not `DELETE`. So the open
+never entered the directory's share-access accounting. The handle was held,
+the share mode was correct and irrelevant, and every subsequent opener's
+sharing check simply never consulted it.
+
+**So the design was right and the implementation was wrong — but only just.**
+The MSDN share-mode quotes in the previous round are all accurate; they
+describe what a share mode does *once the check runs*. Nothing on the
+`CreateFileW` page says the check depends on your own desired access. That
+gap between two correct documents is exactly the space this bug lived in.
+
+### The fix, and why it is not trusted
+
+`PIN_DESIRED_ACCESS = FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES`.
+`FILE_LIST_DIRECTORY` is 0x0001 — the directory spelling of `FILE_READ_DATA` —
+so the open becomes a genuine reader, `Readers` is incremented, and a rename's
+`DELETE`-access open has an accounting entry it must clear against
+`SharedDelete == 0`.
+
+That is a *reasoned* fix to a *measured* failure, and reasoning is what
+produced the original bug. It is therefore **not trusted**, and the structural
+change matters more than the one-line fix:
+
+**`available()` no longer means "CreateFileW returned a handle". It means "a
+pinned directory was measured to be un-renameable on this machine."**
+
+`verify_pin_blocks_rename(directory, moved)` pins a throwaway directory,
+attempts a real rename, and returns one of four verdicts:
+
+| Verdict | Meaning | Availability |
+|---|---|---|
+| `GUARANTEE_HELD` | rename failed while pinned, succeeded after release | **available** |
+| `GUARANTEE_NOT_ENFORCED` | rename succeeded while pinned | disabled |
+| `GUARANTEE_INCONCLUSIVE` | rename failed while pinned **and** after release | disabled |
+| `GUARANTEE_NO_BACKEND` | no `kernel32` | disabled |
+
+The `INCONCLUSIVE` case is the control experiment and it is load-bearing:
+without it a read-only volume, a permissions problem or an antivirus lock
+fails the rename for reasons unrelated to the pin, and the module would report
+AVAILABLE on the strength of a failure that proves nothing. That is precisely
+the mistake this round is correcting, one level up.
+
+Any verdict but `HELD` disables pinning, which returns `_write_all_path` to
+exactly its previously documented behaviour. **A race described honestly beats
+a protection advertised and absent.**
+
+### CI-visible three-state reporting
+
+```
+[capability probe] win32 directory pinning: AVAILABLE (verified: a pinned directory could not be renamed)
+[capability probe] win32 directory pinning: UNAVAILABLE (kernel32 present, but the kernel did NOT block a rename of a pinned directory -- pinning disabled, the write path keeps its documented race)
+[capability probe] win32 directory pinning: UNAVAILABLE (kernel32 present, but the control rename failed too -- cannot tell protection from an unwritable volume, so pinning is disabled)
+[capability probe] win32 directory pinning: UNAVAILABLE (no kernel32 -- expected on POSIX)
+```
+
+`python3 scripts/lib/win_dir_pin.py` prints the same verdict as a standalone
+diagnostic.
+
+### Tests: sharpened, not relaxed
+
+The failing assertion was **not** weakened. The Windows half now has three
+layers:
+
+1. **`test_guarantee_holds_on_this_runner`** — the headline property,
+   measured directly, unconditional on Windows, never skipped. If the
+   guarantee cannot be delivered, this going red is the *correct* outcome and
+   the module should be downgraded rather than the assertion softened. Its
+   failure message states the two remaining explanations so the next run is
+   diagnostic rather than just red.
+2. **`test_probe_agrees_with_the_measured_guarantee`** — the guard that makes
+   a green run mean something. It fails if `available()` claims **more** than
+   the machine delivers (the failure just seen) *and* if it claims **less**
+   (silently giving up real protection). This is the assertion that could not
+   have been green on run `30184253819`.
+3. **`test_module_is_inert_when_the_guarantee_does_not_hold`** — if the
+   property is absent, nothing may be pinned.
+
+`test_pinned_directory_cannot_be_renamed_or_removed` was **split**, because
+the rename failing first meant CI never reported the rmdir result.
+Deletion and rename are enforced by different mechanisms on Windows — an open
+handle blocks directory deletion outright, while rename goes through the
+share-access check — so one holding tells you nothing about the other.
+`test_rename_is_allowed_again_once_the_pin_is_released` adds the control
+experiment as a test in its own right.
+
+### Mutation results (Residual A, round 2)
+
+9 mutants, **all killed** — one after a test was added:
+
+| # | Mutation | Result |
+|---|---|---|
+| W1 | regress `PIN_DESIRED_ACCESS` to attributes-only (the original bug) | killed |
+| W2 | unblocked rename reported as `HELD` | killed |
+| W3 | control experiment dropped | killed |
+| W4 | directory not restored after an unblocked rename | killed |
+| W5 | `_probe` returns available regardless of the verdict | **survived** → see below → killed |
+| W5b | `INCONCLUSIVE` treated as available | killed |
+| W6 | pin never released during verification | killed |
+| W7 | no-backend short circuit removed | killed |
+| W8 | probe result not cached (probe runs per call) | killed |
+
+**W5 is the instructive one and it is the same shape as the original defect.**
+Making `_probe` return `(True, reason)` unconditionally left the suite green,
+because on a POSIX host the function returns early at the no-backend branch
+and never reaches that line — so the mapping from *measured verdict* to
+*advertised availability* was reachable only on Windows. A module claiming
+protection it does not have, with no test able to catch it, is exactly what
+this round is fixing. `ProbeVerdictMappingTest` now drives `_probe` with an
+injected backend and a stubbed verifier, so all four verdicts and the caching
+are exercised on every platform.
+
+### Is the guarantee achievable?
+
+**Not yet proven, and deliberately not asserted.** The evidence says the
+observed failure has a specific, documented cause that the fix addresses, and
+the fix is the standard access mask for a directory handle. But the previous
+round also had a documented rationale and was wrong, so the honest position is:
+*the module now measures the property instead of assuming it, and disables
+itself if the property is absent.*
+
+Two outcomes are possible on the next run, and both are acceptable deliverables:
+
+* **`AVAILABLE (verified: ...)` and the guarantee test green** — the hardening
+  works and the branch is done.
+* **`UNAVAILABLE (kernel32 present, but the kernel did NOT block a rename ...)`
+  with `test_guarantee_holds_on_this_runner` red** — then renaming a directory
+  does not take delete access on the directory object, the coordinator's
+  fourth hypothesis is correct, the design (not the implementation) is wrong,
+  and the module should be reduced to what it can honestly claim: a
+  handle-derived reparse-point check, which is a real but much smaller
+  improvement over the path-based `lstat`. The report will record that as a
+  well-evidenced negative result.
+
+What must NOT happen is a green run with the property absent, and that is now
+structurally impossible: the probe would have to report AVAILABLE while the
+measurement said otherwise, and `test_probe_agrees_with_the_measured_guarantee`
+fails on exactly that.
+
+### What CI must confirm next
+
+1. The capability line's verdict — **read this first**, it is now the answer,
+   not a plumbing status.
+2. `test_guarantee_holds_on_this_runner` — the property itself.
+3. `test_probe_agrees_with_the_measured_guarantee` — that the module is not
+   lying in either direction.
+4. `test_pinned_directory_cannot_be_removed` — never actually reported before,
+   because the old combined test died at the rename first.
