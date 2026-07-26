@@ -229,17 +229,6 @@ UNSUPPORTED_REASONS = {
         "implements it in src/core/analyzer-flow.ts; the vendored rule file "
         "does not carry the algorithm, so evaluating it here means porting "
         "that analyzer rather than adapting a predicate",
-    "copy-paste-blindness": "reachable but not implemented: needs aiCode.loc "
-        "per request. Upstream derives it by pulling generated code out of "
-        "tool arguments (file_text/new_str/content) and counting lines "
-        "(parser-vscode-cli.ts). telemetry.py captures the tool calls and "
-        "paths but not the code bodies -- doing so would put whole file "
-        "contents in memory for every indexed session",
-    "low-markdown-ratio": "reachable but not implemented: same aiCode.loc "
-        "dependency as copy-paste-blindness, plus per-language attribution",
-    "speed-accept": "reachable but not implemented: same aiCode.loc "
-        "dependency, plus inter-request acceptance timing",
-    "vibe-coding": "reachable but not implemented: same aiCode.loc dependency",
     "no-spec-driven-development": "reachable but not implemented: needs "
         "first(requests).referencedFiles (now captured) AND .agentMode "
         "(constant 'agent' for both CLIs). Two of the rule's three OR "
@@ -257,9 +246,6 @@ UNSUPPORTED_REASONS = {
         "agentName, skillsUsed, toolsUsed (mcp_ prefix) and referencedFiles "
         "-- all now captured -- PLUS customInstructions, which is not "
         "available outside the IDE. Blocked on that one field",
-    "no-language-exploration": "reachable but not implemented: needs a "
-        "per-request programming-language attribution, which upstream "
-        "derives from aiCode blocks -- same dependency as vibe-coding",
     "auto-avoidance": "reachable but not implemented: modelId is now "
         "captured, but the predicate also needs modelTier(models.topModel) "
         "and a countWhere(...) regex over model ids -- the same maintained "
@@ -780,6 +766,24 @@ def _pin(rule, match=None, check=None):
     return d
 
 
+def _as_datetime(value):
+    """A record `timestamp` (ISO-8601 string, both harnesses) as an aware
+    UTC datetime, or None. Goes through the shared isotime parser rather
+    than a second hand-rolled one -- duplicated timestamp parsing is a
+    documented defect class in this repo."""
+    epoch = parse_iso(value) if isinstance(value, str) else None
+    if epoch is None:
+        return None
+    return datetime.fromtimestamp(epoch, tz=timezone.utc)
+
+
+def _epoch_ms(value):
+    """Milliseconds since the epoch, matching upstream's numeric timestamps.
+    None when unparsable -- never 0, which would make every gap look huge."""
+    epoch = parse_iso(value) if isinstance(value, str) else None
+    return None if epoch is None else epoch * 1000
+
+
 def _thresholds(rule, *keys):
     t = rule["thresholds"]
     for key in keys:
@@ -920,7 +924,225 @@ def eval_excessive_file_context(rule, tel):
     return outliers
 
 
+# ---------------------------------------------------------------------------
+# The aiCode.loc cluster.
+#
+# `aiCode` is now extracted by lib/telemetry.py (see its aiCode section for
+# what upstream actually counts and the evidence it was measured against).
+# These five rules were previously listed as "reachable but not implemented"
+# with the cost "holding whole file bodies in memory". That cost was real for
+# upstream's join-then-scan approach and is avoided here by scanning each
+# chunk as it streams off the event log; the rules themselves needed no new
+# data source beyond that.
+#
+# Each helper below reimplements one upstream DSL builtin from
+# src/core/dsl/interpreter.ts. They are transcriptions, not reinterpretations
+# -- the function name and the behaviour it copies are named at each one so a
+# future reader can diff them against upstream directly.
+# ---------------------------------------------------------------------------
+
+# computeLangExploration's IGNORE set, verbatim: markup and data formats are
+# not "languages you explored".
+LANG_EXPLORATION_IGNORE = {
+    "text", "plaintext", "unknown", "json", "yaml", "toml", "xml", "csv",
+    "ini", "env", "markdown", "md",
+}
+
+# vibe-coding's spec-shaped first-prompt patterns, from its own detect block.
+VIBE_SPEC_PATTERNS = (
+    re.compile(r"^[-*]\s", re.M),
+    re.compile(r"^\d+[.)]\s", re.M),
+    re.compile(r"^#+\s", re.M),
+    re.compile(r"(?i)\b(requirements?|spec|acceptance criteria|user stories?|"
+               r"given|when|then|should|must)\b"),
+)
+
+COPY_PASTE_REFINEMENT_RE = re.compile(
+    r"(?i)\b(change|fix|modify|update|refactor|wrong|instead|actually|revert|"
+    r"redo|try again)\b")
+
+
+def _sessions_with_aicode(tel, rule_id):
+    """Sessions whose requests actually carry an `aiCode` list.
+
+    A session list built from records with no aiCode key would evaluate every
+    LoC threshold against 0 and report a clean bill of health -- the exact
+    always-false-rule this branch forbids. Raising here makes the rule skip
+    loudly instead.
+    """
+    turns = _require_records(
+        telemetry.requests_with(tel.turns, "aiCode"), rule_id, "aiCode")
+    return telemetry.build_sessions(turns)
+
+
+def eval_vibe_coding(rule, tel):
+    _pin(rule, check="count >= thresholds.minSessions")
+    t = _thresholds(rule, "minAiLoc", "maxUserPrompts", "minSessions")
+    sessions = _sessions_with_aicode(tel, rule["id"])
+    matched = 0
+    for session in sessions:
+        if telemetry.session_ai_loc(session) < t["minAiLoc"]:
+            continue
+        if session["requestCount"] > t["maxUserPrompts"]:
+            continue
+        first = session["requests"][0].get("messageText") or ""
+        if any(pattern.search(first) for pattern in VIBE_SPEC_PATTERNS):
+            continue
+        matched += 1
+    if not matched >= t["minSessions"]:
+        return None
+    return matched
+
+
+def eval_copy_paste_blindness(rule, tel):
+    _pin(rule, check="count >= thresholds.minSessions")
+    t = _thresholds(rule, "minAiLoc", "minSessions")
+    sessions = _sessions_with_aicode(tel, rule["id"])
+    matched = 0
+    for session in sessions:
+        if session["requestCount"] < 2:
+            continue
+        if telemetry.session_ai_loc(session) < t["minAiLoc"]:
+            continue
+        # slice(requests, 1): everything AFTER the first request. A session
+        # is only "no follow-up refinement" if none of the later prompts asks
+        # for a change AND none of them edited a file.
+        rest = session["requests"][1:]
+        refined = any(
+            COPY_PASTE_REFINEMENT_RE.search(r.get("messageText") or "") for r in rest)
+        edited = any(len(r.get("editedFiles") or []) > 0 for r in rest)
+        if refined or edited:
+            continue
+        matched += 1
+    if not matched >= t["minSessions"]:
+        return None
+    return matched
+
+
+def eval_speed_accept(rule, tel):
+    """Transcribes computeSpeedAcceptPairs (dsl/interpreter.ts:374)."""
+    _pin(rule, match="requestCount >= 2", check="pairs.count >= thresholds.minOccurrences")
+    t = _thresholds(rule, "minAiLoc", "maxGapMs", "minOccurrences")
+    turns = _require_records(
+        telemetry.requests_with(tel.turns, "aiCode", "timestamp", "totalElapsed"),
+        rule["id"], "aiCode/timestamp/totalElapsed")
+    count = 0
+    for session in telemetry.build_sessions(turns):
+        requests = session["requests"]
+        if len(requests) < 2:
+            continue
+        for prev, nxt in zip(requests, requests[1:]):
+            if telemetry.ai_loc(prev) < t["minAiLoc"]:
+                continue
+            prev_start = _epoch_ms(prev.get("timestamp"))
+            next_start = _epoch_ms(nxt.get("timestamp"))
+            if prev_start is None or next_start is None:
+                continue
+            prev_end = prev_start + (prev.get("totalElapsed") or 0)
+            gap = next_start - prev_end
+            # Upstream requires gap >= 0: a negative gap means overlapping or
+            # out-of-order timestamps, which is bad data, not a fast human.
+            if 0 <= gap <= t["maxGapMs"]:
+                count += 1
+    if not count >= t["minOccurrences"]:
+        return None
+    return count
+
+
+def eval_low_markdown_ratio(rule, tel):
+    """Transcribes computeMdRatio (dsl/interpreter.ts:518).
+
+    NOTE the threshold asymmetry, which is upstream's and is preserved
+    deliberately: `isLow` hardcodes `ratio < 0.05` rather than reading
+    thresholds.markdownRatio, even though that threshold exists and holds the
+    same 0.05. Reading the threshold instead would silently change behaviour
+    the day upstream retunes one and not the other.
+    """
+    _pin(rule, match="true", check="md.lowCount >= thresholds.minWorkspaces")
+    t = _thresholds(rule, "minTotalLoc", "minWorkspaces")
+    sessions = _sessions_with_aicode(tel, rule["id"])
+    per_workspace = {}
+    for session in sessions:
+        stats = per_workspace.setdefault(session["workspaceName"], {"md": 0, "code": 0})
+        for record in session["requests"]:
+            for block in record.get("aiCode") or []:
+                loc = block.get("loc") or 0
+                if (block.get("language") or "") in ("markdown", "md"):
+                    stats["md"] += loc
+                else:
+                    stats["code"] += loc
+    low = 0
+    for stats in per_workspace.values():
+        total = stats["md"] + stats["code"]
+        if total <= 0:
+            continue
+        if total >= t["minTotalLoc"] and (stats["md"] / total) < 0.05:
+            low += 1
+    if not low >= t["minWorkspaces"]:
+        return None
+    return low
+
+
+def eval_no_language_exploration(rule, tel):
+    """Transcribes computeLangExploration (dsl/interpreter.ts:476).
+
+    ADAPTATION, stated because it changes the numerator: upstream unions
+    `aiCode` and `userCode` languages per week. This project has no
+    `userCode` -- neither harness's log distinguishes a fenced block the USER
+    pasted from the surrounding prompt text in a way upstream's own CLI
+    parser uses either (parser-vscode-cli.ts never sets userCode). So this
+    counts aiCode languages only, which can only make "no new language" MORE
+    likely to fire. Reported here rather than buried.
+
+    Upstream's week key is reproduced verbatim, bug and all:
+        `${y}-W${ceil((dayOfMonth + firstWeekdayOfMonth) / 7)}`
+    That is a week-of-MONTH number (1-6) concatenated with the year, so weeks
+    from different months collide. Reimplementing it "correctly" as an ISO
+    week would make this project's answer differ from upstream's for the same
+    input, which is worse than reproducing a quirk we can name.
+    """
+    _pin(rule, match="timestamp > 0",
+         check="lang.recentNew == 0 AND lang.totalWeeks >= thresholds.minWeeks")
+    t = _thresholds(rule, "minWeeks")
+    turns = _require_records(
+        telemetry.requests_with(tel.turns, "aiCode", "timestamp"),
+        rule["id"], "aiCode/timestamp")
+    week_langs = {}
+    for record in turns:
+        moment = _as_datetime(record.get("timestamp"))
+        if moment is None:
+            continue
+        first_weekday = (datetime(moment.year, moment.month, 1).weekday() + 1) % 7
+        week_index = -(-(moment.day + first_weekday) // 7)  # ceil division
+        key = "{}-W{:02d}".format(moment.year, week_index)
+        bucket = week_langs.setdefault(key, set())
+        for block in record.get("aiCode") or []:
+            lang = (block.get("language") or "").lower()
+            if lang and lang not in LANG_EXPLORATION_IGNORE:
+                bucket.add(lang)
+    weeks = sorted(week_langs)
+    if not weeks:
+        return None
+    seen = set()
+    last_new = 0
+    for index, week in enumerate(weeks):
+        new_here = week_langs[week] - seen
+        if new_here:
+            seen |= new_here
+            last_new = index
+    weeks_since_new = len(weeks) - 1 - last_new
+    recent_new = 1 if weeks_since_new == 0 else 0
+    if not (recent_new == 0 and len(weeks) >= t["minWeeks"]):
+        return None
+    return weeks_since_new
+
+
 TELEMETRY_ADAPTERS = {
+    "vibe-coding": eval_vibe_coding,
+    "copy-paste-blindness": eval_copy_paste_blindness,
+    "speed-accept": eval_speed_accept,
+    "low-markdown-ratio": eval_low_markdown_ratio,
+    "no-language-exploration": eval_no_language_exploration,
     "excessive-file-context": eval_excessive_file_context,
     "model-overreliance": eval_model_overreliance,
     "reasoning-effort-overuse": eval_reasoning_effort_overuse,

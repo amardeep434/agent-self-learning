@@ -37,6 +37,19 @@ SCRIPT = REPO / "scripts" / "coach-rules-eval.py"
 SCHEMA = REPO / "schema" / "session-search-schema.sql"
 VENDOR_RULES = REPO / "vendor" / "coach-rules"
 
+# The suite drives the evaluator as a SUBPROCESS almost everywhere, which is
+# the right default -- it exercises the real CLI contract. This in-process
+# handle exists only for assertions the subprocess boundary destroys: main()
+# emits a signal only when `count is not None and count > 0`, so a return of
+# None and a return of 0 are indistinguishable from outside. See
+# NoLanguageExplorationUnitTest.
+_EVAL_SPEC = _ilu.spec_from_file_location("coach_rules_eval_inproc", str(SCRIPT))
+CRE = _ilu.module_from_spec(_EVAL_SPEC)
+sys.path.insert(0, str(REPO / "scripts" / "lib"))
+_EVAL_SPEC.loader.exec_module(CRE)
+parse_rule = CRE.parse_rule
+eval_no_language_exploration = CRE.eval_no_language_exploration
+
 NOW = "2026-07-01T12:00:00+00:00"
 
 RULE_MEGA = """---
@@ -705,6 +718,274 @@ class TelemetryDetectPinTest(CoachRulesEvalBase):
         self.assertEqual([s for s in signals if s["id"] == "high-cancellation"], [])
 
 
+class AiCodeAdapterTest(CoachRulesEvalBase):
+    """Fire/no-fire pairs for the five rules that need aiCode.loc.
+
+    Fixtures are built with the same builders test-telemetry.py uses, whose
+    event shapes were copied from the real stores, and the code bodies are
+    put where the harness really puts them (`edit`'s new_str / `create`'s
+    file_text, plus prose fences in assistant.message content). A rule that
+    only fires against a hand-shaped record would prove nothing.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = Path(self.tmp) / "search.db"
+        conn = make_db(str(self.db))
+        insert_session(conn, "s0", 1)
+        conn.commit()
+        conn.close()
+        self.store = Path(self.tmp) / "store"
+        (self.store / "session-state").mkdir(parents=True)
+
+    def fired(self, rule_id):
+        signals, stderr = self.run_eval(VENDOR_RULES, self.db, telemetry_home=self.store)
+        self.assertNotIn(
+            "skipping {} ".format(rule_id), stderr,
+            "{} skipped when it should have evaluated:\n{}".format(rule_id, stderr))
+        return [s for s in signals if s["id"] == rule_id]
+
+    @staticmethod
+    def _edit(path, lines):
+        return ("edit", {"path": path, "old_str": "x",
+                         "new_str": "\n".join("line{}".format(i) for i in range(lines))})
+
+    def _session(self, session_id, turns):
+        events = []
+        for turn in turns:
+            events.extend(turn)
+        TFIX.copilot_session(str(self.store), session_id, events)
+
+    def _turn(self, turn_id, user, edits=(), start=0, end=5):
+        return TFIX.simple_turn(turn_id, user=user, tools=edits, start=start, end=end)
+
+    @staticmethod
+    def _restamp(events, start_s, end_s):
+        """Rewrite a turn's timestamps to VALID ISO at arbitrary offsets.
+
+        TFIX._ts() only formats a seconds field, so any offset above 59
+        produces "22:40:200" -- which parses to None, which makes every
+        timestamp-dependent predicate silently unreachable. Found by mutation
+        testing: deleting speed-accept's gap check AND its LoC floor both
+        left the suite green, because no fixture had a parseable timestamp
+        pair in the first place.
+        """
+        def stamp(offset):
+            return "2026-07-25T{:02d}:{:02d}:{:02d}.000Z".format(
+                22 + offset // 3600, (offset // 60) % 60, offset % 60)
+        for event in events:
+            etype = event["type"]
+            if etype in ("assistant.turn_end",):
+                event["timestamp"] = stamp(end_s)
+            else:
+                event["timestamp"] = stamp(start_s)
+        return events
+
+    def _timed_turn(self, turn_id, user, edits=(), start=0, end=5):
+        return self._restamp(
+            TFIX.simple_turn(turn_id, user=user, tools=edits), start, end)
+
+    # -- vibe-coding -------------------------------------------------------
+    def test_vibe_coding_fires_on_big_output_from_a_bare_prompt(self):
+        for index in range(3):
+            self._session("s{}".format(index), [
+                self._turn("0", "make it work", [self._edit("/r/a.py", 150)]),
+            ])
+        self.assertTrue(self.fired("vibe-coding"))
+
+    def test_vibe_coding_silent_when_the_first_prompt_is_spec_shaped(self):
+        """The NOT(...) branch is the whole point of the rule -- a session
+        that opened with a spec is not vibe coding however much code came
+        out. Without this case the rule would look like a pure LoC alarm."""
+        for index in range(3):
+            self._session("s{}".format(index), [
+                self._turn("0", "Requirements:\n- parse the file",
+                           [self._edit("/r/a.py", 150)]),
+            ])
+        self.assertEqual(self.fired("vibe-coding"), [])
+
+    def test_vibe_coding_silent_below_the_loc_threshold(self):
+        for index in range(3):
+            self._session("s{}".format(index), [
+                self._turn("0", "make it work", [self._edit("/r/a.py", 5)]),
+            ])
+        self.assertEqual(self.fired("vibe-coding"), [])
+
+    # -- copy-paste-blindness ---------------------------------------------
+    def test_copy_paste_blindness_fires_without_follow_up_refinement(self):
+        for index in range(3):
+            self._session("s{}".format(index), [
+                self._turn("0", "write the parser", [self._edit("/r/a.py", 80)]),
+                self._turn("1", "thanks", start=6, end=8),
+            ])
+        self.assertTrue(self.fired("copy-paste-blindness"))
+
+    def test_copy_paste_blindness_silent_when_a_later_prompt_asks_for_changes(self):
+        for index in range(3):
+            self._session("s{}".format(index), [
+                self._turn("0", "write the parser", [self._edit("/r/a.py", 80)]),
+                self._turn("1", "actually fix the edge case", start=6, end=8),
+            ])
+        self.assertEqual(self.fired("copy-paste-blindness"), [])
+
+    def test_copy_paste_blindness_silent_when_a_later_request_edits_a_file(self):
+        for index in range(3):
+            self._session("s{}".format(index), [
+                self._turn("0", "write the parser", [self._edit("/r/a.py", 80)]),
+                self._turn("1", "ok", [self._edit("/r/a.py", 2)], start=6, end=8),
+            ])
+        self.assertEqual(self.fired("copy-paste-blindness"), [])
+
+    # -- speed-accept ------------------------------------------------------
+    def _speed_session(self, spacing, lines):
+        turns = []
+        for index in range(7):
+            start = index * spacing
+            turns.append(self._timed_turn(str(index), "go",
+                                          [self._edit("/r/a.py", lines)],
+                                          start=start, end=start + 5))
+        self._session("s0", turns)
+
+    def test_speed_accept_fires_on_instant_follow_ups_after_big_output(self):
+        self._speed_session(spacing=6, lines=40)   # 1s gap, 40 LoC
+        self.assertTrue(self.fired("speed-accept"))
+
+    def test_speed_accept_silent_when_the_reader_takes_time(self):
+        """Same LoC, same request count -- only the gap changes. Pins that
+        the timing half of the predicate is live rather than decorative."""
+        self._speed_session(spacing=300, lines=40)  # 295s gap
+        self.assertEqual(self.fired("speed-accept"), [])
+
+    def test_speed_accept_silent_on_out_of_order_timestamps(self):
+        """Upstream requires `gap >= 0`. A negative gap means overlapping or
+        reordered events -- bad data, not a fast human -- and treating it as
+        a hit would invent speed-accept occurrences out of clock skew."""
+        turns = []
+        for index in range(7):
+            start = 300 - index * 40
+            turns.append(self._timed_turn(str(index), "go",
+                                          [self._edit("/r/a.py", 40)],
+                                          start=start, end=start + 5))
+        self._session("s0", turns)
+        self.assertEqual(self.fired("speed-accept"), [])
+
+    def test_speed_accept_silent_below_the_loc_floor(self):
+        """Same instant gaps -- only the LoC changes. Pins the other half."""
+        self._speed_session(spacing=6, lines=3)     # 1s gap, 3 LoC
+        self.assertEqual(self.fired("speed-accept"), [])
+
+    # -- low-markdown-ratio ------------------------------------------------
+    def test_low_markdown_ratio_fires_on_code_with_no_docs(self):
+        events = [TFIX.ev("session.start",
+                          {"sessionId": "s0", "context": {"gitRoot": "/repo"}},
+                          "2026-07-25T22:40:00.000Z")]
+        events.extend(self._turn("0", "build", [self._edit("/repo/a.py", 300)]))
+        TFIX.copilot_session(str(self.store), "s0", events)
+        self.assertTrue(self.fired("low-markdown-ratio"))
+
+    def test_low_markdown_ratio_silent_when_docs_accompany_the_code(self):
+        events = [TFIX.ev("session.start",
+                          {"sessionId": "s0", "context": {"gitRoot": "/repo"}},
+                          "2026-07-25T22:40:00.000Z")]
+        events.extend(self._turn("0", "build", [
+            self._edit("/repo/a.py", 100), self._edit("/repo/README.md", 100)]))
+        TFIX.copilot_session(str(self.store), "s0", events)
+        self.assertEqual(self.fired("low-markdown-ratio"), [])
+
+    def test_low_markdown_ratio_silent_below_the_total_loc_floor(self):
+        events = [TFIX.ev("session.start",
+                          {"sessionId": "s0", "context": {"gitRoot": "/repo"}},
+                          "2026-07-25T22:40:00.000Z")]
+        events.extend(self._turn("0", "build", [self._edit("/repo/a.py", 10)]))
+        TFIX.copilot_session(str(self.store), "s0", events)
+        self.assertEqual(self.fired("low-markdown-ratio"), [])
+
+    # -- no-language-exploration -------------------------------------------
+    def _week_session(self, session_id, day, language_path):
+        """One turn stamped in a chosen week-of-month bucket."""
+        stamp = "2026-07-{:02d}T12:00:00.000Z".format(day)
+        events = TFIX.simple_turn("0", user="go", tools=[self._edit(language_path, 5)])
+        for event in events:
+            event["timestamp"] = stamp
+        TFIX.copilot_session(str(self.store), session_id, events)
+
+    def test_no_language_exploration_fires_when_no_new_language_appears(self):
+        for index, day in enumerate((1, 8, 15, 22, 28)):
+            self._week_session("s{}".format(index), day, "/repo/a.py")
+        self.assertTrue(self.fired("no-language-exploration"))
+
+    def test_no_language_exploration_silent_when_a_new_language_appears_late(self):
+        for index, day in enumerate((1, 8, 15, 22)):
+            self._week_session("s{}".format(index), day, "/repo/a.py")
+        self._week_session("s9", 28, "/repo/a.rs")
+        self.assertEqual(self.fired("no-language-exploration"), [])
+
+    def test_no_language_exploration_ignores_markup_and_data_formats(self):
+        """Upstream's IGNORE set: a week of nothing but JSON and markdown is
+        not language exploration. Without it the rule would go silent for
+        anyone who writes config files."""
+        for index, day in enumerate((1, 8, 15, 22)):
+            self._week_session("s{}".format(index), day, "/repo/a.py")
+        self._week_session("s9", 28, "/repo/data.json")
+        self.assertTrue(self.fired("no-language-exploration"))
+
+
+class NoLanguageExplorationUnitTest(unittest.TestCase):
+    """Calls the adapter directly, because the end-to-end path cannot
+    distinguish "returned None" from "returned 0".
+
+    main() emits a signal only when `count is not None and count > 0`. The
+    firing return value here is `weeksSinceNew`, which is 0 in exactly the
+    case where the rule must NOT fire -- so a mutation deleting the
+    `recentNew == 0` condition still produced no signal and survived the
+    end-to-end tests. Asserting the return value itself is what kills it.
+    """
+
+    class _Tel:
+        def __init__(self, turns):
+            self.turns = turns
+            self.api_calls = []
+
+    @staticmethod
+    def _req(day, language):
+        return {"source": "copilot", "session_id": "s{}".format(day),
+                "timestamp": "2026-07-{:02d}T12:00:00.000Z".format(day),
+                "aiCode": [{"language": language, "loc": 5}]}
+
+    def _rule(self):
+        return parse_rule(VENDOR_RULES / "no-language-exploration.md")
+
+    def _eval(self, requests):
+        return eval_no_language_exploration(self._rule(), self._Tel(requests))
+
+    def test_returns_weeks_since_new_when_nothing_new_appeared(self):
+        result = self._eval([self._req(day, "python") for day in (1, 8, 15, 22, 28)])
+        self.assertEqual(result, 4)
+
+    def test_returns_none_when_a_new_language_appeared_in_the_latest_week(self):
+        requests = [self._req(day, "python") for day in (1, 8, 15, 22)]
+        requests.append(self._req(28, "rust"))
+        self.assertIsNone(self._eval(requests))
+
+    def test_new_language_one_week_ago_still_fires_with_a_nonzero_count(self):
+        requests = [self._req(day, "python") for day in (1, 8, 15)]
+        requests.append(self._req(22, "rust"))
+        requests.append(self._req(28, "python"))
+        self.assertEqual(self._eval(requests), 1)
+
+    def test_returns_none_below_the_minimum_week_count(self):
+        self.assertIsNone(self._eval([self._req(day, "python") for day in (1, 8)]))
+
+    def test_ignored_languages_never_count_as_exploration(self):
+        requests = [self._req(day, "python") for day in (1, 8, 15, 22)]
+        requests.append(self._req(28, "json"))
+        self.assertEqual(self._eval(requests), 4)
+
+    def test_empty_selection_raises_rather_than_scoring_zero(self):
+        with self.assertRaises(ValueError):
+            self._eval([])
+
+
 class TelemetryAbsentSkipsLoudlyTest(CoachRulesEvalBase):
     """With no harness store, every telemetry-backed rule must SKIP, naming
     the missing source -- never evaluate to a clean bill of health.
@@ -718,6 +999,8 @@ class TelemetryAbsentSkipsLoudlyTest(CoachRulesEvalBase):
         "model-overreliance", "reasoning-effort-overuse", "cache-hit-starvation",
         "slow-responses", "verbose-output", "high-cancellation",
         "runaway-agent-loops", "excessive-file-context",
+        "vibe-coding", "copy-paste-blindness", "speed-accept",
+        "low-markdown-ratio", "no-language-exploration",
     ]
 
     def test_all_telemetry_rules_skip_with_a_source_naming_reason(self):
@@ -800,12 +1083,12 @@ class CoverageAssertionTest(CoachRulesEvalBase):
     proving it can fire -- update both together, deliberately."""
 
     # 11 from the project's own index (generic engine + REQUEST_ADAPTERS +
-    # the two bespoke session adapters). The 8 TELEMETRY_ADAPTERS are NOT
+    # the two bespoke session adapters). The 13 TELEMETRY_ADAPTERS are NOT
     # counted here: this test runs with no harness store, where they must
     # skip. TelemetryAdapterTest covers them with a store present, and
     # TelemetryAbsentSkipsLoudlyTest pins that they skip without one.
     EXPECTED_EVALUATED = 11
-    EXPECTED_TELEMETRY_ADAPTERS = 8
+    EXPECTED_TELEMETRY_ADAPTERS = 13
     EXPECTED_TOTAL_RULES = 45
 
     def test_coverage_count_pinned(self):

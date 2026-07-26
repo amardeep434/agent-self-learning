@@ -380,6 +380,238 @@ class ClaudeTranscriptTest(unittest.TestCase):
         self.assertEqual(turn["messageText"], "real")
 
 
+class ExtractCodeBlocksTest(unittest.TestCase):
+    """The pure extractor, against upstream's CODE_BLOCK_RE semantics."""
+
+    def test_language_and_line_count(self):
+        blocks = telemetry.extract_code_blocks("prose\n```python\na\nb\nc\n```\nmore")
+        self.assertEqual(blocks, [{"language": "python", "loc": 3}])
+
+    def test_language_aliases_are_applied(self):
+        """`py` and `python` must not count as two languages, and `md` and
+        `markdown` must land in the same bucket -- real data on this machine
+        contains both spellings, and low-markdown-ratio's numerator depends
+        on it."""
+        blocks = telemetry.extract_code_blocks("```py\nx\n```\n```md\ny\n```\n```ts\nz\n```")
+        self.assertEqual([b["language"] for b in blocks], ["python", "markdown", "typescript"])
+
+    def test_missing_info_string_is_unknown(self):
+        self.assertEqual(telemetry.extract_code_blocks("```\na\n```"),
+                         [{"language": "unknown", "loc": 1}])
+
+    def test_empty_body_is_zero_loc_but_still_a_block(self):
+        """Upstream emits the block with loc 0; aiCode.length is itself
+        tested by analyzer-patterns, so dropping it would diverge."""
+        self.assertEqual(telemetry.extract_code_blocks("```py\n\n```"),
+                         [{"language": "python", "loc": 0}])
+
+    def test_multiple_blocks_are_all_returned(self):
+        blocks = telemetry.extract_code_blocks("```py\na\n```\ntext\n```sh\nb\nc\n```")
+        self.assertEqual([b["loc"] for b in blocks], [1, 2])
+
+    def test_unterminated_fence_yields_nothing(self):
+        self.assertEqual(telemetry.extract_code_blocks("```py\na\nb"), [])
+
+
+class CodeScanBudgetTest(unittest.TestCase):
+    def test_budget_matches_upstreams_max_code_scan_chars(self):
+        self.assertEqual(telemetry.MAX_CODE_SCAN_CHARS, 128000)
+
+    def test_content_past_the_budget_is_not_scanned(self):
+        """Upstream slices responseText to 128k before extracting. Without
+        the same cap, one enormous generated file would dominate every
+        LoC-based rule and our answers would diverge from upstream's for
+        identical input."""
+        scan = telemetry._CodeScan()
+        scan.feed("```py\na\n```")
+        scan.feed("x" * telemetry.MAX_CODE_SCAN_CHARS)
+        scan.feed("```py\nb\nc\n```")
+        self.assertEqual(scan.blocks, [{"language": "python", "loc": 1}])
+
+    def test_separator_length_counts_against_the_budget(self):
+        """Sized so the fence fits EXACTLY when the separator is free and is
+        truncated when it is charged -- otherwise the assertion passes for
+        the wrong reason (mutation-found: dropping the separator charge left
+        this green)."""
+        fence = "```py\nz\n```"
+        scan = telemetry._CodeScan()
+        scan.feed("a" * (telemetry.MAX_CODE_SCAN_CHARS - len(fence)))
+        scan.feed(fence, separator_len=2)
+        self.assertEqual(scan.blocks, [])
+
+        loose = telemetry._CodeScan()
+        loose.feed("a" * (telemetry.MAX_CODE_SCAN_CHARS - len(fence)))
+        loose.feed(fence, separator_len=0)
+        self.assertEqual(loose.blocks, [{"language": "python", "loc": 1}])
+
+
+class CodeFenceTest(unittest.TestCase):
+    def test_extension_becomes_the_language(self):
+        self.assertEqual(telemetry._code_fence("/a/b/main.py", "x\ny"),
+                         "```py\nx\ny\n```")
+
+    def test_path_without_a_dot_is_unknown(self):
+        self.assertEqual(telemetry._code_fence("Makefile", "x"), "```unknown\nx\n```")
+
+    def test_missing_path_or_code_produces_nothing(self):
+        """Upstream only pushes when BOTH are present; synthesising a fence
+        from a pathless write would attribute lines to language 'unknown'
+        that upstream never counts at all."""
+        self.assertIsNone(telemetry._code_fence(None, "x"))
+        self.assertIsNone(telemetry._code_fence("a.py", None))
+        self.assertIsNone(telemetry._code_fence("a.py", ""))
+
+    def test_arg_key_precedence_matches_upstream(self):
+        args = {"new_str": "n", "file_text": "f", "content": "c"}
+        self.assertEqual(telemetry._first_str(args, telemetry.COPILOT_CODE_ARG_KEYS), "f")
+        self.assertEqual(telemetry._first_str({"new_str": "n", "content": "c"},
+                                              telemetry.CLAUDE_CODE_ARG_KEYS), "c")
+        self.assertIsNone(telemetry._first_str({"path": "a.py"},
+                                               telemetry.COPILOT_CODE_ARG_KEYS))
+
+
+class CopilotAiCodeTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.env = {"SL_COPILOT_HOME": self.tmp}
+
+    def test_edit_tool_new_str_becomes_ai_code(self):
+        events = simple_turn("0", user="write it", tools=[
+            ("edit", {"path": "/repo/app.py", "old_str": "old", "new_str": "a\nb\nc"}),
+        ])
+        copilot_session(self.tmp, "s1", events)
+        (turn,) = telemetry.build_turn_requests(self.env)
+        self.assertEqual(turn["aiCode"], [{"language": "python", "loc": 3}])
+        self.assertEqual(telemetry.ai_loc(turn), 3)
+
+    def test_create_tool_file_text_becomes_ai_code(self):
+        events = simple_turn("0", user="new file", tools=[
+            ("create", {"path": "/repo/README.md", "file_text": "# hi\ntext"}),
+        ])
+        copilot_session(self.tmp, "s1", events)
+        (turn,) = telemetry.build_turn_requests(self.env)
+        self.assertEqual(turn["aiCode"], [{"language": "markdown", "loc": 2}])
+
+    def test_old_str_is_never_counted(self):
+        """aiCode means lines PRODUCED, not diff size. Counting old_str would
+        make every edit look twice as large and would double-count a pure
+        deletion as authorship."""
+        events = simple_turn("0", user="x", tools=[
+            ("edit", {"path": "/repo/app.py",
+                      "old_str": "1\n2\n3\n4\n5\n6\n7\n8\n9\n10",
+                      "new_str": "a"}),
+        ])
+        copilot_session(self.tmp, "s1", events)
+        (turn,) = telemetry.build_turn_requests(self.env)
+        self.assertEqual(telemetry.ai_loc(turn), 1)
+
+    def test_read_only_tools_contribute_no_ai_code(self):
+        events = simple_turn("0", user="x", tools=[
+            ("view", {"path": "/repo/app.py"}),
+            ("bash", {"command": "ls"}),
+        ])
+        copilot_session(self.tmp, "s1", events)
+        (turn,) = telemetry.build_turn_requests(self.env)
+        self.assertEqual(turn["aiCode"], [])
+
+    def test_prose_fences_in_assistant_content_count(self):
+        events = simple_turn("0", user="explain")
+        for event in events:
+            if event["type"] == "assistant.message":
+                event["data"]["content"] = "Here:\n```bash\necho hi\n```\n"
+        copilot_session(self.tmp, "s1", events)
+        (turn,) = telemetry.build_turn_requests(self.env)
+        self.assertEqual(turn["aiCode"], [{"language": "bash", "loc": 1}])
+
+    def test_workspace_comes_from_session_start_git_root(self):
+        events = [ev("session.start",
+                     {"sessionId": "s1",
+                      "context": {"cwd": "/repo/sub", "gitRoot": "/repo"}},
+                     "2026-07-25T22:40:00.000Z")]
+        events += simple_turn("0", user="x")
+        copilot_session(self.tmp, "s1", events)
+        (turn,) = telemetry.build_turn_requests(self.env)
+        self.assertEqual(turn["workspaceName"], "/repo")
+
+
+class ClaudeAiCodeTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.dir = Path(self.tmp) / "projects" / "-repo"
+        self.dir.mkdir(parents=True)
+        self.env = {"CLAUDE_CONFIG_DIR": self.tmp, "SL_COPILOT_HOME": "/nope"}
+
+    def write(self, lines):
+        with (self.dir / "sess.jsonl").open("w") as handle:
+            for line in lines:
+                handle.write(json.dumps(line) + "\n")
+
+    def _assistant(self, blocks):
+        return {
+            "type": "assistant", "requestId": "r1",
+            "timestamp": "2026-07-25T10:00:00.000Z", "cwd": "/repo",
+            "message": {"role": "assistant", "model": "claude-opus-5",
+                        "content": blocks,
+                        "usage": {"input_tokens": 1, "output_tokens": 2}},
+        }
+
+    def test_write_tool_content_and_prose_fences_both_count(self):
+        self.write([
+            {"type": "user", "uuid": "u1", "cwd": "/repo",
+             "timestamp": "2026-07-25T10:00:00.000Z",
+             "message": {"role": "user", "content": "build it"}},
+            self._assistant([
+                {"type": "text", "text": "Plan:\n```sh\nmake\n```"},
+                {"type": "tool_use", "name": "Write",
+                 "input": {"file_path": "/repo/a.kt", "content": "x\ny"}},
+            ]),
+        ])
+        (turn,) = telemetry.build_turn_requests(self.env)
+        self.assertEqual(turn["aiCode"],
+                         [{"language": "bash", "loc": 1}, {"language": "kt", "loc": 2}])
+        self.assertEqual(turn["workspaceName"], "/repo")
+
+    def test_read_tools_contribute_nothing(self):
+        self.write([
+            {"type": "user", "uuid": "u1", "cwd": "/repo",
+             "timestamp": "2026-07-25T10:00:00.000Z",
+             "message": {"role": "user", "content": "look"}},
+            self._assistant([{"type": "tool_use", "name": "Read",
+                              "input": {"file_path": "/repo/a.py"}}]),
+        ])
+        (turn,) = telemetry.build_turn_requests(self.env)
+        self.assertEqual(turn["aiCode"], [])
+
+
+class BuildSessionsTest(unittest.TestCase):
+    @staticmethod
+    def _rec(source, session, loc=0, workspace=None):
+        return {"source": source, "session_id": session,
+                "workspaceName": workspace,
+                "aiCode": [{"language": "python", "loc": loc}] if loc else []}
+
+    def test_groups_by_source_and_session_preserving_order(self):
+        records = [self._rec("copilot", "a", 1), self._rec("claude", "a", 2),
+                   self._rec("copilot", "a", 3)]
+        sessions = telemetry.build_sessions(records)
+        self.assertEqual(len(sessions), 2)
+        self.assertEqual(sessions[0]["requestCount"], 2)
+        self.assertEqual(telemetry.session_ai_loc(sessions[0]), 4)
+        self.assertEqual(telemetry.session_ai_loc(sessions[1]), 2)
+
+    def test_same_id_from_two_harnesses_is_never_merged(self):
+        sessions = telemetry.build_sessions(
+            [self._rec("copilot", "dup"), self._rec("claude", "dup")])
+        self.assertEqual(len(sessions), 2)
+
+    def test_missing_workspace_falls_back_to_the_session_id(self):
+        """Bucketing every unknown-workspace session under one name would
+        make low-markdown-ratio answer about a workspace that does not
+        exist."""
+        (session,) = telemetry.build_sessions([self._rec("copilot", "s9")])
+        self.assertEqual(session["workspaceName"], "s9")
+
+
 class RequestsWithTest(unittest.TestCase):
     def test_none_excludes_but_zero_and_empty_list_do_not(self):
         records = [
@@ -448,6 +680,36 @@ class LiveStoreProbe(unittest.TestCase):
                 any(r["modelId"] for r in recs),
                 "real Claude transcripts parsed but no API call carried a model"),
         )
+
+    def test_live_ai_code_is_actually_extracted(self):
+        """The one thing fixtures cannot prove: that aiCode is non-empty
+        against REAL logs.
+
+        A fixture suite passes whether or not the extractor matches the
+        shapes a harness really emits, and five rules would then evaluate
+        against a structurally-empty input and report a clean bill of health
+        -- the failure this branch treats as worse than a skip. Measured
+        here on 2026-07-26 before this landed: Copilot 29,819 LoC and Claude
+        11,391 LoC over the six largest sessions of each.
+        """
+        env = dict(os.environ)
+        available = bool(telemetry._copilot_event_files(env)) or \
+            bool(telemetry._claude_transcripts(env))
+        if not available:
+            print("[capability probe] aiCode (live): UNAVAILABLE -- no harness "
+                  "store on this machine", file=sys.stderr)
+            self.skipTest("no harness store present")
+        records = telemetry.build_turn_requests(env)
+        total = sum(telemetry.ai_loc(r) for r in records)
+        languages = {b["language"] for r in records for b in (r.get("aiCode") or [])}
+        print("[capability probe] aiCode (live): AVAILABLE -- {} LoC across {} "
+              "request(s), {} language(s)".format(total, len(records), len(languages)),
+              file=sys.stderr)
+        self.assertTrue(records, "harness store exists but parsed to zero requests")
+        self.assertGreater(
+            total, 0,
+            "real harness sessions parsed but aiCode extracted ZERO lines -- the "
+            "five aiCode rules would evaluate against an always-empty input")
 
 
 if __name__ == "__main__":

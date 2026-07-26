@@ -91,6 +91,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -190,9 +191,159 @@ COPILOT_FILE_REF_TOOLS = {"view", "grep", "glob", "rg", "show_file"}
 COPILOT_FILE_EDIT_TOOLS = {"edit", "create"}
 COPILOT_META_TOOLS = {"report_intent"}
 
+# ---------------------------------------------------------------------------
+# aiCode: AI-authored code blocks per request.
+#
+# WHAT UPSTREAM ACTUALLY COUNTS -- read from source, not inferred. A previous
+# note in this repo said upstream "reconstructs generated code from tool
+# arguments"; that is half of it, and the half it omits changes the answer.
+#
+# src/core/parser-shared.ts:
+#     export const CODE_BLOCK_RE = /```(\w+)?\n([\s\S]*?)```/g;
+#     const MAX_CODE_SCAN_CHARS = 128_000;
+#     aiCode: extractCodeBlocks(textForCodeScan(rawResp))
+#     ... loc = code.trim() ? code.trim().split('\n').length : 0
+#
+# So `aiCode` is *markdown fenced code blocks found in the assistant's
+# response text*, and `loc` is the newline count of the trimmed fence body.
+# Both harness parsers then FEED tool-written code into that same response
+# text as a synthesised fence, tagged with the file extension:
+#
+#   parser-vscode-cli.ts  (FILE_EDIT_TOOLS = edit, create)
+#       code = args.file_text ?? args.content ?? args.new_str
+#              ?? args.newString ?? args.code
+#       turn.responseChunks.push(`\`\`\`${ext}\n${code}\n\`\`\``)
+#   parser-claude.ts      (CLAUDE_WRITE_TOOLS = Write, Edit, MultiEditTool)
+#       code = input.content ?? input.new_str
+#       assistantTexts.push(`\`\`\`${ext}\n${code}\n\`\`\``)
+#
+# Consequences worth stating because they decide what the rules mean:
+#   * ADDED LINES ONLY. `new_str`/`file_text`/`content` is the new content.
+#     `old_str` is never read, so nothing is netted off and deletions are
+#     invisible. "AI LoC" means "lines the AI produced", not "diff size".
+#   * A fence in ordinary prose counts exactly as much as a written file.
+#   * Language is the fence info string (the file EXTENSION for synthesised
+#     fences), lowercased and mapped through LANG_ALIASES.
+#
+# MEASURED ON THIS MACHINE before any of it was implemented, over the six
+# largest real sessions per harness: Copilot 29,819 LoC (py 19,000 / md 6,540
+# / html 3,434 ...), Claude 11,391 LoC (md 6,803 / kt 2,637 / py 1,033 ...).
+# `edit` appears 379 times with `new_str`, `create` 91 times with `file_text`.
+# The input is real and large, not a theoretical field.
+#
+# STREAMING, NOT ACCUMULATING. Upstream joins every chunk into one
+# responseText and regexes the join. This module scans each chunk as it comes
+# off the event stream and keeps only (language, loc) pairs, so a session's
+# file bodies are never all resident at once -- one 22 MB events.jsonl here
+# would otherwise be largely held in memory. The one behavioural difference
+# is stated rather than hidden: a fence OPENED in one chunk and CLOSED in a
+# later one is found by upstream and not by us. Harness events carry complete
+# messages and complete tool arguments, so a fence spanning two chunks is not
+# a shape either harness emits; if that ever changes, this under-counts
+# rather than over-counts, which is the safe direction for rules that fire on
+# "too much AI code".
+CODE_BLOCK_RE = re.compile(r"```(\w+)?\n([\s\S]*?)```")
+
+# src/core/parser-shared.ts LANG_ALIASES, verbatim. Without it `py` and
+# `python`, or `md` and `markdown`, are different languages -- which would
+# split low-markdown-ratio's numerator and corrupt no-language-exploration's
+# distinct-language count. Real data on this machine contains both spellings.
+LANG_ALIASES = {
+    "sh": "bash", "shell": "bash", "zsh": "bash",
+    "ts": "typescript", "tsx": "typescript",
+    "js": "javascript", "jsx": "javascript",
+    "py": "python", "python3": "python",
+    "cs": "csharp", "c#": "csharp",
+    "yml": "yaml", "md": "markdown",
+    "tf": "terraform", "rs": "rust", "rb": "ruby",
+    "jsonc": "json", "jsonl": "json",
+    "txt": "text", "plaintext": "text", "env": "dotenv",
+}
+
+MAX_CODE_SCAN_CHARS = 128000
+
+# Argument keys each harness's edit/create tools carry the NEW content under,
+# in upstream's own precedence order.
+COPILOT_CODE_ARG_KEYS = ("file_text", "content", "new_str", "newString", "code")
+CLAUDE_CODE_ARG_KEYS = ("content", "new_str")
+
 CLAUDE_WRITE_TOOLS = {"Write", "Edit", "MultiEditTool"}
 CLAUDE_READ_FILE_TOOLS = {"Read", "View"}
 CLAUDE_READ_PATH_TOOLS = {"Glob", "LS", "Find"}
+
+
+def extract_code_blocks(text):
+    """Fenced code blocks in `text` as [{"language":..., "loc":...}, ...].
+
+    Mirrors upstream's extractCodeBlocks exactly, including the empty-body
+    case (loc 0, block still emitted -- it counts toward `aiCode.length`,
+    which analyzer-patterns tests for, even though it adds no lines).
+    """
+    blocks = []
+    for match in CODE_BLOCK_RE.finditer(text):
+        lang = (match.group(1) or "unknown").lower().strip()
+        lang = LANG_ALIASES.get(lang, lang)
+        body = match.group(2).strip()
+        blocks.append({"language": lang, "loc": len(body.split("\n")) if body else 0})
+    return blocks
+
+
+def _code_fence(path, code):
+    """The synthesised fence both upstream parsers push for a write tool.
+
+    `path` decides the language, exactly as upstream does it: the substring
+    after the last dot, or "unknown" when there is none. Returns None when
+    either half is missing, because upstream only pushes when BOTH are
+    present -- a write tool call with no path contributes nothing.
+    """
+    if not isinstance(path, str) or not path or not isinstance(code, str) or not code:
+        return None
+    ext = path.split(".")[-1] if "." in path else "unknown"
+    return "```{}\n{}\n```".format(ext, code)
+
+
+class _CodeScan:
+    """Per-request streaming scanner for aiCode blocks.
+
+    Holds only the running (language, loc) list and a character budget --
+    never the accumulated text. `feed()` is called once per assistant message
+    and once per write-tool call, in event order.
+
+    The budget reproduces upstream's MAX_CODE_SCAN_CHARS truncation, which is
+    not cosmetic: without it a single enormous generated file would dominate
+    every LoC-based rule, and the fixture-vs-production answers would diverge
+    from upstream's for the same input.
+    """
+
+    __slots__ = ("blocks", "_remaining")
+
+    def __init__(self):
+        self.blocks = []
+        self._remaining = MAX_CODE_SCAN_CHARS
+
+    def feed(self, chunk, separator_len=0):
+        if not chunk or self._remaining <= 0:
+            return
+        self._remaining -= separator_len
+        if self._remaining <= 0:
+            return
+        if len(chunk) > self._remaining:
+            chunk = chunk[:self._remaining]
+        self._remaining -= len(chunk)
+        self.blocks.extend(extract_code_blocks(chunk))
+
+
+def _first_str(mapping, keys):
+    """First key in `keys` whose value is a non-empty string. Upstream's
+    ?? chain, which is precedence-ordered -- not "any key that happens to
+    be there"."""
+    if not isinstance(mapping, dict):
+        return None
+    for key in keys:
+        value = mapping.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 def _arg(mapping, key):
@@ -228,6 +379,8 @@ def _copilot_turns(events_path: Path):
     session_id = events_path.parent.name
     turns = {}
     order = []
+    scans = {}
+    workspace = None
     pending_user = None
     # permission.requested carries no turnId, only a requestId that
     # permission.completed echoes; attribute each completed confirmation to
@@ -258,6 +411,7 @@ def _copilot_turns(events_path: Path):
                 "_end_ts": None,
             }
             order.append(turn_id)
+            scans[turn_id] = _CodeScan()
         return turns[turn_id]
 
     for event in _iter_jsonl(events_path):
@@ -266,6 +420,18 @@ def _copilot_turns(events_path: Path):
         if not isinstance(data, dict):
             data = {}
         ts = event.get("timestamp")
+
+        if etype == "session.start":
+            # Upstream buckets low-markdown-ratio by workspace. Copilot puts
+            # the repo root in session.start.data.context; gitRoot is
+            # preferred over cwd so a session started in a subdirectory lands
+            # in the same bucket as one started at the top.
+            context = data.get("context")
+            if isinstance(context, dict):
+                root = context.get("gitRoot") or context.get("cwd")
+                if isinstance(root, str) and root:
+                    workspace = root
+            continue
 
         if etype == "user.message":
             content = data.get("content")
@@ -306,6 +472,12 @@ def _copilot_turns(events_path: Path):
             out = data.get("outputTokens")
             if isinstance(out, int):
                 rec["completionTokens"] += out
+            content = data.get("content")
+            if isinstance(content, str):
+                # separator_len 2: upstream joins responseChunks with '\n\n',
+                # and those separator characters count against the same
+                # MAX_CODE_SCAN_CHARS budget there.
+                scans[turn_id].feed(content, separator_len=2)
             continue
 
         if etype == "tool.execution_start":
@@ -320,6 +492,10 @@ def _copilot_turns(events_path: Path):
             path = _arg(data.get("arguments"), "path")
             if path and name in COPILOT_FILE_EDIT_TOOLS:
                 rec["editedFiles"].append(path)
+                fence = _code_fence(
+                    path, _first_str(data.get("arguments"), COPILOT_CODE_ARG_KEYS))
+                if fence:
+                    scans[turn_id].feed(fence, separator_len=2)
             elif path and name in COPILOT_FILE_REF_TOOLS:
                 rec["referencedFiles"].append(path)
             # Copilot's own `skill` tool is how upstream detects skill use;
@@ -400,6 +576,8 @@ def _copilot_turns(events_path: Path):
         rec["referencedFiles"] = _unique(rec["referencedFiles"])
         rec["editedFiles"] = _unique(rec["editedFiles"])
         rec["skillsUsed"] = _unique(rec["skillsUsed"])
+        rec["aiCode"] = scans[turn_id].blocks
+        rec["workspaceName"] = workspace
         if not rec["toolsUsed"] and not rec["modelId"]:
             # A turn that produced neither a model attribution nor a tool
             # call is a fragment (truncated tail of an open session), not a
@@ -565,11 +743,21 @@ def _claude_records(path: Path):
     api_calls = []
     seen_requests = set()
     current = None
+    scans = {}
+    workspace = None
 
     for event in _iter_jsonl(path):
         etype = event.get("type")
         if event.get("isSidechain"):
             continue
+        # Every Claude Code line carries the session's working directory;
+        # upstream buckets low-markdown-ratio by workspace, and this is the
+        # only workspace identity the transcript offers.
+        if workspace is None:
+            cwd = event.get("cwd")
+            if isinstance(cwd, str) and cwd:
+                workspace = cwd
+
         message = event.get("message")
         if not isinstance(message, dict):
             continue
@@ -601,6 +789,7 @@ def _claude_records(path: Path):
                 "agentName": None,
             }
             turns.append(current)
+            scans[id(current)] = _CodeScan()
             continue
 
         if etype != "assistant":
@@ -635,10 +824,21 @@ def _claude_records(path: Path):
         if current is not None:
             if model:
                 current["modelId"] = model
+            scan = scans.get(id(current))
             content = message.get("content")
             if isinstance(content, list):
                 for block in content:
-                    if not isinstance(block, dict) or block.get("type") != "tool_use":
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") == "text":
+                        # Upstream pushes assistant text blocks into
+                        # assistantTexts, joined with '\n' -- so prose fences
+                        # count exactly like written files.
+                        text = block.get("text")
+                        if isinstance(text, str) and scan is not None:
+                            scan.feed(text, separator_len=1)
+                        continue
+                    if block.get("type") != "tool_use":
                         continue
                     name = block.get("name")
                     if not isinstance(name, str) or not name:
@@ -655,6 +855,9 @@ def _claude_records(path: Path):
                         path = _arg(args, "file_path")
                         if path:
                             current["editedFiles"].append(path)
+                        fence = _code_fence(path, _first_str(args, CLAUDE_CODE_ARG_KEYS))
+                        if fence and scan is not None:
+                            scan.feed(fence, separator_len=1)
                     elif name in CLAUDE_READ_FILE_TOOLS:
                         path = _arg(args, "file_path")
                         if path:
@@ -672,6 +875,8 @@ def _claude_records(path: Path):
         rec["referencedFiles"] = _unique(rec["referencedFiles"])
         rec["editedFiles"] = _unique(rec["editedFiles"])
         rec["skillsUsed"] = _unique(rec["skillsUsed"])
+        rec["aiCode"] = scans[id(rec)].blocks
+        rec["workspaceName"] = workspace
     return turns, api_calls
 
 
@@ -691,6 +896,54 @@ def build_turn_requests(env=None, limit=MAX_SESSIONS):
         turns, _api = _claude_records(transcript_path)
         records.extend(turns)
     return records
+
+
+def build_sessions(records):
+    """Group turn records into upstream's session shape.
+
+    Four of the aiCode rules are `scan: sessions`, and upstream's helpers
+    (computeSpeedAcceptPairs, computeMdRatio) walk `session.requests` in
+    order. Grouping here rather than in each adapter keeps "what is a
+    session" in one place.
+
+    Keyed by (source, session_id) so a Copilot and a Claude session that
+    happen to share an id are never merged. Request order is preserved --
+    speed-accept's adjacent-pair gap is meaningless otherwise.
+    """
+    sessions = {}
+    order = []
+    for rec in records:
+        key = (rec.get("source"), rec.get("session_id"))
+        if key not in sessions:
+            sessions[key] = {
+                "source": rec.get("source"),
+                "sessionId": rec.get("session_id"),
+                # Upstream falls back workspaceName -> workspaceId ->
+                # 'unknown'; here the session id is the only other identity,
+                # and lumping every unknown-workspace session into one
+                # bucket would make low-markdown-ratio answer about a
+                # workspace that does not exist.
+                "workspaceName": rec.get("workspaceName") or rec.get("session_id"),
+                "requests": [],
+            }
+            order.append(key)
+        sessions[key]["requests"].append(rec)
+    out = []
+    for key in order:
+        session = sessions[key]
+        session["requestCount"] = len(session["requests"])
+        out.append(session)
+    return out
+
+
+def ai_loc(record):
+    """Sum of `aiCode[].loc` for one request -- upstream's
+    flatSumField(requests, "aiCode", "loc") for a single element."""
+    return sum(block.get("loc") or 0 for block in (record.get("aiCode") or []))
+
+
+def session_ai_loc(session):
+    return sum(ai_loc(rec) for rec in session["requests"])
 
 
 def build_api_calls(env=None, limit=MAX_SESSIONS):
