@@ -1339,6 +1339,127 @@ class ProfanityAdapterTest(CoachRulesEvalBase):
             self.ct.hash_dictionary([])
 
 
+class PermissionAdapterTest(CoachRulesEvalBase):
+    """Fire/no-fire for the two permission rules.
+
+    Fixtures emit the real Copilot event pair -- permission.requested
+    carrying permissionRequest.kind and a toolCallId, then
+    permission.completed carrying result.kind -- because the mapping under
+    test is precisely "which result.kind means upstream's autoApproveScope".
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = Path(self.tmp) / "search.db"
+        conn = make_db(str(self.db))
+        insert_session(conn, "s0", 1)
+        conn.commit()
+        conn.close()
+        self.store = Path(self.tmp) / "store"
+        (self.store / "session-state").mkdir(parents=True)
+
+    def fired(self, rule_id):
+        signals, stderr = self.run_eval(VENDOR_RULES, self.db, telemetry_home=self.store)
+        self.assertNotIn(
+            "skipping {} ".format(rule_id), stderr,
+            "{} skipped when it should have evaluated:\n{}".format(rule_id, stderr))
+        return [s for s in signals if s["id"] == rule_id]
+
+    @staticmethod
+    def _permission(request_id, kind, result_kind):
+        return [
+            TFIX.ev("permission.requested", {
+                "requestId": request_id,
+                "permissionRequest": {"kind": kind,
+                                      "toolCallId": "tc-" + request_id},
+            }, "2026-07-25T22:40:01.000Z"),
+            TFIX.ev("permission.completed", {
+                "requestId": request_id, "result": {"kind": result_kind},
+            }, "2026-07-25T22:40:02.000Z"),
+        ]
+
+    def session(self, session_id, decisions, kind="shell"):
+        """One turn per decision, each carrying one confirmation."""
+        events = []
+        for index, result_kind in enumerate(decisions):
+            turn = TFIX.simple_turn(str(index), user="x")
+            request_id = "{}-{}".format(session_id, index)
+            turn[-1:-1] = self._permission(request_id, kind, result_kind)
+            events.extend(turn)
+        TFIX.copilot_session(str(self.store), session_id, events)
+
+    # -- yolo-mode ---------------------------------------------------------
+    def test_yolo_mode_fires_when_almost_every_approval_is_persisted(self):
+        self.session("s0", ["approved-for-location"] * 20)
+        self.assertTrue(self.fired("yolo-mode"))
+
+    def test_yolo_mode_silent_when_approvals_are_one_shot(self):
+        """`approved` is a one-shot human approval and carries NO scope.
+        This is the case that pins the mapping: if every approval counted,
+        the rule would fire for anyone who ever says yes."""
+        self.session("s0", ["approved"] * 20)
+        self.assertEqual(self.fired("yolo-mode"), [])
+
+    def test_yolo_mode_silent_at_the_real_corpus_ratio(self):
+        """7 persisted approvals against 331 confirmations is 0.021, the
+        measured shape of the local store. Evaluating and staying silent is
+        the correct outcome, and is the same status as model-overreliance."""
+        self.session("s0", ["approved-for-location"] * 7 + ["approved"] * 100)
+        self.assertEqual(self.fired("yolo-mode"), [])
+
+    def test_yolo_mode_denominator_is_confirmations_not_requests(self):
+        """20 turns, each carrying ONE persisted approval and THREE one-shot
+        ones: 20/80 = 0.25, silent. Per REQUEST it would read 20/20 = 1.0 and
+        fire. auto-approve-terminal counts per request and yolo-mode counts
+        per confirmation; mutation testing showed a one-confirmation-per-turn
+        fixture cannot tell the two apart."""
+        events = []
+        for index in range(20):
+            turn = TFIX.simple_turn(str(index), user="x")
+            decisions = ["approved-for-location", "approved", "approved", "approved"]
+            confirmations = []
+            for slot, result_kind in enumerate(decisions):
+                confirmations.extend(self._permission(
+                    "r{}-{}".format(index, slot), "shell", result_kind))
+            turn[-1:-1] = confirmations
+            events.extend(turn)
+        TFIX.copilot_session(str(self.store), "s0", events)
+        self.assertEqual(self.fired("yolo-mode"), [])
+
+    def test_yolo_mode_silent_below_the_confirmation_floor(self):
+        self.session("s0", ["approved-for-location"] * 5)
+        self.assertEqual(self.fired("yolo-mode"), [])
+
+    def test_permission_rules_skip_when_the_corpus_has_no_confirmations(self):
+        """No confirmation anywhere is not "nothing was auto-approved" -- it
+        is a corpus with no permission stream at all (every Claude-only
+        corpus). The honest output is a skip."""
+        TFIX.copilot_session(str(self.store), "s0", TFIX.simple_turn("0", user="x"))
+        _, stderr = self.run_eval(VENDOR_RULES, self.db, telemetry_home=self.store)
+        self.assertIn("skipping yolo-mode ", stderr)
+        self.assertIn("skipping auto-approve-terminal ", stderr)
+        self.assertIn("no permission stream", stderr)
+
+    # -- auto-approve-terminal ---------------------------------------------
+    def test_auto_approve_terminal_fires_on_persisted_shell_approvals(self):
+        self.session("s0", ["approved-for-location"] * 25, kind="shell")
+        self.assertTrue(self.fired("auto-approve-terminal"))
+
+    def test_auto_approve_terminal_silent_when_the_approvals_are_not_shell(self):
+        """isTerminal is the discriminating half. 25 persisted READ
+        approvals clear autoApprovedTotal but not terminalAutoApproved."""
+        self.session("s0", ["approved-for-location"] * 25, kind="read")
+        self.assertEqual(self.fired("auto-approve-terminal"), [])
+
+    def test_auto_approve_terminal_silent_on_one_shot_shell_approvals(self):
+        self.session("s0", ["approved"] * 25, kind="shell")
+        self.assertEqual(self.fired("auto-approve-terminal"), [])
+
+    def test_auto_approve_terminal_silent_below_the_totals(self):
+        self.session("s0", ["approved-for-location"] * 12, kind="shell")
+        self.assertEqual(self.fired("auto-approve-terminal"), [])
+
+
 class TelemetryDetectPinTest(CoachRulesEvalBase):
     """Each telemetry adapter hardcodes one rule's predicate, so it must
     refuse to run if that rule's `detect` block ever changes shape.
@@ -1669,6 +1790,7 @@ class TelemetryAbsentSkipsLoudlyTest(CoachRulesEvalBase):
         "no-spec-structure", "premium-waste", "premium-for-lookup-questions",
         "auto-avoidance", "session-drift", "instruction-bloat",
         "no-custom-instructions", "context-engineering-gaps", "profanity",
+        "yolo-mode", "auto-approve-terminal",
     ]
 
     def test_all_telemetry_rules_skip_with_a_source_naming_reason(self):
@@ -1790,7 +1912,7 @@ class CoverageAssertionTest(CoachRulesEvalBase):
     # skip. TelemetryAdapterTest covers them with a store present, and
     # TelemetryAbsentSkipsLoudlyTest pins that they skip without one.
     EXPECTED_EVALUATED = 11
-    EXPECTED_TELEMETRY_ADAPTERS = 25
+    EXPECTED_TELEMETRY_ADAPTERS = 27
     EXPECTED_TOTAL_RULES = 45
 
     def test_coverage_count_pinned(self):

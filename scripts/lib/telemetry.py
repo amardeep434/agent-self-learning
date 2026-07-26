@@ -601,31 +601,57 @@ def _copilot_turns(events_path: Path):
             result = data.get("result")
             result_kind = result.get("kind") if isinstance(result, dict) else None
             if rec is not None and result_kind:
-                # NO `autoApproved` FIELD, DELIBERATELY. Upstream's yolo-mode
-                # and auto-approve-terminal both key off an auto-approval
-                # RATE, and this stream cannot supply one. Measured across
-                # the whole corpus (242 confirmations, decision latency =
-                # permission.completed timestamp minus permission.requested):
+                # autoApproveScope: upstream counts a confirmation as
+                # auto-approved when the scope is 'session' or 'always'
+                # [upstream src/core/dsl/interpreter.ts:658-678,815-834].
+                # Copilot CLI's analogue of 'always' is
+                # `approved-for-location`: an approval PERSISTED into
+                # ~/.copilot/permissions-config.json's location-keyed
+                # tool_approvals list, as against a one-shot `approved`.
                 #
-                #   approved                       n=165 min 0.638s med 6.7s
-                #   approved-for-location          n=  7 min 3.125s med 5.9s
-                #   denied-interactively-by-user   n=  9 min 7.525s med 40.6s
-                #   denied-no-approval-rule-...    n= 61 min 0.000s med 0.004s
+                # This field previously did not exist, on the recorded
+                # ground that "an auto-approve RATE computed from this
+                # stream would have a permanently zero numerator". That was
+                # false. Re-measured over all 62 local sessions:
+                # permission.completed result.kind is approved 165,
+                # denied-no-approval-rule 150, denied-interactively 9,
+                # approved-for-location 7. The numerator is 7. The old
+                # comment rejected approved-for-location because it took
+                # human-scale time (3.1s minimum) -- but upstream applies NO
+                # latency test, and in VS Code clicking "Always allow" also
+                # takes human-scale time. The latency argument rejected the
+                # exact field it was looking for.
                 #
-                # Every approval took human-scale time; only the
-                # non-interactive DENIALS are instantaneous. That is the
-                # shape you get when a standing allow-rule causes the tool
-                # to run with no permission.requested event emitted at all --
-                # i.e. auto-approved calls are absent from this stream by
-                # construction, not merely rare. A rate computed over what
-                # IS here would have an unconditionally zero numerator: a
-                # rule that can never fire, which this branch treats as
-                # worse than a loud skip. `approved-for-location` was the
-                # tempting mapping and it is wrong -- it is a human picking
-                # "approve for this location", as its 3.1s minimum shows.
+                # WHAT DIFFERS FROM UPSTREAM, and it is a real gap: Copilot
+                # CLI has no session-scoped approval, so only 'always' is
+                # ever produced here; upstream's 'session' arm is dead for
+                # this harness. And a tool that runs under a STANDING
+                # allow-rule emits no permission event at all, so it is
+                # absent from both numerator and denominator -- upstream has
+                # the same blind spot for the same reason, since it only
+                # sees the confirmations the harness reports.
+                #
+                # NOT IMPLEMENTED, deliberately: the tempting alternative is
+                # to define auto-approval by subtraction, tool executions
+                # minus permission events [measured: 1046 bash executions
+                # against 219 shell permission requests, ratio ~0.96, fires
+                # loudly]. That is rejected under upstream's rule id because
+                # Copilot CLI ships an unpublished built-in allow-list of
+                # safe read-only commands, so "no permission event"
+                # conflates "the user auto-approved this" with "Copilot
+                # never asks about ls". It is a good local signal under a
+                # local name; it is not upstream's yolo-mode.
+                #
+                # isTerminal: upstream's flag for a shell confirmation
+                # [upstream src/core/dsl/interpreter.ts:826]; Copilot CLI's
+                # permissionRequest.kind == "shell" is the same thing.
                 rec["toolConfirmations"].append({
                     "kind": kind or "unknown",
                     "result": result_kind,
+                    "autoApproveScope": (
+                        "always" if result_kind == "approved-for-location"
+                        else None),
+                    "isTerminal": kind == "shell",
                 })
             continue
 

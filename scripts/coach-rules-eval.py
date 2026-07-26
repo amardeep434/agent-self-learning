@@ -279,38 +279,7 @@ UNSUPPORTED_REASONS = {
 
 
 
-    "yolo-mode": "reachable; not yet built, and the sentence the previous "
-        "reason turned on -- 'an auto-approve RATE computed from this "
-        "stream would have a permanently zero numerator' -- is FALSE. "
-        "[measured over all 62 local Copilot sessions: permission.completed "
-        "result.kind is approved 165, "
-        "denied-no-approval-rule-and-could-not-request-from-user 150, "
-        "denied-interactively-by-user 9, approved-for-location 7]. The "
-        "numerator is 7. Upstream's computeYoloStats counts a confirmation "
-        "as auto-approved when autoApproveScope is 'session' or 'always' "
-        "[upstream src/core/dsl/interpreter.ts:658-678] and applies NO "
-        "latency test; rejecting approved-for-location because it took 3.1s "
-        "applied a criterion upstream does not use, to reject the exact "
-        "semantic twin of 'always' -- an approval that is PERSISTED rather "
-        "than one-shot (they land in ~/.copilot/permissions-config.json). "
-        "Under the faithful mapping the rule evaluates to 7/331 = 0.021, "
-        "below threshold, silent -- the same status as model-overreliance "
-        "and cache-hit-starvation, which this project already ships. "
-        "Copilot-only: Claude Code's transcripts record no per-tool-call "
-        "confirmation event at all",
 
-    "auto-approve-terminal": "reachable; not yet built, for exactly the "
-        "same reason and with the same measurement as yolo-mode -- see that "
-        "entry. computeAutoApproveStats [upstream src/core/dsl/"
-        "interpreter.ts:815] uses the identical autoApproveScope test. "
-        "Note for whoever implements it: do NOT define the numerator by "
-        "subtracting permission events from tool executions [measured: 1046 "
-        "bash executions against 219 shell permission requests, which would "
-        "put the ratio at ~0.96 and fire loudly], because Copilot CLI has "
-        "an unpublished built-in allow-list of safe read-only commands, so "
-        "'no permission event' conflates 'the user auto-approved this' with "
-        "'Copilot never asks about ls'. That is a good local signal under a "
-        "local name; it is not upstream's rule",
 }
 
 
@@ -809,11 +778,14 @@ def eval_frustration_signals(rule, user_messages):
 # docstring for the field-by-field evidence, gathered by reading the real
 # stores rather than by consulting documentation.
 #
-# Two rules that LOOK reachable from the same data are still skipped, on
-# evidence rather than assumption -- see UNSUPPORTED_REASONS for yolo-mode
-# and auto-approve-terminal. Confirmations are captured; auto-approvals are
-# not, because an auto-approved call emits no permission event at all. A
-# rate over the surviving records would have a permanently zero numerator.
+# The two permission rules (yolo-mode, auto-approve-terminal) were also
+# skipped here, on the claim that "an auto-approved call emits no permission
+# event at all" and so "a rate over the surviving records would have a
+# permanently zero numerator". That was a measurement, and it was wrong:
+# Copilot CLI's `approved-for-location` is a PERSISTED approval, upstream's
+# exact analogue of autoApproveScope 'always', and there are 7 of them in
+# the local corpus. Both rules now evaluate. See the permission.completed
+# handler in scripts/lib/telemetry.py for what differs from upstream.
 # --------------------------------------------------------------------------
 
 def _require_records(records, rule_id, what):
@@ -1708,6 +1680,99 @@ def eval_profanity(rule, tel):
     return matched
 
 
+# ---------------------------------------------------------------------------
+# The permission-confirmation pair.
+#
+# Both were skipped on "an auto-approve RATE computed from this stream would
+# have a permanently zero numerator: a rule that evaluates and can never
+# fire". That measurement was wrong -- the numerator is 7 corpus-wide, see
+# scripts/lib/telemetry.py's permission.completed handler for the counts and
+# for what differs from upstream. Under the faithful mapping these evaluate
+# and stay silent on this corpus, which is the same status as
+# model-overreliance and cache-hit-starvation, both of which this project
+# already ships.
+#
+# COPILOT-ONLY, and this is a genuine coverage gap rather than a mapping
+# choice: Claude Code's transcripts record no per-tool-call confirmation
+# event of any kind, so there is nothing to correlate against. The rules
+# score whatever confirmations the Copilot half of the corpus produced.
+# ---------------------------------------------------------------------------
+
+def _requests_with_confirmations(tel, rule_id):
+    turns = _require_records(
+        telemetry.requests_with(tel.turns, "toolConfirmations"),
+        rule_id, "toolConfirmations")
+    matched = [r for r in turns if len(r["toolConfirmations"]) > 0]
+    if not matched:
+        # No confirmation anywhere is NOT "nothing was auto-approved". It is
+        # a corpus with no permission stream -- Claude-only, or a Copilot
+        # corpus that never prompted. Scoring it would be a clean bill of
+        # health derived from absent data.
+        raise ValueError(
+            "no request in the harness corpus carries a tool confirmation "
+            "(Claude Code records none at all; a Copilot corpus that never "
+            "prompted records none either), so there is no permission "
+            "stream to compute an auto-approval rate over")
+    return matched
+
+
+def _is_auto_approved(confirmation):
+    """Upstream's test, verbatim: scope 'session' or 'always'
+    [upstream src/core/dsl/interpreter.ts:672]."""
+    return confirmation.get("autoApproveScope") in ("session", "always")
+
+
+def eval_yolo_mode(rule, tel):
+    """Transcribes computeYoloStats [upstream src/core/dsl/interpreter.ts:658].
+
+    Note the denominator is CONFIRMATIONS, not requests -- one request can
+    carry several -- while auto-approve-terminal's is requests. Getting
+    those the wrong way round would make both rules answer the same
+    question under two names.
+    """
+    _pin(rule, match="toolConfirmations.length > 0",
+               check="yolo.ratio > thresholds.autoApproveRate AND "
+                     "yolo.totalConfirmations >= thresholds.minConfirmations")
+    t = _thresholds(rule, "autoApproveRate", "minConfirmations")
+    matched = _requests_with_confirmations(tel, rule["id"])
+    confirmations = [c for r in matched for c in r["toolConfirmations"]]
+    auto_approved = sum(1 for c in confirmations if _is_auto_approved(c))
+    ratio = auto_approved / len(confirmations)
+    if not (ratio > t["autoApproveRate"]
+            and len(confirmations) >= t["minConfirmations"]):
+        return None
+    return auto_approved
+
+
+def eval_auto_approve_terminal(rule, tel):
+    """Transcribes computeAutoApproveStats [upstream
+    src/core/dsl/interpreter.ts:815]. Counted PER REQUEST: a request
+    contributes at most one to each total, however many confirmations it
+    carried."""
+    _pin(rule, match="toolConfirmations.length > 0",
+               check="stats.terminalAutoApproved > thresholds.minTerminalAutoApprove "
+                     "AND stats.autoApprovedTotal > thresholds.minAutoApprove")
+    t = _thresholds(rule, "minAutoApprove", "minTerminalAutoApprove")
+    matched = _requests_with_confirmations(tel, rule["id"])
+    auto_total = 0
+    terminal_auto = 0
+    for record in matched:
+        has_auto = False
+        has_terminal_auto = False
+        for confirmation in record["toolConfirmations"]:
+            if not _is_auto_approved(confirmation):
+                continue
+            has_auto = True
+            if confirmation.get("isTerminal"):
+                has_terminal_auto = True
+        auto_total += 1 if has_auto else 0
+        terminal_auto += 1 if has_terminal_auto else 0
+    if not (terminal_auto > t["minTerminalAutoApprove"]
+            and auto_total > t["minAutoApprove"]):
+        return None
+    return terminal_auto
+
+
 TELEMETRY_ADAPTERS = {
     "vibe-coding": eval_vibe_coding,
     "copy-paste-blindness": eval_copy_paste_blindness,
@@ -1734,6 +1799,8 @@ TELEMETRY_ADAPTERS = {
     "no-custom-instructions": eval_no_custom_instructions,
     "context-engineering-gaps": eval_context_engineering_gaps,
     "profanity": eval_profanity,
+    "yolo-mode": eval_yolo_mode,
+    "auto-approve-terminal": eval_auto_approve_terminal,
 }
 
 
