@@ -170,14 +170,26 @@ def _patched_environ(overrides):
     modified env. Process-global, therefore correct only while unittest runs
     tests serially, which it does by default; do not add parallelism here
     without revisiting this.
+
+    Only the overridden keys are touched. The first version of this helper
+    restored with os.environ.clear() + update(saved), which is one
+    putenv/unsetenv per variable in the whole environment, twice, per call:
+    ~32,000 syscalls across the suite (113 vars x 2 x 143 calls) to restore
+    two keys. Measured at 0.063s on Linux -- not the timeout, and not claimed
+    as its cause -- but it is pure waste on any platform and clear() also
+    briefly blanks PATH/TEMP for the whole process, which is a hazard nothing
+    here needs to carry.
     """
-    saved = dict(os.environ)
+    saved = {k: os.environ.get(k) for k in overrides}
     try:
         os.environ.update(overrides)
         yield
     finally:
-        os.environ.clear()
-        os.environ.update(saved)
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def eval_in_process(rules_dir, db_path, env_overrides):
