@@ -63,6 +63,37 @@ fi
 # --- The probe idiom, executed for real (this part needs no PowerShell) ---
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+
+# Run pwsh, capture combined output into $1 and its exit status into $2.
+#
+# Why not plain `OUT="$(pwsh ... 2>&1)" || RC=$?`: on Windows CI that printed
+#   bash: warning: command substitution: ignored null byte in input
+# on every run. PowerShell's console output encoding on Windows is UTF-16LE,
+# whose ASCII characters carry a 0x00 high byte, and bash strips NULs from
+# command substitution with exactly that warning. The text still arrived, so
+# it was cosmetic -- but noise in a green log is how real signals get missed,
+# and a reader cannot tell that warning apart from a genuine one.
+#
+# Fixed on the bash side rather than by setting [Console]::OutputEncoding in
+# the .ps1 files: this development host has no pwsh, so a PowerShell-side fix
+# could not be executed before landing, and this branch has been damaged
+# repeatedly by exactly that. `tr -d '\0'` over a file is correct whatever
+# encoding pwsh chooses, and is a no-op on the ubuntu cells (where output is
+# already UTF-8), so it is verifiable here.
+#
+# The temp file also preserves the thing a pipeline would destroy: pwsh's own
+# exit status. `pwsh ... | tr -d '\0'` inside a command substitution yields
+# `tr`'s status, which is always 0 -- a parse error would have been reported
+# as a pass.
+pwsh_capture() {
+    local __out_var="$1" __rc_var="$2"; shift 2
+    local __f="${TMP}/pwsh-out.$$"
+    local __rc=0
+    pwsh -NoProfile "$@" >"$__f" 2>&1 || __rc=$?
+    printf -v "$__out_var" '%s' "$(tr -d '\000' <"$__f")"
+    printf -v "$__rc_var" '%s' "$__rc"
+    rm -f "$__f"
+}
 printf '#!/usr/bin/env bash\n' >"${TMP}/install.sh"
 
 set +e
@@ -100,6 +131,35 @@ check "probe idiom: exits non-zero for a path it cannot" "yes" \
 # GitHub's ubuntu runners ship pwsh, so both the parse check AND the
 # behavioural test below run on every push -- they just never ran on the
 # dev box, which has no pwsh. "Absent locally" is not "absent in CI".
+# --- pwsh_capture itself, exercised against a stub (runs on every platform) ---
+#
+# The helper only takes effect on machines that HAVE pwsh, which excludes this
+# development host -- so without this block the null-stripping fix would ship
+# having never executed anywhere but Windows CI. A stub `pwsh` earlier on PATH
+# lets the helper run for real here: it emits UTF-16LE-shaped bytes (ASCII
+# interleaved with NULs, the exact thing that produced the warning) and exits
+# non-zero, so both halves of the contract are checked.
+mkdir -p "${TMP}/stubbin"
+cat >"${TMP}/stubbin/pwsh" <<'STUB'
+#!/usr/bin/env bash
+printf 'P\000A\000R\000S\000E\000 \000O\000K\000\n\000'
+exit 7
+STUB
+chmod +x "${TMP}/stubbin/pwsh"
+(
+    PATH="${TMP}/stubbin:$PATH"
+    STUB_OUT=""; STUB_RC=0
+    # The assertion that actually pins the fix is on STDERR. A bash string
+    # cannot hold a NUL, so `$(...)` over UTF-16 output still *yields*
+    # "PARSE OK" -- it just prints the warning while doing so. Checking the
+    # text alone would pass with the fix removed.
+    pwsh_capture STUB_OUT STUB_RC -Command 'ignored' 2>"${TMP}/stub.err"
+    check "pwsh_capture emits no 'ignored null byte' warning" "" "$(cat "${TMP}/stub.err")"
+    check "pwsh_capture strips NUL bytes from UTF-16 output" "PARSE OK" "$STUB_OUT"
+    check "pwsh_capture preserves pwsh's exit status" "7" "$STUB_RC"
+    [[ "$FAILURES" -eq 0 ]]
+) || FAILURES=$((FAILURES+1))
+
 if command -v pwsh >/dev/null 2>&1; then
     echo "[capability probe] pwsh: AVAILABLE ($(pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' 2>/dev/null || echo 'version unknown'))"
 
@@ -110,10 +170,10 @@ if command -v pwsh >/dev/null 2>&1; then
     # by mutation-testing this very block: the injected syntax error
     # produced no output at all until this was fixed.)
     PARSE_RC=0
-    PARSE_OUT="$(pwsh -NoProfile -File "${SCRIPT_DIR}/tests/lib/ps-parse-check.ps1" \
+    pwsh_capture PARSE_OUT PARSE_RC \
+        -File "${SCRIPT_DIR}/tests/lib/ps-parse-check.ps1" \
         "${SCRIPT_DIR}/install.ps1" "${SCRIPT_DIR}/uninstall.ps1" "$HELPER" \
-        "${SCRIPT_DIR}/tests/lib/ps-parse-check.ps1" "${SCRIPT_DIR}/tests/lib/ps-wrapper-tests.ps1" 2>&1)" \
-        || PARSE_RC=$?
+        "${SCRIPT_DIR}/tests/lib/ps-parse-check.ps1" "${SCRIPT_DIR}/tests/lib/ps-wrapper-tests.ps1"
     printf '%s\n' "$PARSE_OUT" | sed 's/^/  /'
     check "every shipped .ps1 file parses" "0" "$PARSE_RC"
 
@@ -122,8 +182,8 @@ if command -v pwsh >/dev/null 2>&1; then
     # Resolve-DelegableBash are platform-independent, so running them here
     # exercises the real code rather than a simulation of it.
     BEHAVIOUR_RC=0
-    BEHAVIOUR_OUT="$(pwsh -NoProfile -File "${SCRIPT_DIR}/tests/lib/ps-wrapper-tests.ps1" \
-        "${SCRIPT_DIR}" 2>&1)" || BEHAVIOUR_RC=$?
+    pwsh_capture BEHAVIOUR_OUT BEHAVIOUR_RC \
+        -File "${SCRIPT_DIR}/tests/lib/ps-wrapper-tests.ps1" "${SCRIPT_DIR}"
     printf '%s\n' "$BEHAVIOUR_OUT" | sed 's/^/  /'
     check "find-bash.ps1 resolver behaves correctly (accept + refuse)" "0" "$BEHAVIOUR_RC"
 else
