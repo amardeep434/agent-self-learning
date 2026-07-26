@@ -160,6 +160,43 @@ def insert_message(conn, session_id, idx, content, role="user", timestamp=NOW):
     )
 
 
+# Every genuine spawn in this suite goes through run_script(). Two things it
+# guarantees that a bare subprocess.run does not:
+#
+#   stdin=DEVNULL -- a child that inherits the parent's stdin can block
+#     forever on it. Nothing this suite spawns reads stdin today (checked:
+#     neither coach-rules-eval.py nor coach-signals.py touches it), but the
+#     suite runs under `run-all.sh`, whose own stdin is whatever CI handed
+#     it, and an inherited handle that is never closed is a classic
+#     Windows-only hang. Closing it costs nothing and removes the class.
+#
+#   timeout -- a hung child must fail its OWN test with a name attached,
+#     never consume the whole per-suite budget and take the run down as a
+#     silent exit 124. That is exactly how this suite failed on
+#     windows-latest 3.13, and no single spawn should be able to do it again.
+#
+# The ceiling is per-spawn and generous: a spawn here costs well under a
+# second on Linux and roughly 0.8s on windows-latest, so 60s is ~75x headroom
+# and can only fire on a genuine hang, never on slowness.
+SPAWN_TIMEOUT_SEC = 60
+
+
+def run_script(argv, env=None):
+    """subprocess.run with stdin closed and a per-spawn ceiling."""
+    try:
+        return subprocess.run(
+            argv, capture_output=True, text=True, env=env,
+            stdin=subprocess.DEVNULL, timeout=SPAWN_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AssertionError(
+            "spawn exceeded {}s and was killed: {}\nstdout so far: {!r}\n"
+            "stderr so far: {!r}".format(
+                SPAWN_TIMEOUT_SEC, " ".join(str(a) for a in argv),
+                exc.stdout, exc.stderr)
+        )
+
+
 @contextlib.contextmanager
 def _patched_environ(overrides):
     """Temporarily apply `overrides` to os.environ, restoring it exactly.
@@ -323,10 +360,8 @@ class GenericSessionEngineTest(CoachRulesEvalBase):
     def test_missing_db_yields_empty(self):
         tmp = tempfile.mkdtemp()
         rules_dir = self.write_rules(tmp, {"mega-sessions.md": RULE_MEGA})
-        proc = subprocess.run(
-            [sys.executable, str(SCRIPT), str(rules_dir), str(Path(tmp) / "absent.db")],
-            capture_output=True, text=True,
-        )
+        proc = run_script(
+            [sys.executable, str(SCRIPT), str(rules_dir), str(Path(tmp) / "absent.db")])
         self.assertEqual(proc.returncode, 0)
         self.assertEqual(json.loads(proc.stdout), [])
 
@@ -354,16 +389,13 @@ class CliContractTest(CoachRulesEvalBase):
         env = dict(os.environ)
         env["SL_COPILOT_HOME"] = "/nonexistent-telemetry-store"
         env["CLAUDE_CONFIG_DIR"] = "/nonexistent-telemetry-store"
-        proc = subprocess.run(
-            [sys.executable, str(SCRIPT), str(rules_dir), str(db)],
-            capture_output=True, text=True, env=env)
+        proc = run_script([sys.executable, str(SCRIPT), str(rules_dir), str(db)], env=env)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         signals = json.loads(proc.stdout)
         self.assertEqual([s["id"] for s in signals], ["mega-sessions"])
 
     def test_script_entry_point_reports_bad_usage_on_stderr_and_exits_nonzero(self):
-        proc = subprocess.run(
-            [sys.executable, str(SCRIPT)], capture_output=True, text=True)
+        proc = run_script([sys.executable, str(SCRIPT)])
         self.assertEqual(proc.returncode, 1)
         self.assertEqual(proc.stdout, "")
         self.assertIn("Usage:", proc.stderr)
@@ -383,9 +415,7 @@ class CliContractTest(CoachRulesEvalBase):
         env = dict(os.environ)
         env["SL_COPILOT_HOME"] = "/nonexistent-telemetry-store"
         env["CLAUDE_CONFIG_DIR"] = "/nonexistent-telemetry-store"
-        proc = subprocess.run(
-            [sys.executable, str(SCRIPT), str(rules_dir), str(db)],
-            capture_output=True, text=True, env=env)
+        proc = run_script([sys.executable, str(SCRIPT), str(rules_dir), str(db)], env=env)
         code, stdout, stderr = eval_in_process(
             rules_dir, db, {"SL_COPILOT_HOME": "/nonexistent-telemetry-store",
                             "CLAUDE_CONFIG_DIR": "/nonexistent-telemetry-store"})
@@ -1891,9 +1921,7 @@ class SuggestionOverrideAndScopeTest(CoachRulesEvalBase):
             "SL_COPILOT_HOME": str(self.store),
             "CLAUDE_CONFIG_DIR": str(Path(self.tmp) / "no-claude"),
         })
-        proc = subprocess.run(
-            [sys.executable, str(REPO / "scripts" / "coach-signals.py")],
-            capture_output=True, text=True, env=env)
+        proc = run_script([sys.executable, str(REPO / "scripts" / "coach-signals.py")], env=env)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         return {s["id"]: s for s in json.loads(out.read_text())["signals"]}
 
