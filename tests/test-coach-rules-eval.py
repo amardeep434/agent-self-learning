@@ -13,6 +13,8 @@ Covers:
     directory, so a future change that silently drops evaluable rules (or
     silently adds a fake-evaluating one) fails the suite
 """
+import contextlib
+import io
 import json
 import os
 import re
@@ -37,9 +39,24 @@ SCRIPT = REPO / "scripts" / "coach-rules-eval.py"
 SCHEMA = REPO / "schema" / "session-search-schema.sql"
 VENDOR_RULES = REPO / "vendor" / "coach-rules"
 
-# The suite drives the evaluator as a SUBPROCESS almost everywhere, which is
-# the right default -- it exercises the real CLI contract. This in-process
-# handle exists only for assertions the subprocess boundary destroys: main()
+# The suite used to drive the evaluator as a SUBPROCESS almost everywhere.
+# That cost one cold Python interpreter start per test: 150 spawns, 11.3s of
+# an 11.8s Linux run (96%, measured with cProfile), and >120s on
+# windows-latest -- over the per-suite CI ceiling, so the suite was killed at
+# exit 124 there while passing everywhere else. Process creation plus
+# interpreter startup is several times more expensive on Windows than on
+# Linux, and this suite multiplied that by 150.
+#
+# The evaluator is a stdlib-only module whose main() takes its input from
+# argv and the environment and writes to stdout/stderr, so calling it
+# in-process with those three things redirected exercises exactly the same
+# code -- see run_eval(). What that does NOT cover is the CLI contract
+# itself (shebang, `if __name__`, exit status, real pipe buffering), so a
+# small number of genuine subprocess invocations are kept deliberately:
+# test_missing_db_yields_empty, CliContractTest below, and the coach-signals.py
+# integration tests, which drive a different script entirely.
+#
+# This handle also serves assertions the subprocess boundary destroys: main()
 # emits a signal only when `count is not None and count > 0`, so a return of
 # None and a return of 0 are indistinguishable from outside. See
 # NoLanguageExplorationUnitTest.
@@ -143,6 +160,47 @@ def insert_message(conn, session_id, idx, content, role="user", timestamp=NOW):
     )
 
 
+@contextlib.contextmanager
+def _patched_environ(overrides):
+    """Temporarily apply `overrides` to os.environ, restoring it exactly.
+
+    The evaluator reads SL_COPILOT_HOME / CLAUDE_CONFIG_DIR lazily (no
+    module-level capture at import -- verified), so patching the live
+    environment around the call is equivalent to handing a subprocess a
+    modified env. Process-global, therefore correct only while unittest runs
+    tests serially, which it does by default; do not add parallelism here
+    without revisiting this.
+    """
+    saved = dict(os.environ)
+    try:
+        os.environ.update(overrides)
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+def eval_in_process(rules_dir, db_path, env_overrides):
+    """Run coach-rules-eval.py's main() in this interpreter.
+
+    Returns (exit_code, stdout, stderr) -- the same three things a caller
+    used to take off a CompletedProcess. argv, the environment and both
+    streams are redirected and restored, so this is the same code path the
+    CLI takes minus the interpreter start. See the module-level note above
+    for why this replaced 143 subprocess spawns and what is still spawned.
+    """
+    out, err = io.StringIO(), io.StringIO()
+    saved_argv = sys.argv
+    sys.argv = [str(SCRIPT), str(rules_dir), str(db_path)]
+    try:
+        with _patched_environ(env_overrides), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = CRE.main()
+    finally:
+        sys.argv = saved_argv
+    return code, out.getvalue(), err.getvalue()
+
+
 class CoachRulesEvalBase(unittest.TestCase):
     def run_eval(self, rules_dir, db_path, telemetry_home=None):
         """Always runs with the harness telemetry stores pointed somewhere
@@ -155,19 +213,15 @@ class CoachRulesEvalBase(unittest.TestCase):
         laptop has no Copilot sessions". `telemetry_home=None` means an
         empty, nonexistent store, which is the CI shape.
         """
-        env = dict(os.environ)
         if telemetry_home is None:
-            env["SL_COPILOT_HOME"] = "/nonexistent-telemetry-store"
-            env["CLAUDE_CONFIG_DIR"] = "/nonexistent-telemetry-store"
+            overrides = {"SL_COPILOT_HOME": "/nonexistent-telemetry-store",
+                         "CLAUDE_CONFIG_DIR": "/nonexistent-telemetry-store"}
         else:
-            env["SL_COPILOT_HOME"] = str(telemetry_home)
-            env["CLAUDE_CONFIG_DIR"] = str(telemetry_home)
-        proc = subprocess.run(
-            [sys.executable, str(SCRIPT), str(rules_dir), str(db_path)],
-            capture_output=True, text=True, env=env,
-        )
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        return json.loads(proc.stdout), proc.stderr
+            overrides = {"SL_COPILOT_HOME": str(telemetry_home),
+                         "CLAUDE_CONFIG_DIR": str(telemetry_home)}
+        code, stdout, stderr = eval_in_process(rules_dir, db_path, overrides)
+        self.assertEqual(code, 0, stderr)
+        return json.loads(stdout), stderr
 
     def write_rules(self, tmp, rules):
         rules_dir = Path(tmp) / "rules"
@@ -263,6 +317,69 @@ class GenericSessionEngineTest(CoachRulesEvalBase):
         )
         self.assertEqual(proc.returncode, 0)
         self.assertEqual(json.loads(proc.stdout), [])
+
+
+class CliContractTest(CoachRulesEvalBase):
+    """The properties in-process evaluation cannot cover.
+
+    run_eval() calls main() directly, which is the same code but skips the
+    script's entry point entirely. These few tests keep a real subprocess in
+    the suite so a broken shebang, a broken `if __name__` guard, an exit
+    status that stops matching main()'s return value, or diagnostics written
+    to the wrong stream would still be caught -- none of which the
+    in-process path can see. Deliberately a handful of spawns, not 150.
+    """
+
+    def test_script_entry_point_exits_zero_and_emits_json_on_stdout(self):
+        tmp = tempfile.mkdtemp()
+        rules_dir = self.write_rules(tmp, {"mega-sessions.md": RULE_MEGA})
+        db = Path(tmp) / "search.db"
+        conn = make_db(str(db))
+        insert_session(conn, "s1", 60)
+        insert_session(conn, "s2", 55)
+        conn.commit()
+        conn.close()
+        env = dict(os.environ)
+        env["SL_COPILOT_HOME"] = "/nonexistent-telemetry-store"
+        env["CLAUDE_CONFIG_DIR"] = "/nonexistent-telemetry-store"
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT), str(rules_dir), str(db)],
+            capture_output=True, text=True, env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        signals = json.loads(proc.stdout)
+        self.assertEqual([s["id"] for s in signals], ["mega-sessions"])
+
+    def test_script_entry_point_reports_bad_usage_on_stderr_and_exits_nonzero(self):
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT)], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(proc.stdout, "")
+        self.assertIn("Usage:", proc.stderr)
+
+    def test_in_process_and_subprocess_agree_on_the_same_input(self):
+        """Pins the equivalence the speedup rests on: if main() ever starts
+        depending on something only the real entry point sets up, these two
+        stop matching and this test says so."""
+        tmp = tempfile.mkdtemp()
+        rules_dir = self.write_rules(tmp, {"mega-sessions.md": RULE_MEGA})
+        db = Path(tmp) / "search.db"
+        conn = make_db(str(db))
+        insert_session(conn, "s1", 60)
+        insert_session(conn, "s2", 55)
+        conn.commit()
+        conn.close()
+        env = dict(os.environ)
+        env["SL_COPILOT_HOME"] = "/nonexistent-telemetry-store"
+        env["CLAUDE_CONFIG_DIR"] = "/nonexistent-telemetry-store"
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT), str(rules_dir), str(db)],
+            capture_output=True, text=True, env=env)
+        code, stdout, stderr = eval_in_process(
+            rules_dir, db, {"SL_COPILOT_HOME": "/nonexistent-telemetry-store",
+                            "CLAUDE_CONFIG_DIR": "/nonexistent-telemetry-store"})
+        self.assertEqual(proc.returncode, code)
+        self.assertEqual(json.loads(proc.stdout), json.loads(stdout))
+        self.assertEqual(proc.stderr, stderr)
 
 
 class BespokeAdapterTest(CoachRulesEvalBase):
@@ -1505,14 +1622,11 @@ class SlashAndPlanAdapterTest(CoachRulesEvalBase):
                 handle.write(json.dumps(line) + "\n")
 
     def run_both(self):
-        env = dict(os.environ)
-        env["SL_COPILOT_HOME"] = str(self.store)
-        env["CLAUDE_CONFIG_DIR"] = str(self.claude)
-        proc = subprocess.run(
-            [sys.executable, str(SCRIPT), str(VENDOR_RULES), str(self.db)],
-            capture_output=True, text=True, env=env)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        return json.loads(proc.stdout), proc.stderr
+        code, stdout, stderr = eval_in_process(
+            VENDOR_RULES, self.db,
+            {"SL_COPILOT_HOME": str(self.store), "CLAUDE_CONFIG_DIR": str(self.claude)})
+        self.assertEqual(code, 0, stderr)
+        return json.loads(stdout), stderr
 
     def fired(self, rule_id):
         signals, stderr = self.run_both()
