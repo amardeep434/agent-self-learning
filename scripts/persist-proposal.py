@@ -33,15 +33,18 @@ etc. raise NotImplementedError there), so on Windows this module uses the
 path-based implementation (_write_all_path). There, every directory in the
 chain is *pinned* where the platform allows it: held open root-to-leaf via
 CreateFileW (ctypes, stdlib) with FILE_FLAG_BACKUP_SEMANTICS |
-FILE_FLAG_OPEN_REPARSE_POINT and a share mode omitting FILE_SHARE_DELETE and
-FILE_SHARE_WRITE, so the kernel refuses the swap outright for the duration of
-the write. Pinning is gated on a functional probe that MEASURES that
-guarantee -- it renames a pinned throwaway directory and requires the attempt
-to fail, with a control experiment so an unwritable volume cannot look like
-protection. Where the guarantee does not hold, pinning is off and this
-module's TOCTOU window on that platform is exactly as previously disclosed.
-See lib/win_dir_pin.py for the MSDN citations, the correction of record from
-CI run 30184253819, and _write_all_path's docstring for the sequencing.
+FILE_FLAG_OPEN_REPARSE_POINT and a share mode omitting FILE_SHARE_DELETE (but
+GRANTING FILE_SHARE_WRITE -- creating a file in a directory is a write to the
+directory object, so denying it denies our own staging), which makes the
+kernel refuse any rename or delete of that directory for the duration of the
+write. In-place conversion to a junction is NOT covered; see win_dir_pin.
+Pinning is gated on a functional probe that measures BOTH halves of that
+contract -- an attacker's rename is refused AND our own staged replace inside
+the pinned directory still succeeds -- with a control experiment so an
+unwritable volume cannot look like protection. Where either half fails,
+pinning is off and this module's TOCTOU window on that platform is exactly as
+previously disclosed. See lib/win_dir_pin.py for the MSDN citations and the
+two corrections of record from CI runs 30184253819 and 30184755246.
 
 CONCURRENCY: the plan+write transaction (everything from reading an existing
 MEMORY.md or `.usage.json` through renaming the staged files into place) is
@@ -541,26 +544,29 @@ def _write_all_path(planned: list[tuple[tuple[Path, ...], Path, str, str]]) -> t
     FILE_FLAG_OPEN_REPARSE_POINT and a share mode of FILE_SHARE_READ *only*.
     Omitting FILE_SHARE_DELETE means no other process can obtain delete
     access, and MSDN states delete access "allows both delete and rename
-    operations"; omitting FILE_SHARE_WRITE blocks in-place conversion via
-    FSCTL_SET_REPARSE_POINT.
+    operations". FILE_SHARE_WRITE is deliberately GRANTED: creating a file in
+    a directory is a write to the directory object (FILE_ADD_FILE and
+    FILE_WRITE_DATA are both 0x0002), so denying it denies our own staging.
+    In-place conversion via FSCTL_SET_REPARSE_POINT is therefore NOT blocked,
+    and is not claimed.
 
-    "ATTEMPTS TO" IS DELIBERATE WORDING. That design is documented-correct and
-    nevertheless did not hold the first time it was executed: on Windows CI a
-    pinned directory was renamed anyway, because the pin requested only
-    FILE_READ_ATTRIBUTES and Windows engages its share-access accounting only
-    for opens requesting read/write/delete access. See win_dir_pin's
-    PIN_DESIRED_ACCESS for the citation and the fix.
+    "ATTEMPTS TO" IS DELIBERATE WORDING. The design is documented-correct and
+    was nevertheless wrong twice in practice -- once blocking nothing, once
+    blocking us. Both are recorded in win_dir_pin's module docstring.
 
-    Because of that, `win_dir_pin.available()` no longer means "CreateFileW
-    worked" -- it means "a pinned directory was MEASURED to be un-renameable
-    on this machine" (win_dir_pin.verify_pin_blocks_rename, including a
-    control experiment so an unwritable volume cannot masquerade as
-    protection). If the guarantee does not hold, pinning is disabled and this
-    function keeps exactly the race documented above: disclosed, not
-    silently papered over.
+    So `win_dir_pin.available()` does not mean "CreateFileW worked". It means
+    BOTH halves of the contract were measured on this machine: an attacker's
+    rename is refused AND our own staged replace inside the pinned directory
+    still succeeds (win_dir_pin.verify_pin_contract, with a control experiment
+    so an unwritable volume cannot masquerade as protection). If either half
+    fails, pinning is disabled and this function keeps exactly the race
+    documented above: disclosed, not silently papered over.
 
     Fail-safe posture: unavailable or unopenable -> today's unpinned
-    behaviour; a handle that reports a reparse point -> hard refusal.
+    behaviour; a handle that reports a reparse point -> hard refusal; and a
+    STAGING failure while pins are held -> release everything and re-run the
+    transaction unpinned (see `_write_all_path`), so pinning cannot break
+    persistence even if the probe is somehow wrong again.
     `_PIN_SET_FACTORY` below is the single injection point tests use to
     exercise the sequencing on a host where the Win32 backend can never run.
 
@@ -585,9 +591,66 @@ def _write_all_path(planned: list[tuple[tuple[Path, ...], Path, str, str]]) -> t
     iteration, which is what a future third chain level (none exist today)
     would need to stay safe.
     """
+    pins = _PIN_SET_FACTORY()
+    try:
+        try:
+            return _write_all_path_once(planned, pins)
+        except _StagingFailed as failure:
+            if not pins.pinned_paths():
+                # Nothing was pinned, so pinning cannot be the cause. This is
+                # an ordinary staging failure (permissions, disk full) and
+                # must surface exactly as it always has.
+                raise failure.cause
+    finally:
+        # Released BEFORE the retry, which is the entire point: whatever the
+        # pins were refusing, they are not holding it any more.
+        pins.close_all()
+
+    # Reached only when staging failed while directories were pinned. Staging
+    # touches no real target -- the docstring's "on a staging failure, no real
+    # target has been touched" invariant is what makes this retry safe, and it
+    # is why commit-phase failures are deliberately NOT retried (some entries
+    # would already be committed, and re-running an append would double-apply
+    # it).
+    #
+    # This exists so that "the pin broke persistence" is impossible BY
+    # CONSTRUCTION, not merely improbable by measurement. win_dir_pin's probe
+    # verifies that our own staged replace works while pinned, but it can only
+    # verify it in a temp directory; the store may live on another volume with
+    # different behaviour. A hardening that silently costs the user every
+    # write is worse than the race it closes -- that is not a hypothesis, it
+    # is what CI run 30184755246 measured across 10 of 43 suites.
+    try:
+        return _write_all_path_once(planned, win_dir_pin.PinSet(enabled=False))
+    except _StagingFailed as failure:
+        raise failure.cause
+
+
+class _StagingFailed(Exception):
+    """Internal marker: an OSError raised during the STAGING phase.
+
+    Never escapes this module -- `_write_all_path` either retries or re-raises
+    the original `cause`. It exists only to distinguish "nothing has been
+    committed yet, the whole transaction can safely be re-run" from a
+    commit-phase failure, where it cannot.
+
+    Deliberately does NOT wrap PersistError: confinement refusals and
+    reparse-point rejections are attack signals, and retrying one without its
+    pins would be the single worst thing this module could do. PersistError is
+    not an OSError subclass, so it bypasses the wrapping entirely rather than
+    relying on clause ordering.
+    """
+
+    def __init__(self, cause: OSError) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+
+
+def _write_all_path_once(planned: list[tuple[tuple[Path, ...], Path, str, str]],
+                         pins) -> tuple[list[str], int]:
+    """One attempt at the staged-write transaction. See `_write_all_path`."""
     staged: list[tuple[str, Path]] = []
     total = 0
-    pins = _PIN_SET_FACTORY()
     try:
         for dirs, target, mode, content in planned:
             parent: Path | None = None
@@ -610,9 +673,11 @@ def _write_all_path(planned: list[tuple[tuple[Path, ...], Path, str, str]]) -> t
                 # Pin *after* mkdir (nothing exists to open before it) and
                 # after the path-based check, so the handle-derived verdict
                 # is the authoritative one: from here until close_all() the
-                # kernel refuses any delete/rename/reparse-conversion of this
-                # directory. Root-to-leaf order matters -- once level N-1 is
-                # pinned, resolving the name of level N through it is safe.
+                # kernel refuses any rename or delete of this directory (NOT
+                # in-place reparse conversion -- see win_dir_pin's
+                # PIN_SHARE_MODE for why write sharing must be granted).
+                # Root-to-leaf order matters -- once level N-1 is pinned,
+                # resolving the name of level N through it is safe.
                 try:
                     pins.pin(directory)
                 except win_dir_pin.ReparsePointError as exc:
@@ -643,6 +708,19 @@ def _write_all_path(planned: list[tuple[tuple[Path, ...], Path, str, str]]) -> t
             staged.append((tmp_name, target))
             total += len(content.encode("utf-8"))
 
+    except OSError as exc:
+        # Staging phase only -- the commit loop below is outside this handler
+        # on purpose, because a failure there may leave earlier entries
+        # committed and is therefore not retryable.
+        for tmp_name, _target in staged:
+            _cleanup_tmp(tmp_name)
+        raise _StagingFailed(exc) from exc
+    except BaseException:
+        for tmp_name, _target in staged:
+            _cleanup_tmp(tmp_name)
+        raise
+
+    try:
         written: list[str] = []
         for tmp_name, target in staged:
             os.replace(tmp_name, target)
@@ -652,10 +730,6 @@ def _write_all_path(planned: list[tuple[tuple[Path, ...], Path, str, str]]) -> t
         for tmp_name, _target in staged:
             _cleanup_tmp(tmp_name)
         raise
-    finally:
-        # Held only for the duration of the transaction. Releasing must never
-        # mask a real failure, so close_all() swallows its own errors.
-        pins.close_all()
 
 
 # The one seam tests use to drive the Windows pinning sequence from a POSIX

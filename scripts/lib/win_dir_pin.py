@@ -37,50 +37,57 @@ check -> stage -> rename sequence.
     So the handle is the named directory itself, never whatever a junction
     points at, and "is this a reparse point?" becomes a property of the
     *opened object* rather than of a re-resolved path string.
-  * `dwShareMode = FILE_SHARE_READ` -- deliberately omitting
-    FILE_SHARE_DELETE and FILE_SHARE_WRITE. This is the load-bearing part.
-    MSDN, dwShareMode:
+  * `dwShareMode = FILE_SHARE_READ | FILE_SHARE_WRITE` -- granting write
+    sharing, denying ONLY FILE_SHARE_DELETE. MSDN, dwShareMode:
       FILE_SHARE_DELETE -- "Enables subsequent open operations on a file or
       device to request delete access. Otherwise, no process can open the file
       or device if it requests delete access. ... Note  Delete access allows
       both delete and rename operations."
-      FILE_SHARE_WRITE -- "... Otherwise, no process can open the file or
-      device if it requests write access."
     https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew
 
-Swapping a directory for a junction requires deleting or renaming it first
-(needs delete access -> blocked) or converting it in place via
-FSCTL_SET_REPARSE_POINT (needs write access -> blocked). So while the handle
-is held the swap is *prevented by the kernel*, not detected afterwards. That
-is strictly stronger than a check.
+So while the handle is held, renaming or deleting the pinned directory is
+*prevented by the kernel*, not detected afterwards. That is strictly stronger
+than a check, and it is the swap the measured ~18% TOCTOU race performs.
 
-CORRECTION OF RECORD (2026-07-26): the paragraph above is the DESIGN, and it
-was wrong once in practice. The first version of this module requested
-`FILE_READ_ATTRIBUTES` as its desired access. On Windows CI it opened the
-handle, read the attributes back correctly, reported AVAILABLE -- and a
-pinned directory was renamed anyway. The share mode was reaching the kernel
-intact; the open simply never entered the kernel's share-access accounting,
-because that accounting is engaged only for opens requesting read, write or
-delete access. See PIN_DESIRED_ACCESS below for the citation and the fix.
+WHAT IS CLAIMED, AND WHAT IS NOT
+--------------------------------
+Claimed: a pinned directory cannot be RENAMED OR DELETED while held.
+NOT claimed: that it cannot be converted in place to a junction via
+FSCTL_SET_REPARSE_POINT. That needs a write handle, and denying write sharing
+is impossible here -- see PIN_SHARE_MODE. An earlier version of this docstring
+claimed both; it was describing a configuration that cannot coexist with
+writing anything at all.
 
-The lesson is encoded structurally, not just in prose: `available()` no
-longer means "CreateFileW worked", it means "a pinned directory was measured
-to be un-renameable on this machine" (see verify_pin_blocks_rename). If the
-guarantee does not hold, pinning is DISABLED and `_write_all_path` keeps its
-previously documented race. A race we describe honestly is better than a
-protection we advertise and do not have.
+TWO CORRECTIONS OF RECORD (2026-07-26)
+--------------------------------------
+This module has been wrong on Windows twice, and both times every test passed
+except the one that mattered. Recording them because the shape repeats:
 
-WHY HOLDING THE HANDLE DOES NOT BLOCK OUR OWN WRITES
-----------------------------------------------------
-The share mode governs subsequent opens *of that same object* -- the
-directory. Creating, renaming and replacing files *inside* a pinned directory
-opens the child objects, not the parent, and is unaffected. The dispositive
-precedent is Windows itself: the OS holds an open handle to every process's
-current directory for the life of the process ("The primary consequence of
-this curse is that you can't delete a directory if it is the current directory
-of a running process." -- Raymond Chen, The Old New Thing,
-https://devblogs.microsoft.com/oldnewthing/20101109-00/?p=12323) and yet every
-process on the machine creates files in its own working directory.
+  1. It requested `FILE_READ_ATTRIBUTES` as its desired access. CI opened the
+     handle, read attributes back correctly, reported AVAILABLE -- and the
+     pinned directory was renamed anyway. The share mode reached the kernel
+     intact; the open never entered the share-access accounting, which is
+     engaged only for opens requesting read/write/delete access. See
+     PIN_DESIRED_ACCESS.
+  2. With that fixed the guarantee held -- and 10 of 43 suites failed, because
+     the pin blocked THIS PROCESS's own writes. Creating a file in a directory
+     is a *write to the directory object* (FILE_ADD_FILE == FILE_WRITE_DATA ==
+     0x0002), so denying FILE_SHARE_WRITE denied our own staging. See
+     PIN_SHARE_MODE.
+
+Both were reasoned from correct documentation applied one level away from the
+actual operation. In particular, the claim that holding a directory handle
+cannot block writes inside it was argued from Windows' own current-directory
+handle -- a handle held for *traversal*, under a share mode that does not deny
+write. The precedent was real and the inference from it was not.
+
+The lesson is encoded structurally rather than in prose: `available()` does
+not mean "CreateFileW worked". It means BOTH halves of the contract were
+measured on this machine -- an attacker's rename is refused AND our own staged
+replace inside the pinned directory still succeeds (see verify_pin_contract).
+Anything else DISABLES pinning and `_write_all_path` keeps its previously
+documented race. A race described honestly beats a protection advertised and
+absent, and both beat a write path that silently stops working.
 
 VERIFICATION
 ------------
@@ -101,7 +108,14 @@ FAIL-SAFE POSTURE (deliberate, and asymmetric on purpose)
     exclusive handle, unusual filesystem), we degrade to the *existing*
     unpinned behaviour rather than refusing the write. Turning a working
     Windows install into a failing one to close a race would be a worse
-    regression than the race.
+    regression than the race -- and that is not hypothetical, it is what
+    correction 2 above actually did to 10 of 43 suites.
+  * `_write_all_path` additionally releases every pin and retries the whole
+    transaction unpinned if STAGING fails while pins are held. The probe
+    should make that unreachable; it exists so that "pinning can break
+    persistence" is impossible by construction rather than by measurement,
+    since the probe necessarily runs against a temp directory and the store
+    may live on another volume.
   * If a pin *succeeds* and the handle says the object is a reparse point, we
     refuse hard. That is an attack signal, and it is the same verdict
     persist-proposal's `_reject_if_symlink` already returns for the path-based
@@ -128,6 +142,11 @@ FILE_READ_ATTRIBUTES = 0x0080
 # kernel's share-access accounting at all; see PIN_DESIRED_ACCESS below.
 FILE_LIST_DIRECTORY = 0x0001
 FILE_SHARE_READ = 0x00000001
+# Named even though FILE_SHARE_DELETE is never granted: the omission is the
+# mechanism, and a named constant lets a test assert the bit is absent rather
+# than assert against a magic number.
+FILE_SHARE_WRITE = 0x00000002
+FILE_SHARE_DELETE = 0x00000004
 OPEN_EXISTING = 3
 FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
@@ -136,10 +155,48 @@ FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 
 _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
-# Share mode is the whole point of this module; naming it makes the omission
-# of FILE_SHARE_DELETE/FILE_SHARE_WRITE legible instead of looking like a
+# WHY FILE_SHARE_WRITE IS GRANTED AND FILE_SHARE_DELETE IS NOT.
+#
+# The second Windows CI run (30184755246) had the guarantee holding -- and 10
+# of 43 suites failing, because the pin blocked THIS PROCESS's own writes.
+# Persistence was completely broken whenever pinning engaged.
+#
+# The cause is a single documented equivalence:
+#
+#   FILE_WRITE_DATA (0x0002) -- "For a file object, the right to write data to
+#   the file. For a directory object, the right to create a file in the
+#   directory (FILE_ADD_FILE)."
+#   FILE_ADD_FILE   (0x0002) -- "For a directory, the right to create a file
+#   in the directory."
+#   https://learn.microsoft.com/en-us/windows/win32/fileio/file-access-rights-constants
+#
+# Creating a file inside a directory IS a write to the directory object. So
+# `tempfile.mkstemp(dir=...)` and the commit-phase `os.replace` both open the
+# pinned directory requesting FILE_ADD_FILE == FILE_WRITE_DATA, which makes
+# the share-access check see WriteAccess -- and a share mode omitting
+# FILE_SHARE_WRITE refuses it. We were denying ourselves the one operation
+# this module exists to protect.
+#
+# The two properties need DIFFERENT flags, which is why they are not mutually
+# exclusive:
+#
+#   deny FILE_SHARE_DELETE -> an attacker cannot rename or delete the pinned
+#                             directory (MSDN: delete access "allows both
+#                             delete and rename operations")
+#   allow FILE_SHARE_WRITE -> we can still create and replace files INSIDE it
+#
+# WHAT THIS COSTS, STATED PLAINLY. Granting FILE_SHARE_WRITE means a
+# concurrent process can still open the directory for write, so converting it
+# in place to a junction via FSCTL_SET_REPARSE_POINT is no longer blocked.
+# This module therefore claims exactly one thing: the pinned directory cannot
+# be RENAMED OR DELETED while held. That is the swap the measured ~18% TOCTOU
+# race actually performs. In-place reparse conversion is a different, narrower
+# attack, and it is NOT covered -- the earlier docstring claiming otherwise was
+# describing a configuration that cannot coexist with writing anything.
+#
+# Naming the mode makes the asymmetry legible instead of looking like a
 # forgotten flag, and lets a test assert the value directly.
-PIN_SHARE_MODE = FILE_SHARE_READ
+PIN_SHARE_MODE = FILE_SHARE_READ | FILE_SHARE_WRITE
 PIN_FLAGS = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT
 
 # WHY FILE_LIST_DIRECTORY IS HERE AND NOT JUST FILE_READ_ATTRIBUTES.
@@ -170,7 +227,7 @@ PIN_FLAGS = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT
 #
 # This is a REASONED fix to a MEASURED failure, and reasoning is exactly what
 # produced the original bug. So it is not trusted: available() now verifies
-# the guarantee by attempting a real rename (see verify_pin_blocks_rename).
+# BOTH halves of the contract at runtime (see verify_pin_contract).
 PIN_DESIRED_ACCESS = FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES
 
 
@@ -415,7 +472,9 @@ class PinSet:
         self._pins.clear()
 
 
-GUARANTEE_HELD = "verified: a pinned directory could not be renamed"
+GUARANTEE_HELD = (
+    "verified: a pinned directory could not be renamed, and our own staged "
+    "replace inside it still succeeded")
 GUARANTEE_NO_BACKEND = "no kernel32 -- expected on POSIX"
 GUARANTEE_NOT_ENFORCED = (
     "kernel32 present, but the kernel did NOT block a rename of a pinned "
@@ -423,35 +482,81 @@ GUARANTEE_NOT_ENFORCED = (
 GUARANTEE_INCONCLUSIVE = (
     "kernel32 present, but the control rename failed too -- cannot tell "
     "protection from an unwritable volume, so pinning is disabled")
+GUARANTEE_BLOCKS_OUR_WRITES = (
+    "kernel32 present and the pin engages, but it also blocks this process's "
+    "own staged replace inside the pinned directory -- pinning disabled, "
+    "because hardening that breaks persistence is worse than the race it closes")
 
 
-def verify_pin_blocks_rename(directory, moved, opener=None, rename=None):
-    """Measure whether pinning `directory` actually prevents renaming it.
+def staged_replace_probe(directory):
+    """Perform exactly what `_write_all_path` does inside a store directory.
 
-    Returns one of the GUARANTEE_* reason constants. This is THE contract of
-    the module, and it is measured rather than assumed -- the first version
-    of this file shipped a design that was correct according to MSDN's
-    share-mode wording and did not hold on a real Windows runner. Every test
-    passed except this property, because nothing tested this property.
+    Not an approximation of it: create a destination, stage a temp file
+    alongside it with `tempfile.mkstemp(dir=...)`, and `os.replace` the temp
+    file OVER the existing destination. Those are the three operations that
+    open the parent directory requesting FILE_ADD_FILE, and therefore the
+    three a share mode can refuse. Raises OSError if any is refused.
 
-    Three outcomes, deliberately distinguished:
+    A probe that tested a weaker operation would be the same mistake this
+    module has now made twice: verifying something adjacent to the property
+    that actually matters.
+    """
+    target = os.path.join(directory, "pin-probe-target")
+    with open(target, "w") as handle:
+        handle.write("x")
+    fd, tmp = tempfile.mkstemp(dir=directory)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write("y")
+    except BaseException:
+        os.close(fd)
+        raise
+    os.replace(tmp, target)
 
-      * rename fails while pinned, succeeds after release -> HELD.
-      * rename SUCCEEDS while pinned                      -> NOT_ENFORCED.
-      * rename fails while pinned AND after release       -> INCONCLUSIVE.
-        Without this control experiment a read-only volume, a permission
-        problem or an antivirus lock would look exactly like protection --
-        the module would report AVAILABLE on the strength of a failure that
-        had nothing to do with the pin.
 
-    `opener`/`rename` are injectable so the decision logic is executable on a
-    POSIX host, where CreateFileW cannot run. They default to the real ones.
+def verify_pin_contract(directory, moved, opener=None, rename=None,
+                        write_probe=None):
+    """Measure BOTH halves of the contract, as one check. Returns a GUARANTEE_*.
+
+    The module needs two properties simultaneously, and either one alone is
+    misleading:
+
+      (a) an attacker cannot rename or delete the pinned directory, and
+      (b) THIS process can still stage and replace files inside it.
+
+    Verifying only (a) is what shipped last round: the probe reported
+    AVAILABLE, the guarantee genuinely held, and 10 of 43 suites failed
+    because persistence was broken on every Windows write. A "verified"
+    hardening that silently costs the user every write is worse than the race
+    it closes, so (b) is now part of the same verdict rather than a separate
+    concern nobody checked.
+
+    Order matters: (b) is measured first and while pinned. If our own writes
+    are refused there is nothing to discuss about (a), and reporting
+    BLOCKS_OUR_WRITES names the real problem instead of a downstream symptom.
+
+    Outcomes:
+
+      * writes refused while pinned                        -> BLOCKS_OUR_WRITES
+      * writes fine, rename SUCCEEDS while pinned          -> NOT_ENFORCED
+      * writes fine, rename blocked, blocked after release -> INCONCLUSIVE
+        (the control experiment: without it a read-only volume, a permissions
+        problem or an antivirus lock looks exactly like protection)
+      * writes fine, rename blocked, allowed after release -> HELD
+
+    `opener`/`rename`/`write_probe` are injectable so this decision logic is
+    executable on a POSIX host, where CreateFileW cannot run.
     """
     opener = opener or open_pin
     rename = rename or os.rename
+    write_probe = write_probe or staged_replace_probe
 
     pin = opener(directory)
     try:
+        try:
+            write_probe(directory)
+        except OSError:
+            return GUARANTEE_BLOCKS_OUR_WRITES
         try:
             rename(directory, moved)
         except OSError:
@@ -477,14 +582,17 @@ def _probe() -> "tuple[bool, str]":
     Mirrors persist-proposal's `_probe_dir_fd_support` in spirit and for the
     same reason -- this codebase has been bitten repeatedly by assuming what
     a platform *name* implies. It goes further than that probe because this
-    module has already been wrong once in a way an open/verify/close cycle
-    could not detect: the handle opened, the attributes read back correctly,
-    and the directory was renamed out from under it anyway.
+    module has already been wrong TWICE in ways a narrower probe could not
+    detect. First: the handle opened, the attributes read back correctly, and
+    the directory was renamed out from under it anyway. Then, after that was
+    fixed: the guarantee held and the pin blocked this process's own writes,
+    breaking persistence on every Windows run.
 
-    So availability now MEANS "the kernel demonstrably refuses the swap".
-    Anything else disables pinning, which returns `_write_all_path` to
-    exactly its previous behaviour -- a documented race rather than an
-    advertised protection that is not there.
+    So availability now MEANS "the kernel demonstrably refuses the swap AND
+    our own staged replace inside the pinned directory still works". Anything
+    else disables pinning, which returns `_write_all_path` to exactly its
+    previous behaviour -- a documented race rather than an advertised
+    protection that is not there, and never a broken write path.
     """
     if _win32() is None:
         return (False, GUARANTEE_NO_BACKEND)
@@ -492,7 +600,7 @@ def _probe() -> "tuple[bool, str]":
         with tempfile.TemporaryDirectory() as d:
             target = os.path.join(d, "probe-dir")
             os.mkdir(target)
-            reason = verify_pin_blocks_rename(target, os.path.join(d, "probe-moved"))
+            reason = verify_pin_contract(target, os.path.join(d, "probe-moved"))
         return (reason == GUARANTEE_HELD, reason)
     except (OSError, ReparsePointError, ValueError) as exc:
         return (False, "probe raised {}: {}".format(type(exc).__name__, exc))
