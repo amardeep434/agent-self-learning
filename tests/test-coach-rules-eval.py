@@ -22,13 +22,37 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 # The telemetry fixture builders live with the telemetry suite; importing
 # them here keeps ONE definition of "what a real Copilot event looks like"
 # instead of a second copy that could drift from the real store.
+import sys as _sys
 import importlib.util as _ilu
+
+
+def _phase(text):
+    """Announce a module-level phase on the real stderr, flushed immediately.
+
+    Import runs before unittest exists, so an import that hangs produces no
+    dots and no test name -- indistinguishable from "hung on the first test"
+    in a killed CI job. Three lines make those two cases distinguishable.
+    See the _ProgressResult note at the bottom of this file for the incident
+    that motivated all of this.
+    """
+    stream = _sys.__stderr__
+    if stream is None:
+        return
+    try:
+        stream.write("[phase] {}\n".format(text))
+        stream.flush()
+    except (ValueError, OSError):
+        pass
+
+
+_phase("importing tests/test-telemetry.py (shared fixtures)")
 _TFIX_SPEC = _ilu.spec_from_file_location(
     "test_telemetry_fixtures", str(Path(__file__).resolve().parent / "test-telemetry.py"))
 TFIX = _ilu.module_from_spec(_TFIX_SPEC)
@@ -60,10 +84,12 @@ VENDOR_RULES = REPO / "vendor" / "coach-rules"
 # emits a signal only when `count is not None and count > 0`, so a return of
 # None and a return of 0 are indistinguishable from outside. See
 # NoLanguageExplorationUnitTest.
+_phase("importing scripts/coach-rules-eval.py")
 _EVAL_SPEC = _ilu.spec_from_file_location("coach_rules_eval_inproc", str(SCRIPT))
 CRE = _ilu.module_from_spec(_EVAL_SPEC)
 sys.path.insert(0, str(REPO / "scripts" / "lib"))
 _EVAL_SPEC.loader.exec_module(CRE)
+_phase("module import complete; handing off to unittest")
 parse_rule = CRE.parse_rule
 eval_no_language_exploration = CRE.eval_no_language_exploration
 
@@ -2555,5 +2581,80 @@ class CoverageAssertionTest(CoachRulesEvalBase):
         self.assertEqual(len(rule_files), self.EXPECTED_TOTAL_RULES)
 
 
+# ---------------------------------------------------------------------------
+# Progress reporting. This suite was killed at the 120s per-suite ceiling on
+# windows-latest 3.13 having emitted NOTHING -- not one dot -- which left no
+# way to tell a hang from slowness, or to name the test responsible. That
+# cost a full CI round to not-locate. Two causes are possible for the
+# silence and only one is a hang: stdout/stderr are block-buffered to a pipe
+# in CI, and a SIGKILLed process loses whatever is still buffered, so a suite
+# that was running perfectly well can also die mute.
+#
+# The fix is to make muteness impossible rather than to guess which it was:
+# write the name of each test to the real stderr BEFORE it runs and flush
+# immediately, so whatever the last line says is the test that was in flight
+# when the axe fell. Then a timeout localizes itself.
+#
+# sys.__stderr__, not sys.stderr, deliberately: eval_in_process() redirects
+# sys.stdout/sys.stderr while the evaluator runs, and this must be immune to
+# that. (unittest's own dots already are -- TextTestRunner binds its stream
+# at construction, before any redirect -- verified, but this reporter does
+# not rely on that.)
+#
+# Timings are collected too, and the slowest tests printed at the end: if the
+# next Windows run is slow rather than hung, that list says where the time
+# went instead of requiring another round to find out.
+class _ProgressResult(unittest.TextTestResult):
+    SLOWEST_N = 10
+    SLOW_TEST_SEC = 1.0
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.timings = []
+        self._started = None
+
+    def _note(self, text):
+        stream = sys.__stderr__
+        if stream is None:  # pythonw / no console
+            return
+        try:
+            stream.write(text)
+            stream.flush()
+        except (ValueError, OSError):
+            pass
+
+    def startTest(self, test):
+        self._started = time.time()
+        self._note("[run] {}\n".format(test.id()))
+        super().startTest(test)
+
+    def stopTest(self, test):
+        super().stopTest(test)
+        if self._started is not None:
+            self.timings.append((time.time() - self._started, test.id()))
+            self._started = None
+
+    def print_slowest(self):
+        if not self.timings:
+            return
+        slowest = sorted(self.timings, reverse=True)[: self.SLOWEST_N]
+        if slowest[0][0] < self.SLOW_TEST_SEC:
+            self._note("[timing] slowest test {:.2f}s -- nothing notable\n".format(slowest[0][0]))
+            return
+        self._note("[timing] slowest {} test(s):\n".format(len(slowest)))
+        for elapsed, name in slowest:
+            self._note("[timing]   {:6.2f}s  {}\n".format(elapsed, name))
+
+
+class _ProgressRunner(unittest.TextTestRunner):
+    resultclass = _ProgressResult
+
+    def run(self, test):
+        result = super().run(test)
+        if isinstance(result, _ProgressResult):
+            result.print_slowest()
+        return result
+
+
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(testRunner=_ProgressRunner)

@@ -158,7 +158,15 @@ run_py() {
         FAILED+=("$t [no python3]")
         return
     fi
-    run_with_timeout python3 "$t"
+    # `-u` (and PYTHONUNBUFFERED for anything the suite itself spawns): a
+    # suite killed at SUITE_TIMEOUT loses whatever is still sitting in a
+    # block-buffered pipe, so without this a timeout can report NOTHING --
+    # no dots, no test names -- and "hung immediately" looks identical to
+    # "ran fine for 119s then got killed". That happened on windows-latest
+    # 3.13 for tests/test-coach-rules-eval.py and cost a full CI round to
+    # not-diagnose. Unbuffered output is the difference between a timeout
+    # that names the test in flight and one that says nothing at all.
+    run_with_timeout env PYTHONUNBUFFERED=1 python3 -u "$t"
     rc=$?
     if [[ "$TIMED_OUT" == "true" ]]; then
         echo "FAIL: $t (exit $rc — timed out after ${SUITE_TIMEOUT}s and was killed)"
