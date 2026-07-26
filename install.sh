@@ -335,13 +335,82 @@ if [[ -d "${HOME}/.copilot" ]]; then
     do_mkdir "${HOME}/.copilot/hooks"
     COPILOT_HOOK_SRC="${SCRIPT_DIR}/config/copilot-hooks.json"
     COPILOT_HOOK_DST="${HOME}/.copilot/hooks/self-learning.json"
-    if [[ -f "$COPILOT_HOOK_DST" ]]; then
-        echo "  Already exists: $COPILOT_HOOK_DST (skipping)"
-    elif [[ "$DRY_RUN" == "true" ]]; then
-        echo "[DRY RUN] render ${COPILOT_HOOK_SRC} -> ${COPILOT_HOOK_DST} (__SL_SCRIPTS_DIR__ -> ${SL_SCRIPTS})"
-    else
+    # An existing hook file used to be skipped outright with "Already exists
+    # ... (skipping)". That made upgrading a SILENT NO-OP: anyone who had
+    # installed before the vendor-neutral store landed kept a hook pointing at
+    # the old ~/.claude/scripts/self-learning/... path, re-ran install.sh, was
+    # told it succeeded, and got no learning at all. Observed for real on the
+    # reporter's machine, where the file had to be re-rendered by hand.
+    #
+    # Three distinct states now, because "leave it alone" and "overwrite it"
+    # are both wrong as a blanket rule:
+    #
+    #   up to date   -- byte-identical to what we would render: say so, touch
+    #                   nothing.
+    #   ours, stale  -- normalizing every path that sits in front of one of
+    #                   OUR script names back to the template placeholder
+    #                   reproduces the template verbatim, so the only thing
+    #                   that differs is the install location. Nothing of the
+    #                   user's is in there to lose: re-render, and print the
+    #                   before/after paths.
+    #   ours, edited -- references our script but does not normalize to the
+    #                   template, i.e. someone changed a timeout or added a
+    #                   hook. Re-render (an upgrade that leaves a broken path
+    #                   in place is the defect being fixed) but keep a
+    #                   timestamped .bak alongside and say where it went.
+    #   not ours     -- never mentions our script. Do NOT overwrite someone
+    #                   else's hook file; warn loudly, twice (here and in the
+    #                   final summary), with the exact content to merge.
+    _render_copilot_hook() {
         sed "s|__SL_SCRIPTS_DIR__|${SL_SCRIPTS}|g" "$COPILOT_HOOK_SRC" > "$COPILOT_HOOK_DST"
-        echo "  Rendered: copilot-hooks.json -> $COPILOT_HOOK_DST"
+    }
+    # Replace any absolute path immediately preceding one of our script names
+    # with the template's placeholder. Basic (not -E) sed for portability
+    # across GNU, BSD/macOS and MSYS.
+    _normalize_copilot_hook() {
+        sed 's#[^" ]*/copilot-session-review\.sh#__SL_SCRIPTS_DIR__/copilot-session-review.sh#g' "$1"
+    }
+
+    if [[ ! -f "$COPILOT_HOOK_DST" ]]; then
+        if [[ "$DRY_RUN" == "true" ]]; then
+            echo "[DRY RUN] render ${COPILOT_HOOK_SRC} -> ${COPILOT_HOOK_DST} (__SL_SCRIPTS_DIR__ -> ${SL_SCRIPTS})"
+        else
+            _render_copilot_hook
+            echo "  Rendered: copilot-hooks.json -> $COPILOT_HOOK_DST"
+        fi
+    elif [[ "$(sed "s|__SL_SCRIPTS_DIR__|${SL_SCRIPTS}|g" "$COPILOT_HOOK_SRC")" == "$(cat "$COPILOT_HOOK_DST")" ]]; then
+        echo "  Up to date: $COPILOT_HOOK_DST (already points at ${SL_SCRIPTS})"
+    elif [[ "$(_normalize_copilot_hook "$COPILOT_HOOK_DST")" == "$(cat "$COPILOT_HOOK_SRC")" ]]; then
+        OLD_HOOK_PATH="$(sed -n 's#.*"bash": "bash \(.*\)/copilot-session-review\.sh".*#\1#p' "$COPILOT_HOOK_DST" | head -n 1)"
+        if [[ "$DRY_RUN" == "true" ]]; then
+            echo "[DRY RUN] re-render STALE hook ${COPILOT_HOOK_DST}: ${OLD_HOOK_PATH:-<unknown>} -> ${SL_SCRIPTS}"
+        else
+            _render_copilot_hook
+            echo "  UPDATED (was stale): $COPILOT_HOOK_DST"
+            echo "    hook now runs ${SL_SCRIPTS}/copilot-session-review.sh"
+            echo "    (previously ${OLD_HOOK_PATH:-<unknown>}/copilot-session-review.sh)"
+        fi
+    elif grep -q 'copilot-session-review\.sh' "$COPILOT_HOOK_DST"; then
+        COPILOT_HOOK_BAK="${COPILOT_HOOK_DST}.bak-$(date -u +%Y%m%dT%H%M%SZ)"
+        if [[ "$DRY_RUN" == "true" ]]; then
+            echo "[DRY RUN] back up locally-modified ${COPILOT_HOOK_DST} -> ${COPILOT_HOOK_BAK}, then re-render"
+        else
+            cp "$COPILOT_HOOK_DST" "$COPILOT_HOOK_BAK"
+            _render_copilot_hook
+            echo "  UPDATED (had local modifications): $COPILOT_HOOK_DST"
+            echo "    previous version saved to: $COPILOT_HOOK_BAK"
+            echo "    re-apply any customizations from that file by hand."
+        fi
+    else
+        COPILOT_HOOK_CONFLICT="$COPILOT_HOOK_DST"
+        echo "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+        echo "  !!! NOT INSTALLED: $COPILOT_HOOK_DST already exists and is NOT ours"
+        echo "  !!! (it does not reference copilot-session-review.sh). Refusing to"
+        echo "  !!! overwrite someone else's hook file. Copilot CLI sessions will"
+        echo "  !!! NOT be reviewed until you merge this in by hand:"
+        echo "  !!!"
+        sed "s|__SL_SCRIPTS_DIR__|${SL_SCRIPTS}|g" "$COPILOT_HOOK_SRC" | sed 's/^/  !!!   /'
+        echo "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
     fi
 else
     echo "  ~/.copilot not found — Copilot CLI not installed; skipping (re-run install.sh after installing it)"
@@ -459,6 +528,16 @@ echo "harnesses, legacy store, and any silent persistence failures):"
 echo "  bash ${SL_SCRIPTS}/doctor.sh"
 echo ""
 if [[ -d "${HOME}/.copilot" ]]; then
-    echo "GitHub Copilot CLI: hooks were installed to ~/.copilot/hooks/self-learning.json"
+    if [[ -n "${COPILOT_HOOK_CONFLICT:-}" ]]; then
+        # Repeated here on purpose: Step 4b's output scrolls past on a normal
+        # install, and a hook that was never registered is indistinguishable
+        # from a working one until sessions quietly stop being reviewed --
+        # the exact silent-failure class this project exists to eliminate.
+        echo "ACTION REQUIRED -- GitHub Copilot CLI hooks were NOT installed:"
+        echo "  ${COPILOT_HOOK_CONFLICT} exists and is not ours; see Step 4b above"
+        echo "  for the JSON to merge. Until then, Copilot sessions are not reviewed."
+    else
+        echo "GitHub Copilot CLI: hooks were installed to ~/.copilot/hooks/self-learning.json"
+    fi
     echo ""
 fi

@@ -25,7 +25,7 @@ STORE="${TMP_HOME}/store"
 # tool cannot be resolved, so a red result here can never be mistaken for a
 # real install.sh bug.
 _dirs=""
-for _tool in mkdir cp chmod sed sqlite3 python3 jq dirname basename date; do
+for _tool in mkdir cp chmod sed grep cat sqlite3 python3 jq dirname basename date; do
     _tool_path="$(command -v "$_tool" 2>/dev/null || true)"
     if [[ -z "$_tool_path" ]]; then
         echo "FAIL: test setup is wrong — '$_tool' is not resolvable on this machine"
@@ -269,6 +269,78 @@ case "$MISSING_OUT" in
     *) echo "FAIL: M14: install.sh's fatal error does not name the missing script"; FAILURES=$((FAILURES+1)) ;;
 esac
 rm -rf "$MISSING_SCRIPT_SRC" "$MISSING_TMP_HOME"
+
+
+# ---------------------------------------------------------------------------
+# Copilot hook upgrade path. install.sh used to print "Already exists ...
+# (skipping)" for any pre-existing ~/.copilot/hooks/self-learning.json, so a
+# user upgrading from the pre-vendor-neutral layout kept a hook pointing at
+# ~/.claude/scripts/self-learning/..., re-ran the installer, was told it
+# succeeded, and got no learning at all. Nothing covered this branch.
+# ---------------------------------------------------------------------------
+COPILOT_HOOK="${TMP_HOME}/.copilot/hooks/self-learning.json"
+EXPECTED_HOOK="$(sed "s|__SL_SCRIPTS_DIR__|${STORE}/scripts|g" "${SCRIPT_DIR}/config/copilot-hooks.json")"
+
+# U1: a STALE hook (ours, old path) must be re-rendered, not skipped.
+printf '%s\n' "$EXPECTED_HOOK" \
+    | sed "s|${STORE}/scripts|${TMP_HOME}/.claude/scripts/self-learning|g" > "$COPILOT_HOOK"
+UPGRADE_OUT="$(run_install 2>&1)" || true
+check "U1: a stale Copilot hook is re-rendered, not silently skipped" "yes" \
+    "$(grep -qF "${STORE}/scripts/copilot-session-review.sh" "$COPILOT_HOOK" && echo yes || echo no)"
+check "U1: the stale path is gone from the hook" "yes" \
+    "$(grep -q 'self-learning/copilot-session-review' "$COPILOT_HOOK" && echo no || echo yes)"
+case "$UPGRADE_OUT" in
+    *"UPDATED (was stale)"*) echo "PASS: U1: the update is reported, not silent" ;;
+    *) echo "FAIL: U1: install.sh did not report updating the stale hook"; FAILURES=$((FAILURES+1)) ;;
+esac
+# The old branch printed exactly "  Already exists: <path> (skipping)".
+# Matched on the hook path so this cannot be satisfied by Step 4's unrelated
+# "Config already exists ... skipping" line.
+case "$UPGRADE_OUT" in
+    *"Already exists: ${COPILOT_HOOK}"*) echo "FAIL: U1: install.sh still silently skips the existing hook"; FAILURES=$((FAILURES+1)) ;;
+    *) echo "PASS: U1: the silent-skip branch is gone" ;;
+esac
+
+# U2: an already-correct hook is left alone and said to be up to date.
+UPTODATE_OUT="$(run_install 2>&1)" || true
+case "$UPTODATE_OUT" in
+    *"Up to date"*) echo "PASS: U2: an already-correct hook is reported up to date" ;;
+    *) echo "FAIL: U2: a correct hook was not reported as up to date"; FAILURES=$((FAILURES+1)) ;;
+esac
+check "U2: an already-correct hook is unchanged" "$EXPECTED_HOOK" "$(cat "$COPILOT_HOOK")"
+
+# U3: ours but locally EDITED -- still upgraded (a broken path must not
+# survive an upgrade) but the previous file is preserved and named.
+printf '%s\n' "$EXPECTED_HOOK" \
+    | sed "s|${STORE}/scripts|${TMP_HOME}/.claude/scripts/self-learning|g; s|\"timeoutSec\": 30|\"timeoutSec\": 99|" \
+    > "$COPILOT_HOOK"
+EDITED_OUT="$(run_install 2>&1)" || true
+check "U3: a locally-edited hook is still repointed at the real store" "yes" \
+    "$(grep -qF "${STORE}/scripts/copilot-session-review.sh" "$COPILOT_HOOK" && echo yes || echo no)"
+check "U3: the user's previous file is preserved as a .bak" "yes" \
+    "$(ls "${TMP_HOME}/.copilot/hooks/"*.bak-* >/dev/null 2>&1 && echo yes || echo no)"
+case "$EDITED_OUT" in
+    *"previous version saved to"*) echo "PASS: U3: the backup location is printed" ;;
+    *) echo "FAIL: U3: install.sh did not say where the backup went"; FAILURES=$((FAILURES+1)) ;;
+esac
+rm -f "${TMP_HOME}/.copilot/hooks/"*.bak-*
+
+# U4: a hook file that is NOT ours must never be overwritten, and the
+# installer must say so loudly enough that "install succeeded" cannot be
+# mistaken for "Copilot sessions are being reviewed".
+FOREIGN_HOOK='{"version": 1, "hooks": {"sessionEnd": [{"type": "command", "bash": "bash /opt/somebody-else/thing.sh"}]}}'
+printf '%s\n' "$FOREIGN_HOOK" > "$COPILOT_HOOK"
+FOREIGN_OUT="$(run_install 2>&1)" || true
+check "U4: a foreign hook file is not overwritten" "$FOREIGN_HOOK" "$(cat "$COPILOT_HOOK")"
+case "$FOREIGN_OUT" in
+    *"NOT INSTALLED"*) echo "PASS: U4: the refusal is reported at the point it happens" ;;
+    *) echo "FAIL: U4: install.sh silently skipped a foreign hook file"; FAILURES=$((FAILURES+1)) ;;
+esac
+case "$FOREIGN_OUT" in
+    *"ACTION REQUIRED"*) echo "PASS: U4: the refusal is repeated in the final summary" ;;
+    *) echo "FAIL: U4: the final summary still claims Copilot hooks were installed"; FAILURES=$((FAILURES+1)) ;;
+esac
+rm -f "$COPILOT_HOOK"
 
 if [[ "$FAILURES" -gt 0 ]]; then
     echo "--- install.sh output (first run) for debugging ---"
