@@ -114,3 +114,137 @@ The scoped re-review entry above states "40-iteration TOCTOU race swapping <name
 FURTHER DETERMINATION (this pass): what escapes is FILE CONTENT, not empty directories. Sampled directly (see fix-p3-toctou-report.md): escaped entries outside the store were either the fully-committed SKILL.md (final proposal content) or a still-staged .persist-tmp-* file already carrying the proposal's real content -- across two independent 300-iteration measurements, zero escapes were empty directories. This is the more severe of the two possibilities named in the task brief: an arbitrary-write-as-user primitive, not merely a confinement leak.
 
 FIX (this pass, commit range starting at this ledger entry): scripts/persist-proposal.py now performs the entire write phase (directory walk, target stat, staged-file create, final rename) through dir_fd-anchored syscalls (O_NOFOLLOW open/mkdir/stat/replace/unlink relative to an already-open directory fd) whenever DIR_FD_SUPPORTED — a real functional probe run at import time, not a platform-name check and not a bare os.supports_dir_fd lookup (which is itself demonstrably unreliable here: os.replace does not appear in os.supports_dir_fd on this project's own Linux host even though it accepts dir_fd and works correctly when called — see persist-proposal.py's _probe_dir_fd_support docstring). Measured post-fix: 0/300 escapes in a standalone harness, and 0/40 in the now-zero-tolerance TestTOCTOU (tests/test-adversarial-sweep.py). Mutation-tested: forcing DIR_FD_SUPPORTED False reproduces the race (15.3%/300 in the standalone harness; the codified mutation test in tests/test-persist-proposal.py's TestDirFdWritePath also asserts at least one escape in 60 iterations). Windows has no dir_fd support in the stdlib os module at all, so the pre-existing path-based writer (_write_all_path) remains the active path there with its TOCTOU residual disclosed in that function's docstring, the module docstring, and doctor.sh's new dir_fd probe section, rather than silently carried forward unstated. Full detail: fix-p3-toctou-report.md.
+
+=== CLOSING STATE (2026-07-27, closeout audit at ae9e8f6) ===
+Full handoff: docs/superpowers/HANDOFF-2026-07-27-harness-neutral-persistence.md (written
+for a reader with zero context; supersedes the 2026-07-25 handoff, which is historical).
+
+VERIFIED THIS PASS (re-derived, not trusted): HEAD ae9e8f6; tree clean; nothing unpushed;
+121 commits ahead of the branch base; CI run 30255824383 green on all six cells;
+`bash tests/run-all.sh` = 43 suites (29 shell, 14 python), all pass; 45 vendored Coach
+rules (counted by ^id: frontmatter -- there are 46 .md files, one is UPSTREAM.md), 3
+skipped via UNSUPPORTED_REASONS (counted by AST walk), so 42 evaluable.
+
+PR #2 IS MERGED -- 2026-07-27T10:02:16Z into main as merge commit 1c93605; ae9e8f6 is
+contained in origin/main. The merge-decision question is closed, and the two defects below
+are therefore now defects on main, not on a branch. PR thread 5 (cleanup trap) is
+RESOLVED and its fix is f65a8bf; nothing owed there.
+
+TWO NEW DEFECTS FOUND THIS PASS, neither previously recorded anywhere:
+
+A1 (Claude Code hook registration, broken three ways -- this is a bug, not the pending
+"user decision" it was being carried as, and it fully explains the observed 0 registered
+hooks / health UNHEALTHY with 3 failures):
+  (i)   config/settings-hooks.json still hardcodes
+        bash ~/.claude/scripts/self-learning/{turn-counter,session-review,index-session}.sh.
+        Task 7b relocated installed scripts to the resolved store's `scripts` key;
+        install.sh has not written to ~/.claude/scripts/self-learning since. README.md:88
+        instructs users to merge THAT file, so following the README registers three hooks
+        pointing at paths that do not exist. No test covers this file's script paths.
+  (ii)  install.sh's Step 7 prints the correct ${SL_SCRIPTS} path but in the FLAT schema
+        (matcher/command/timeout as siblings, no nested "hooks":[...] array) -- precisely
+        the schema the 2026-07-22 plan's Task 4 declared invalid and rewrote
+        settings-hooks.json to fix. Claude Code requires event -> matcher group -> hooks[]
+        (https://code.claude.com/docs/en/hooks). Pasting install.sh's output registers
+        nothing.
+  (iii) install.sh's printed timeouts are 3000/10000/15000. Claude Code's hook `timeout`
+        is in SECONDS (command default 600); settings-hooks.json correctly uses 3/15/10.
+        As printed, turn-counter.sh gets a 50-minute timeout on every PostToolUse.
+  Root cause is this codebase's second signature defect: the hook JSON exists twice and
+  the two copies are wrong in different halves. Fix = make settings-hooks.json a
+  __SL_SCRIPTS_DIR__ template exactly like config/copilot-hooks.json already is, have
+  install.sh print that after substitution instead of hand-rolling a second copy, and add
+  a test that the printed JSON parses, matches the nested schema, and names a path
+  install.sh actually created.
+
+A1-RULING-REVERSAL: the 2026-07-25 handoff section 8 ruling that "config/settings-hooks.json
+containing ~/.claude paths in its hooks block is correct" was made BEFORE Task 7b relocated
+the scripts and was never revisited. It is now the rule that sanctions A1. The distinction
+it reached for (harness-owned config LOCATION vs. invoked SCRIPT PATH) is right; it is
+being misapplied to script paths, which Task 7b's own ruling says must be neutral. This is
+the one ruling on the do-not-re-litigate list that MUST be re-litigated.
+
+A2 (the documented Windows coverage caveat is wrong on both numbers and on its stated
+reason). CLAUDE.md and README.md say "7 write-path security tests and 3 shell assertions
+skip there (symlinks need elevation; chmod does not deny writes under ACLs)". Re-derived
+from run 30255824383, windows-latest 3.13:
+  - shell skips: 4 announcements across 3 suites (test-path-compare-lib.sh prints two).
+  - python skips: 21 cases across 5 suites. Windows-only (these skip ZERO on Linux):
+    test-adversarial-sweep.py 3, test-persist-proposal.py 5, test-store-lock-writers.py 3,
+    test-telemetry.py 4 = 15. test-win-dir-pin.py skips 6 on Windows and 9 on Linux.
+  - the stated REASON is false: the Windows runner prints `symlink creation: AVAILABLE`
+    and `hardlink creation: AVAILABLE`. The real causes are `O_NOFOLLOW: UNAVAILABLE`
+    and `dir_fd (functional): UNAVAILABLE`.
+  - two categories are unmentioned anywhere: 3 cross-process store-lock WRITER tests do
+    not run on Windows (the lost-update-race fix, unverified there), and 4 telemetry
+    live-store tests skip on EVERY cell on EVERY platform because no CI runner has a
+    Copilot or Claude store -- live extraction is exercised only on a dev machine.
+  - the docs also UNDERSTATE one thing: test-win-dir-pin.py prints
+    `[capability probe] win32 directory pinning: AVAILABLE (verified: a pinned directory
+    could not be renamed, and our own staged replace inside it still succeeded)` on the
+    Windows runner, so the CreateFileW share-mode hardening is live and probe-verified
+    there. (I nearly recorded this as a gap because a `grep -o` pattern truncated at a
+    parenthesis -- lesson 3, again, inside the audit of lesson 3.)
+
+B3 (owed, cheap, structural): the detached-pipeline spawn/teardown race. 23 launch sites
+across 4 shell suites (test-copilot-session-review.sh 14, test-session-review.sh 6,
+test-e2e-skill-visibility.sh 2, test-claude-absent.sh 1); sl_wait_for_review_complete is
+applied BY CONVENTION ONLY. cd04308 introduced the helper, 263a717 swept sites it missed,
+ae9e8f6 (HEAD) fixed a site added AFTER the helper existed -- two retro-fits post-fix. A
+spawn+wait wrapper is the WRONG fix (call sites are genuinely heterogeneous: piped stdin,
+env -i with a different HOME, assert-no-spawn, two-store sequences). The right one is a
+~30-line lint suite asserting every launch line is followed within a small window by
+sl_wait_for_review_complete or sl_expect_no_review_spawned; mutation-testable by deleting
+one wait.
+
+DEFERRALS RE-VERIFIED AND STILL HONEST:
+- The 3 Coach skips, checked against upstream 766d0f2 directly. no-devcontainer's
+  `sessions.filter(s => VSCODE_HARNESSES.has(asStr(s.harness)))` confirmed verbatim;
+  broken-flow-state's 0.4/0.3/0.15/0.15 weights confirmed verbatim; no-file-context
+  confirmed structurally (telemetry.py derives referencedFiles from tool arguments and
+  >=4 evaluated rules consume that definition). TWO CITATION DRIFTS to fix at the next
+  sync-coach-rules.sh: the reason cites interpreter.ts:579-583 but at 766d0f2 the set is
+  line 571 and the filter 573-576; and it calls analyzer-flow.ts a 275-line file, now ~310.
+- SkillOpt/Route C: plugins/run-sleep.sh STILL EXISTS upstream (3,162 bytes, alongside
+  run-sleep.cmd/.ps1), so scripts/skillopt-run.sh's contract has not broken. But the
+  deferral reason needs restating: upstream now ships a pip-installed `skillopt-sleep` CLI
+  as the documented entry point and docs/sleep/README.md no longer mentions run-sleep.sh
+  at all. Our wrapper can only use a source checkout, i.e. it targets the entry point
+  upstream is de-emphasising. Still never exercised end-to-end.
+- transcript.py's two third-party formats: both confirmed undocumented and unversioned.
+  There is an OPEN upstream request to formalize events.jsonl as an integration API
+  (github/copilot-cli#3551) -- itself the evidence GitHub has not. Claude's projects/*.jsonl
+  carries a CLI `version` field but no schema version and no stability guarantee. Breakage
+  mode is mostly good BY DESIGN: total format change -> OUTCOME_FAILURE ->
+  persist-failures.log -> doctor UNHEALTHY. RESIDUAL: PARTIAL drift is silent -- if
+  data.content stops being a plain string for some event types the digest just gets
+  shorter and still reports OUTCOME_OK. A floor on messages-extracted vs. events-seen
+  would close it.
+- VS Code Copilot Chat adapter: genuinely excluded scope, not silent debt. Named in the
+  plan's own out-of-scope list (line 1681); no half-built code in the tree. Caveat:
+  README.md:311 documents Coach Route B as needing "our maintained fork's .vsix", an
+  external dependency this repo neither contains, pins, nor tests.
+
+THE 4 STILL-UNRESOLVED PR THREADS ARE ALL FALSE OR ALREADY FIXED (verified against the
+tree, not the reports):
+- isotime.py:44 / list-transcripts.py:49 "PEP 604 is a SyntaxError on 3.9 even with
+  from __future__ import annotations" -- FALSE. Both carry the future import (isotime.py:38,
+  list-transcripts.py:28), unions are in annotation position, both ubuntu-3.9 cells green.
+- skill-layout.sh:46 "still unconditionally runs python3" -- FALSE. Defaults are assigned
+  before the probe; the while-read over a failed process substitution reads nothing.
+- test-review-cli-flags.sh:33 "calls timeout directly" -- ALREADY FIXED in fddcc4a
+  (feature-detects timeout/gtimeout, warns loudly if neither).
+Closing these with a one-line reply each is the only PR bookkeeping left.
+
+REPORT CLAIM CONTRADICTED BY THE TREE: residuals-research-report.md discusses "the
+remaining 10 Coach rules"; later work reduced the skip list to 3. The tree wins.
+
+STILL NEVER VERIFIED (stated plainly so the green matrix does not imply otherwise): no
+genuine INTERACTIVE Copilot session has fired sessionEnd with real conversation history in
+the payload -- the 2026-07-26 live check covered hook+real model+writer and contract+real
+model+real content, but not Copilot's own transcript reaching the prompt; Route C never
+run end-to-end; Route B never run here; live telemetry/transcript extraction never
+exercised in CI on any platform; cross-process store-lock writer tests never run on
+Windows; the symlink/hardlink/O_NOFOLLOW write-path surface exercised on Linux and macOS
+only (Windows covers the same threat by a different mechanism, win_dir_pin's CreateFileW
+share-mode pin, which IS probe-verified in CI).
