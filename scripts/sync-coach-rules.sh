@@ -30,6 +30,13 @@ done
 # writing an empty table: an empty MODEL_TIERS would make modelTier() return 0
 # for every model and silently switch off three rules.
 TMP_TS="$(mktemp)"
+TMP_LEO=""
+cleanup() {
+    rm -f "${TMP_TS}" 2>/dev/null || true
+    [[ -n "${TMP_LEO}" ]] && rm -rf "${TMP_LEO}" 2>/dev/null || true
+}
+trap cleanup EXIT
+
 gh api "repos/${REPO}/contents/${INTERPRETER_PATH}?ref=${COMMIT_SHA}" --jq '.content' \
     | python3 -c 'import base64,sys;sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' > "${TMP_TS}"
 python3 "${SCRIPT_DIR}/scripts/lib/coachtables.py" extract "${TMP_TS}" "${DEST}/tables"
@@ -39,7 +46,6 @@ python3 "${SCRIPT_DIR}/scripts/lib/coachtables.py" extract "${TMP_TS}" "${DEST}/
 # leoProfanity.check() is exact whole-word set membership.
 LEO_VERSION="$(python3 -c 'import sys;sys.path.insert(0,"'"${SCRIPT_DIR}"'/scripts/lib");import coachtables;print(coachtables.PROFANITY_VERSION)')"
 TMP_LEO="$(mktemp -d)"
-trap 'rm -f "${TMP_TS}"; rm -rf "${TMP_LEO}"' EXIT
 curl -fsSL "https://registry.npmjs.org/leo-profanity/-/leo-profanity-${LEO_VERSION}.tgz" \
     -o "${TMP_LEO}/leo.tgz"
 tar xzf "${TMP_LEO}/leo.tgz" -C "${TMP_LEO}"
