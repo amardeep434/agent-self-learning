@@ -9,6 +9,42 @@ command next to it, distrust it and go measure.
 
 ---
 
+## 0. Next session: start here
+
+Do these in order. Steps 1–2 are prerequisites — skipping them makes the rest of this
+file partly unreadable.
+
+1. **Merge PR #3 first** (<https://github.com/amardeep434/agent-self-learning/pull/3>),
+   or confirm it is already merged:
+   ```bash
+   git fetch origin main
+   git cat-file -e origin/main:.superpowers/sdd/2026-07-25-harness-neutral-persistence/final-sweep-findings.md && echo ON-MAIN
+   ```
+   PR #3 is docs-only (this handoff, the findings report, the ledger). Until it lands,
+   **every §4 link into `final-sweep-findings.md` resolves to nothing**, and a session
+   starting from `main` will find only the 2026-07-25 handoff — which is stale and says
+   "resume at Task 7", work that is long since done.
+
+2. **Branch off `main`, not off `harness-neutral-persistence`.** That branch is merged
+   (PR #2 = `1c93605`) and is not the base for anything new:
+   ```bash
+   git fetch origin && git checkout -b <topic> origin/main
+   ```
+   Work in a git worktree (`.claude/worktrees/<name>`) if the user's checkout may be in
+   use. Never push to `main`, never force-push.
+
+3. **Re-derive state before trusting §3.** Run `bash tests/run-all.sh` and
+   `gh run list --branch main`. Numbers in prose rot; the commands next to them do not.
+
+4. **Then take §4 in its ranked order — A1 first.** A1 is the only defect that breaks a
+   user-facing path (Claude Code hook registration is wrong in three independent ways,
+   so a user following the installer's own output gets hooks that never fire). A2 is a
+   documentation correction; B3 is a lint. §5 lists rulings that must not be re-opened
+   while doing any of this — read it before you "fix" something that was decided
+   deliberately.
+
+---
+
 ## 1. What this is, in a paragraph
 
 `agent-self-learning` (GitHub: `amardeep434/agent-self-learning`; the local folder is
