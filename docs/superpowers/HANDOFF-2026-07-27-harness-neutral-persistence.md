@@ -210,8 +210,9 @@ review found real vulnerabilities in code the plan specified verbatim. In partic
 Say these plainly rather than letting the green matrix imply otherwise.
 
 - **No genuine *interactive* Copilot session has ever fired `sessionEnd` with real
-  conversation history in the payload.** The live end-to-end check (2026-07-26, real paid
-  model call, real `$HOME` for auth, throwaway store) covered two halves: the hook script
+  conversation history in the payload.** The live end-to-end check (**2026-07-25**,
+  recorded by commit `f28b824`; real paid model call, real `$HOME` for auth, throwaway
+  store) covered two halves: the hook script
   driving the detached pipeline for real, and the OUTPUT CONTRACT with a synthetic
   transcript through the real writer persisting real content at 0600. What remains
   unexercised is Copilot's *own* session transcript reaching the prompt. That needs
