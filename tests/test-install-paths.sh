@@ -236,9 +236,9 @@ if [[ -f "$CLAUDE_HOOK_RENDERED" ]]; then
     # The teeth: every path named must be a file this very install created.
     # A correctly-formed but wrong substitution has to fail here.
     while IFS= read -r cmd; do
-        # See tests/test-claude-hooks-json.sh: jq's stdout carries CRLF on the
-        # Windows runner, so this value picks up a trailing CR at runtime even
-        # though .gitattributes keeps the file itself LF.
+        # See tests/test-claude-hooks-json.sh for the measurement and the part
+        # of it that is still unexplained. Strip confirmed necessary: without
+        # it these three probes fail on both windows-latest cells.
         cmd="${cmd%$'\r'}"
         hook_script="${cmd#bash }"
         if [[ -f "$hook_script" ]]; then

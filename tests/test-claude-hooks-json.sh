@@ -54,12 +54,19 @@ check "every command carries the scripts-dir placeholder" "$ENTRY_COUNT" \
 # --- The three scripts named must be scripts that exist in this repo, so a
 # typo or a rename cannot leave the template naming a file nobody ships.
 while IFS= read -r cmd; do
-    # Strip a trailing CR. .gitattributes guarantees the FILE is LF, but this
-    # value came out of jq's stdout, and Git Bash's jq is a native Windows
-    # build whose text-mode stdout emits CRLF -- so the CR is added at runtime,
-    # after checkout. Without this, script_path is "turn-counter.sh\r", the -f
-    # probe misses a file that plainly exists, and the failure prints as a
-    # mangled two-line message. Same strip, same reason, as scripts/lib/config.sh.
+    # Strip a trailing CR from jq's output. MEASURED, not reasoned: without
+    # this line both new suites failed on windows-latest 3.9 and 3.13 (run
+    # 30283131387) on exactly the checks that turn a jq string into a path;
+    # with it, all six cells pass (run 30284138870). Nothing else changed.
+    # Same strip, same reason, as scripts/lib/config.sh's `%$'\r'`.
+    #
+    # What is NOT explained: the count-based checks in this same suite passed
+    # in the failing run. If jq's stdout were simply CRLF, `$(jq '... | length')`
+    # would carry a CR too and the placeholder-count check would have failed
+    # alongside these -- locally, a CRLF-emitting jq shim does break it. So the
+    # CR reaches string values by some path the count values avoid, and that
+    # mechanism is unknown. Recorded as an open question rather than dressed up
+    # as understood; the strip is confirmed necessary and sufficient regardless.
     cmd="${cmd%$'\r'}"
     script_path="${cmd#bash __SL_SCRIPTS_DIR__/}"
     if [[ -f "${SCRIPT_DIR}/scripts/${script_path}" ]]; then
