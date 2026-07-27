@@ -81,13 +81,29 @@ ACLs)". Re-derived from CI run `30255824383`, `windows-latest, 3.13`:
   two), not 3.
 - Python skips: **21** cases across 5 suites. Windows-only (these skip **zero** on
   Linux): `test-adversarial-sweep.py` 3, `test-persist-proposal.py` 5,
-  `test-store-lock-writers.py` 3, `test-telemetry.py` 4 — **15**.
+  `test-store-lock-writers.py` 3 — **11**.
   `test-win-dir-pin.py` skips 6 on Windows and 9 on Linux (it is the inverse suite).
+
+  > **Corrected 2026-07-27 while fixing A2.** This bullet originally said **15**,
+  > counting `test-telemetry.py`'s 4 as Windows-only. They are not: re-measured on run
+  > `30284745998`, telemetry skips 4 on ubuntu-latest 3.13 as well — which the very next
+  > bullet already said ("4 telemetry live-store tests skip on every CI cell on every
+  > platform"), so this section contradicted itself. 11 is the measured figure.
 - The stated *reason* is false. The Windows runner prints
   `[capability probe] symlink creation: AVAILABLE` and
   `[capability probe] hardlink creation: AVAILABLE`. The real causes are
   `[capability probe] O_NOFOLLOW: UNAVAILABLE (POSIX-only primitive)` and
   `[capability probe] dir_fd (functional): UNAVAILABLE (e.g. native Windows)`.
+
+  > **Refined 2026-07-27 while fixing A2.** "The reason is false" is itself too broad, and
+  > correcting it that way would have flipped the error rather than fixed it. Both probes
+  > above come from the *Python* suites, and there symlink/hardlink creation genuinely
+  > works. But `tests/test-path-compare-lib.sh`'s 2 skips are real symlink-creation
+  > failures — `ln -s` could not create one, verified with `[[ -L … ]]`. So the shell half
+  > cannot make symlinks while the Python half can, and each skip must be attributed to its
+  > own probe. Also measured: `test-store-lock-writers.py`'s 3 skips are gated on "bash not
+  > runnable here (probed)", not on any lock limitation — the msvcrt backend does run on
+  > Windows. Full per-suite breakdown now in `README.md` and `CLAUDE.md`.
 - Two categories are unmentioned anywhere: **3 cross-process store-lock writer tests do
   not run on Windows** — that is the lost-update-race fix, unverified there — and **4
   telemetry live-store tests skip on every CI cell on every platform**, because no runner
