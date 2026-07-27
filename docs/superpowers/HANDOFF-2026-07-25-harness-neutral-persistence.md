@@ -1,5 +1,13 @@
 # HANDOFF — Harness-Neutral Persistence (SDD execution loop)
 
+> **⚠ SUPERSEDED — historical only. Do not resume from this file.**
+> Read [`HANDOFF-2026-07-27-harness-neutral-persistence.md`](./HANDOFF-2026-07-27-harness-neutral-persistence.md) instead.
+> Everything below describes the state on 2026-07-25, when 6 of 10 tasks were done and
+> the instruction was "resume at Task 7". All 10 tasks have since landed, plus fix rounds
+> A–F, P0–P9 and a closeout round; PR #2 merged to `main` as `1c93605`. Following this
+> file's "resume here" pointer would redo finished work. Kept for the reasoning and the
+> defect history, not for its state.
+
 **Written:** 2026-07-25 · **Reason:** context window heavy, work resumes from here.
 **Read this file top to bottom before touching anything.** It is written for a reader with zero prior context.
 
