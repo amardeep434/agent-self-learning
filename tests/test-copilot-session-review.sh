@@ -323,7 +323,24 @@ check "lost transcript for a session that DID converse is still a failure" "yes"
 # actually conversed.
 check "a genuine failure is NOT reclassified as no-conversation" "yes" \
     "$(grep -q 'no-conversation' "${TMP10}/store/logs/persist.log" 2>/dev/null && echo no || echo yes)"
-rm -rf "$TMP10" "$FAKE_BIN10"
+
+# This block spawns the real detached pipeline (above), so the reviewer may
+# still be writing into ${TMP10} when we tear it down. Every other launch site
+# in this file waits on the completion marker and tears down with
+# sl_rm_rf_retry; this one -- added with the empty-session work -- did neither,
+# and a bare `rm -rf` losing that race aborts the whole suite under `set -e`
+# with EVERY assertion already passed and the final "all tests passed" line
+# never printed. That is exactly the signature seen on ubuntu-latest 3.13 in
+# CI run 30254909461 while the other five cells were green: not a failed
+# check, an exit code from teardown.
+#
+# fix-p6 introduced sl_wait_for_review_complete + sl_rm_rf_retry for this
+# class after the same race broke tests/test-e2e-skill-visibility.sh on macOS.
+# This site reintroduced it; both layers are applied here now for the same
+# reason they exist there (see tests/lib/wait-for-review.sh).
+sl_wait_for_review_complete "${TMP10}/store/logs" || true
+sl_rm_rf_retry "$TMP10"
+sl_rm_rf_retry "$FAKE_BIN10"
 
 if [[ "$FAILURES" -gt 0 ]]; then exit 1; fi
 echo "All copilot-session-review tests passed."
