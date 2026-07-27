@@ -491,31 +491,37 @@ echo ""
 echo "NEXT STEP (Claude Code only): Register hooks in ~/.claude/settings.json"
 echo "This is Claude Code's own config directory (not this project's store)."
 echo ""
-echo "Add the following to your settings.json (merge with existing hooks):"
-echo ""
-echo '{'
-echo '  "hooks": {'
-echo '    "PostToolUse": ['
-echo '      {'
-echo '        "matcher": "",'
-echo "        \"command\": \"bash ${SL_SCRIPTS}/turn-counter.sh\","
-echo '        "timeout": 3000'
-echo '      }'
-echo '    ],'
-echo '    "Stop": ['
-echo '      {'
-echo '        "matcher": "",'
-echo "        \"command\": \"bash ${SL_SCRIPTS}/session-review.sh\","
-echo '        "timeout": 10000'
-echo '      },'
-echo '      {'
-echo '        "matcher": "",'
-echo "        \"command\": \"bash ${SL_SCRIPTS}/index-session.sh\","
-echo '        "timeout": 15000'
-echo '      }'
-echo '    ]'
-echo '  }'
-echo '}'
+
+# The JSON below is RENDERED from config/settings-hooks.json, never hand-rolled
+# here. A hand-rolled second copy is what produced the A1 defect: this block
+# printed the flat {matcher, command, timeout} schema that Claude Code silently
+# ignores, with millisecond timeouts in a field Claude Code reads as seconds,
+# while the template it was supposed to mirror was correct in both respects.
+# Pasting it registered nothing, and a hook that was never registered is
+# indistinguishable from a working one until sessions quietly stop being
+# reviewed. One definition, substituted -- exactly like copilot-hooks.json.
+CLAUDE_HOOK_SRC="${SCRIPT_DIR}/config/settings-hooks.json"
+CLAUDE_HOOK_DST="${SL_HOME}/settings-hooks.json"
+
+if [[ ! -f "$CLAUDE_HOOK_SRC" ]]; then
+    # Loud, not silent: without the template there is nothing correct to print,
+    # and printing nothing would read as "no Claude Code step needed".
+    echo "ACTION REQUIRED -- cannot render the Claude Code hook JSON:"
+    echo "  missing template ${CLAUDE_HOOK_SRC}"
+    echo "  Claude Code hooks are NOT registered; sessions will not be reviewed."
+else
+    CLAUDE_HOOK_JSON="$(sed "s|__SL_SCRIPTS_DIR__|${SL_SCRIPTS}|g" "$CLAUDE_HOOK_SRC")"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo "[DRY RUN] render ${CLAUDE_HOOK_SRC} -> ${CLAUDE_HOOK_DST} (__SL_SCRIPTS_DIR__ -> ${SL_SCRIPTS})"
+    else
+        printf '%s\n' "$CLAUDE_HOOK_JSON" > "$CLAUDE_HOOK_DST"
+        chmod 644 "$CLAUDE_HOOK_DST"
+    fi
+    echo "Merge the following into your settings.json (also written to"
+    echo "${CLAUDE_HOOK_DST}, so you do not need this checkout to copy it):"
+    echo ""
+    printf '%s\n' "$CLAUDE_HOOK_JSON"
+fi
 echo ""
 echo "Optional: Add weekly curator cron job:"
 echo "  0 3 * * 0 bash ${SL_SCRIPTS}/curator-run.sh >> ${SL_LOGS}/curator/cron.log 2>&1"

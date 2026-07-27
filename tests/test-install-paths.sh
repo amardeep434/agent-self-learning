@@ -206,6 +206,53 @@ if [[ -f "$COPILOT_HOOK" ]]; then
         "${RESOLVED_SCRIPTS}/copilot-session-review.sh" "$HOOK_SCRIPT_PATH"
 fi
 
+# --- The Claude Code hook JSON: rendered from the template, and correct in the
+# three ways defect A1 was wrong. install.sh used to hand-roll this block in
+# echo statements -- flat schema, millisecond timeouts -- so a user who pasted
+# the installer's own output registered nothing at all, silently. These
+# assertions run against the RENDERED artifact, not the template, because the
+# template was already correct when A1 shipped; it was the rendering that lied.
+CLAUDE_HOOK_RENDERED="${STORE}/settings-hooks.json"
+check "claude hook JSON was rendered to the store" "yes" \
+    "$([[ -f "$CLAUDE_HOOK_RENDERED" ]] && echo yes || echo no)"
+
+if [[ -f "$CLAUDE_HOOK_RENDERED" ]]; then
+    check "rendered claude hook JSON parses" "yes" \
+        "$(jq -e . "$CLAUDE_HOOK_RENDERED" >/dev/null 2>&1 && echo yes || echo no)"
+    check "rendered JSON uses the nested hooks[] schema" "yes" \
+        "$(jq -e '.hooks.PostToolUse[0].hooks[0].type == "command" and .hooks.Stop[0].hooks[0].type == "command"' \
+            "$CLAUDE_HOOK_RENDERED" >/dev/null 2>&1 && echo yes || echo no)"
+    check "rendered JSON has no flat-schema command on a matcher group" "0" \
+        "$(jq '[.hooks[][] | select(has("command"))] | length' "$CLAUDE_HOOK_RENDERED")"
+    check "rendered JSON has no unsubstituted placeholder" "0" \
+        "$(grep -c '__SL_SCRIPTS_DIR__' "$CLAUDE_HOOK_RENDERED" || true)"
+    check "rendered JSON names no ~/.claude script path" "0" \
+        "$(jq -r '.hooks[][].hooks[].command' "$CLAUDE_HOOK_RENDERED" | grep -c '\.claude' || true)"
+
+    RENDERED_ENTRIES="$(jq '[.hooks[][].hooks[]] | length' "$CLAUDE_HOOK_RENDERED")"
+    check "rendered JSON timeouts are seconds, not milliseconds (1..600)" "$RENDERED_ENTRIES" \
+        "$(jq '[.hooks[][].hooks[] | select(.timeout >= 1 and .timeout <= 600)] | length' "$CLAUDE_HOOK_RENDERED")"
+
+    # The teeth: every path named must be a file this very install created.
+    # A correctly-formed but wrong substitution has to fail here.
+    while IFS= read -r cmd; do
+        hook_script="${cmd#bash }"
+        check "rendered hook path exists on disk: $(basename "$hook_script")" "yes" \
+            "$([[ -f "$hook_script" ]] && echo yes || echo no)"
+        sl_check_same_path "rendered hook path is under the installed scripts dir: $(basename "$hook_script")" \
+            "${RESOLVED_SCRIPTS}/$(basename "$hook_script")" "$hook_script"
+    done < <(jq -r '.hooks[][].hooks[].command' "$CLAUDE_HOOK_RENDERED")
+
+    # What install.sh PRINTS must be what it wrote -- the printed block is what
+    # users actually paste, and a divergence between the two is exactly the
+    # two-copies-of-one-definition class A1 belongs to.
+    FIRST_PRINTED_CMD="$(jq -r '.hooks.PostToolUse[0].hooks[0].command' "$CLAUDE_HOOK_RENDERED")"
+    check "install.sh printed the rendered turn-counter command" "yes" \
+        "$(printf '%s' "$INSTALL_OUT" | grep -qF "$FIRST_PRINTED_CMD" && echo yes || echo no)"
+    check "install.sh printed no millisecond timeout" "0" \
+        "$(printf '%s' "$INSTALL_OUT" | grep -cE '"timeout": (3000|10000|15000)' || true)"
+fi
+
 # --- End-to-end: the INSTALLED persist-proposal.py, run standalone, must be
 # self-sufficient. This is the only assertion that would have caught the
 # missing lib/proposal_schema.py import — file-existence checks pass even

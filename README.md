@@ -85,10 +85,25 @@ user's, so an install through it would land somewhere you are not looking.
 The wrappers refuse with an explanation instead. To install for WSL, run
 `bash install.sh` inside WSL deliberately.
 
-Then register the Claude Code hooks by merging `config/settings-hooks.json` into
-`~/.claude/settings.json` (the installer prints the exact JSON). The Copilot CLI
-hook is installed automatically to `~/.copilot/hooks/self-learning.json` when
-`~/.copilot` exists.
+Then register the Claude Code hooks. `config/settings-hooks.json` is a
+**template**, not a file to merge as-is: it carries a `__SL_SCRIPTS_DIR__`
+placeholder that install.sh substitutes with the resolved store's `scripts`
+directory. Merge the rendered copy, which install.sh both prints and writes to
+`<store>/settings-hooks.json`, into `~/.claude/settings.json`. Merging the raw
+template registers hooks that invoke a literal `__SL_SCRIPTS_DIR__` path and
+never fire.
+
+To render it yourself without re-running the installer:
+
+```bash
+sed "s|__SL_SCRIPTS_DIR__|$(python3 scripts/lib/paths.py get scripts)|g" \
+    config/settings-hooks.json
+```
+
+`~/.claude/settings.json` is Claude Code's own config file, so *that* location
+is deliberately Claude-specific; the **script paths it invokes** are not, and
+must point at the vendor-neutral store. The Copilot CLI hook is installed
+automatically to `~/.copilot/hooks/self-learning.json` when `~/.copilot` exists.
 
 ## Storage locations
 
