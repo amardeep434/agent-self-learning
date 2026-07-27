@@ -460,7 +460,7 @@ re-vendor changes it. Re-vendor rules with
 | 2 | Background Review (review prompts, memory/skill writes) | Done — reviewer proposes JSON on stdout, `scripts/persist-proposal.py` validates and writes, confined to the resolved store |
 | 3 | Skill Lifecycle (telemetry, state machine, authoring standards) | Done |
 | 4 | Curator + Session Search (consolidation, FTS5 index) | Done |
-| 5 | Integration + Polish (config, caching, install, health check) | Done for Claude Code + Copilot CLI; VS Code Copilot Chat adapter not started (tracked separately). For CI status run `gh run list --branch harness-neutral-persistence` — no run id is recorded here, deliberately; see "Agent compatibility" above for the Windows skip caveat |
+| 5 | Integration + Polish (config, caching, install, health check) | Done for Claude Code + Copilot CLI; VS Code Copilot Chat adapter not started (tracked separately). For CI status run `gh run list --branch main` — no run id is recorded here, deliberately; see "Agent compatibility" above for the Windows skip caveat |
 
 See "Storage locations" above for the harness-neutral persistence work that
 followed the original 5-phase plan: a shared, vendor-neutral store plus a
