@@ -54,9 +54,33 @@ check "every command carries the scripts-dir placeholder" "$ENTRY_COUNT" \
 # --- The three scripts named must be scripts that exist in this repo, so a
 # typo or a rename cannot leave the template naming a file nobody ships.
 while IFS= read -r cmd; do
+    # Strip a trailing CR. .gitattributes guarantees the FILE is LF, but this
+    # value came out of jq's stdout, and Git Bash's jq is a native Windows
+    # build whose text-mode stdout emits CRLF -- so the CR is added at runtime,
+    # after checkout. Without this, script_path is "turn-counter.sh\r", the -f
+    # probe misses a file that plainly exists, and the failure prints as a
+    # mangled two-line message. Same strip, same reason, as scripts/lib/config.sh.
+    cmd="${cmd%$'\r'}"
     script_path="${cmd#bash __SL_SCRIPTS_DIR__/}"
-    check "template names a real script: $script_path" "yes" \
-        "$([[ -f "${SCRIPT_DIR}/scripts/${script_path}" ]] && echo yes || echo no)"
+    if [[ -f "${SCRIPT_DIR}/scripts/${script_path}" ]]; then
+        echo "PASS: template names a real script: ${script_path}"
+    else
+        # Localize the failure instead of leaving a bare "expected yes, got no".
+        # This probe failed on windows-latest while every count-based check in
+        # this same suite passed, which rules out the obvious explanations
+        # (jq missing, template unreadable, CRLF in jq's stdout -- a CRLF
+        # stdout would have broken the count checks too). Dump the bytes so
+        # the next Windows run says what the value actually is.
+        echo "FAIL: template names a real script: ${script_path}"
+        FAILURES=$((FAILURES+1))
+        echo "  [diag] probed: ${SCRIPT_DIR}/scripts/${script_path}" >&2
+        printf '  [diag] script_path bytes: ' >&2
+        printf '%s' "$script_path" | od -c | head -2 >&2
+        printf '  [diag] raw jq line bytes: ' >&2
+        printf '%s' "$cmd" | od -c | head -2 >&2
+        echo "  [diag] scripts dir listing:" >&2
+        ls -1 "${SCRIPT_DIR}/scripts" 2>&1 | head -5 >&2
+    fi
 done < <(jq -r '.hooks[][].hooks[].command' "$HOOK")
 
 # --- Regression from an earlier round: a hook pointing at a script that was

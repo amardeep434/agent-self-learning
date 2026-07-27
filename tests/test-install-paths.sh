@@ -236,9 +236,25 @@ if [[ -f "$CLAUDE_HOOK_RENDERED" ]]; then
     # The teeth: every path named must be a file this very install created.
     # A correctly-formed but wrong substitution has to fail here.
     while IFS= read -r cmd; do
+        # See tests/test-claude-hooks-json.sh: jq's stdout carries CRLF on the
+        # Windows runner, so this value picks up a trailing CR at runtime even
+        # though .gitattributes keeps the file itself LF.
+        cmd="${cmd%$'\r'}"
         hook_script="${cmd#bash }"
-        check "rendered hook path exists on disk: $(basename "$hook_script")" "yes" \
-            "$([[ -f "$hook_script" ]] && echo yes || echo no)"
+        if [[ -f "$hook_script" ]]; then
+            echo "PASS: rendered hook path exists on disk: $(basename "$hook_script")"
+        else
+            echo "FAIL: rendered hook path exists on disk: $(basename "$hook_script")"
+            FAILURES=$((FAILURES+1))
+            # See the identical diagnostic in tests/test-claude-hooks-json.sh.
+            # Note the Copilot block above does the same jq-string-to-path probe
+            # and passes on windows-latest, so whatever breaks this is specific
+            # to this file or this value, not to the pattern.
+            printf '  [diag] hook_script bytes: ' >&2
+            printf '%s' "$hook_script" | od -c | head -2 >&2
+            echo "  [diag] resolved scripts dir: ${RESOLVED_SCRIPTS}" >&2
+            ls -1 "${RESOLVED_SCRIPTS}" 2>&1 | head -5 >&2
+        fi
         sl_check_same_path "rendered hook path is under the installed scripts dir: $(basename "$hook_script")" \
             "${RESOLVED_SCRIPTS}/$(basename "$hook_script")" "$hook_script"
     done < <(jq -r '.hooks[][].hooks[].command' "$CLAUDE_HOOK_RENDERED")
@@ -247,6 +263,7 @@ if [[ -f "$CLAUDE_HOOK_RENDERED" ]]; then
     # users actually paste, and a divergence between the two is exactly the
     # two-copies-of-one-definition class A1 belongs to.
     FIRST_PRINTED_CMD="$(jq -r '.hooks.PostToolUse[0].hooks[0].command' "$CLAUDE_HOOK_RENDERED")"
+    FIRST_PRINTED_CMD="${FIRST_PRINTED_CMD%$'\r'}"  # jq stdout is CRLF on Windows
     check "install.sh printed the rendered turn-counter command" "yes" \
         "$(printf '%s' "$INSTALL_OUT" | grep -qF "$FIRST_PRINTED_CMD" && echo yes || echo no)"
     check "install.sh printed no millisecond timeout" "0" \
