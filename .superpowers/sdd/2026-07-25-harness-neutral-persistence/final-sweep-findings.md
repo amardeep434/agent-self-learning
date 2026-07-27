@@ -163,11 +163,23 @@ invokes `transcript.py`. When the transcript is missing there is also no `copilo
 detach into. So the log line is durably on disk before the hook returns, and the assertion
 cannot observe a partial state.
 
-**Do not "fix" case 9 by adding a wait** — there is no completion marker to wait on in
-that path, and the wait would hang for its full timeout on every run. Re-derive with
-`grep -n 'transcript.py\|nohup' scripts/copilot-session-review.sh`. If a future change
-moves transcript resolution *into* the detached block, this analysis inverts and case 9
-becomes genuinely racy — that move is the thing to watch for, not the current assertion.
+> **Half of this was wrong, and the B3 lint caught it on 2026-07-27.** The assertion
+> genuinely cannot race — that part holds. But this entry went on to claim there is "no
+> completion marker to wait on in that path" because no `copilot` call is reached, and told
+> the reader not to add a wait. False. `copilot-session-review.sh:40-42` says so in its own
+> words: "the failure path below is deliberately UNCHANGED — a real transcript failure still
+> logs loudly AND still spawns the review; only the provably-empty case short-circuits."
+> A missing session dir is a *failure*, not the empty case, so `TRANSCRIPT_STATUS` is 0, the
+> script runs on, and on any machine with `copilot` on PATH case 9 leaves a detached pipeline
+> writing into `$TMP9` while the suite tears it down. `sl_rm_rf_retry` made that survivable,
+> not correct.
+>
+> Fixed by pairing the launch the way every other site is paired, gated on the same
+> condition the script itself gates on: `command -v copilot` → `sl_wait_for_review_complete`;
+> otherwise `sl_expect_no_review_spawned` (2s) rather than waiting out a 30s timeout for a
+> pipeline that was never going to start. The lesson worth keeping: "I reasoned it cannot
+> race" is not evidence, and here it was contradicted by a comment sitting in the file the
+> whole time.
 
 ### C. DEFERRED with a reason that holds up
 
