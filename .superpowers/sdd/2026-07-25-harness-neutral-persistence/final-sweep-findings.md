@@ -102,7 +102,7 @@ One thing the docs *understate*: the Windows write-path is not simply unprotecte
 (verified: a pinned directory could not be renamed, and our own staged replace inside it
 still succeeded)` on the Windows runner — the `CreateFileW` share-mode hardening is live
 and probe-verified there. (I nearly reported this as a gap because a `grep -o` pattern
-silently truncated at a parenthesis. See §7.)
+silently truncated at a parenthesis. See §7 *of the handoff*, "operating lessons".)
 
 ### B. OWED, cheap — a structural guard for the class that keeps coming back
 
@@ -130,6 +130,28 @@ every line launching either review script, require `sl_wait_for_review_complete`
 `sl_expect_no_review_spawned` within a small window after it. ~30 lines of Python,
 mutation-testable by deleting one wait and confirming the lint fires, and it catches the
 next occurrence at authoring time rather than as a red cell on one OS.
+
+**B3-adjacent, REFUTED — `test-copilot-session-review.sh` case 9 is *not* racing the
+detached pipeline.** The sweep raised this and it is recorded here only so nobody spends
+the investigation twice. Case 9 (`tests/test-copilot-session-review.sh:244-253`) asserts
+that `persist-failures.log` contains `transcript unavailable` immediately after the hook
+script returns, with no `sl_wait_for_review_complete` — which looks exactly like the B3
+pattern.
+
+It is safe, for a structural reason. That line is not written by the detached pipeline.
+`copilot-session-review.sh:44` runs `python3 lib/transcript.py … --log-file
+"${SL_LOG_DIR}/persist-failures.log"` **synchronously**, in a command substitution, at the
+top of the script; `transcript.py:659` writes the failure line and returns 0 before the
+script continues. The `nohup … &` detach is at line 169, 125 lines later, and never
+invokes `transcript.py`. When the transcript is missing there is also no `copilot` call to
+detach into. So the log line is durably on disk before the hook returns, and the assertion
+cannot observe a partial state.
+
+**Do not "fix" case 9 by adding a wait** — there is no completion marker to wait on in
+that path, and the wait would hang for its full timeout on every run. Re-derive with
+`grep -n 'transcript.py\|nohup' scripts/copilot-session-review.sh`. If a future change
+moves transcript resolution *into* the detached block, this analysis inverts and case 9
+becomes genuinely racy — that move is the thing to watch for, not the current assertion.
 
 ### C. DEFERRED with a reason that holds up
 
@@ -255,7 +277,8 @@ either false or already fixed.** Verified against the tree:
   loudly when neither exists.
 
 Closing these with a one-line reply each is the only PR bookkeeping left. Note that
-**Copilot's PR *suggestions* are invisible to every GitHub API** — see §7.
+**Copilot's PR *suggestions* are invisible to every GitHub API** — see §7 *of the
+handoff*, "operating lessons".
 
 ---
 
