@@ -209,14 +209,32 @@ review found real vulnerabilities in code the plan specified verbatim. In partic
 
 Say these plainly rather than letting the green matrix imply otherwise.
 
-- **No genuine *interactive* Copilot session has ever fired `sessionEnd` with real
-  conversation history in the payload.** The live end-to-end check (**2026-07-25**,
-  recorded by commit `f28b824`; real paid model call, real `$HOME` for auth, throwaway
-  store) covered two halves: the hook script
-  driving the detached pipeline for real, and the OUTPUT CONTRACT with a synthetic
-  transcript through the real writer persisting real content at 0600. What remains
-  unexercised is Copilot's *own* session transcript reaching the prompt. That needs
-  ordinary day-to-day use, not engineering.
+- **The live Copilot check ran twice, and the second run is the one that matters.**
+  - **Run 1, 2026-07-25** (recorded by `f28b824`; real paid model call, real `$HOME` for
+    auth, throwaway store). Two halves: `copilot-session-review.sh` driving the detached
+    pipeline for real — which correctly persisted an **empty** proposal, because headless
+    `copilot -p` leaves no session transcript — and the OUTPUT CONTRACT exercised with a
+    **synthetic** transcript through the real writer, persisting real content at 0600.
+    The transcript was the one fabricated part.
+  - **Run 2, 2026-07-26** (~22:37 IST / `17:07Z`; no doc commit of its own, which is why
+    it is easy to miss). `copilot -s --allow-tool read -p …` produced a **real** Copilot
+    session dir (`events.jsonl`: `user.message=1`, `assistant.message=2`); the real
+    installed `sessionEnd` hook fired; the detached pipeline wrote **279 bytes of real,
+    session-derived content** to `<store>/memory/MEMORY.md`, preserving the pre-existing
+    entry, at mode 0600, with `persist-failures.log` empty, nothing under `~/.claude`, and
+    the real neutral store never created. The user's hook file was restored byte-identical.
+    **So Copilot's own session transcript reaching the prompt is no longer unexercised** —
+    the two persisted lines are the two decisions typed into that session, and the
+    reviewer ran with `$CLAUDE_JOB_DIR/tmp` as cwd, with no repository to infer them from.
+  - **What genuinely remains:** no *human, multi-turn, TUI* Copilot session has fired the
+    hook. Run 2 was still a one-shot `-p` invocation, merely one that `-s` gave a real
+    transcript. That last gap needs ordinary day-to-day use, not engineering — and it is a
+    much narrower gap than this section claimed before 2026-07-27.
+  - Artifacts, as long as the job dir survives: `$CLAUDE_JOB_DIR/tmp/live2-store/`
+    (`memory/MEMORY.md`, `logs/persist.log`, empty `logs/reviews/transcript.err`). The
+    durable record is the session transcript at `2026-07-26T17:07–17:08Z`.
+  - **`CLAUDE.md` still carries the pre-run-2 residual** and should be corrected the same
+    way; it is the file every session loads, so a stale gap claim there propagates.
 - **Route C (SkillOpt) has never run end-to-end** — needs a `microsoft/SkillOpt` checkout.
 - **Route B (Coach export) has never run here** — needs a fork `.vsix` this repo does not
   contain.

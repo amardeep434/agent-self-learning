@@ -40,10 +40,19 @@
 > `<store>/memory/MEMORY.md`, append mode preserving the existing entry, mode 0600, nothing
 > written outside the store. This is the exact loop that previously burned a model call and
 > persisted nothing.
-> **Residual:** no genuine *interactive* Copilot session has yet fired the `sessionEnd` hook
-> with real conversation history in the payload. Parts (1) and (2) together cover hook script +
-> real model + writer, and contract + real model + real content; what remains unexercised is
-> Copilot's own session transcript reaching the prompt. That needs ordinary day-to-day use.
+> **A second run on 2026-07-26 closed most of that residual.** `copilot -s --allow-tool
+> read -p …` produced a **real** session dir (`events.jsonl`: `user.message=1`,
+> `assistant.message=2`); the real installed `sessionEnd` hook fired; the detached pipeline
+> persisted **279 bytes of genuinely session-derived content** to `<store>/memory/MEMORY.md`
+> — the two decisions typed into that session — preserving the pre-existing entry, mode
+> 0600, `persist-failures.log` empty, nothing under `~/.claude`, real neutral store never
+> created, user's hook file restored byte-identical. So **Copilot's own session transcript
+> reaching the prompt is exercised**; the synthetic transcript of part (2) is no longer the
+> only evidence. (Recorded 2026-07-27 after the run was found in the session record — it had
+> no doc commit of its own, so this block claimed the gap for a day longer than it existed.)
+> **Residual, now narrower:** no *human, multi-turn, TUI* Copilot session has fired the hook.
+> Run 2 was still a one-shot `-p`, merely one that `-s` gave a real transcript. Needs
+> ordinary day-to-day use.
 > Note: this repo is `amardeep434/agent-self-learning` on GitHub; the local folder name still
 > says `claude-self-learning`. Do not rename the folder — it would break the worktree link.
 
