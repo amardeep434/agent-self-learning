@@ -1,0 +1,34 @@
+# C1 (Windows CI): every *.sh, *.py, and other text file this project ships
+# must check out with LF line endings on every platform, including
+# windows-latest. Without this file, Windows' default `core.autocrlf=true`
+# silently converts LF -> CRLF on checkout for anything Git guesses is
+# text. A trailing \r embedded in every line of a bash script is a classic,
+# well-known cause of exactly the class of failure this round exists to
+# fix: commands that look identical to a human diff but fail at runtime
+# with confusing, environment-specific errors (a shebang line ending in
+# "bash\r" fails to exec with "No such file or directory"; a value read
+# from a subshell or `read` picks up a stray \r as part of the last field
+# on the line, corrupting comparisons and paths built from it). This is the
+# most plausible, well-documented explanation for the "exit 127" windows-
+# latest failures reported against tests/test-config.sh alongside the
+# path-separator issue (C1) -- see fix-round-A-report.md for the full
+# reasoning and why it could not be verified without Windows CI.
+#
+# text=auto lets Git still handle genuinely binary files correctly; the
+# explicit eol=lf overrides below are the actual fix for the file types
+# this project's tooling cares about.
+* text=auto eol=lf
+
+*.sh  text eol=lf
+*.py  text eol=lf
+*.md  text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+*.conf text eol=lf
+*.sql text eol=lf
+
+# Never a text file; leave Git's binary detection alone.
+*.png binary
+*.jpg binary
+*.gif binary

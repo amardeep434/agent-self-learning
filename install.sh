@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# One-command installer for the Claude Code self-learning system.
+# One-command installer for the agent-self-learning system.
 #
 # Creates directories, copies scripts, initializes the SQLite database,
-# and prints instructions for registering hooks in settings.json.
+# and prints instructions for registering hooks with each harness.
 #
 # Usage:
 #   bash install.sh              # Install everything
@@ -11,8 +11,17 @@
 #   bash install.sh --uninstall  # Remove installed files (delegates to uninstall.sh)
 #
 # Prerequisites:
-#   - jq, sqlite3, python3 must be installed
-#   - ~/.claude/ directory must exist (created by Claude Code)
+#   - jq, python3 must be installed
+#   - sqlite3 (the CLI) is optional: fix-p6 moved session-search schema
+#     init off the CLI and onto python3's own bundled sqlite3 module (which
+#     macOS's system CLI often lacks FTS5 support for, unlike Python's), so
+#     nothing in this script shells out to the `sqlite3` binary anymore.
+#     Only self-learning-health.sh's diagnostic DB check still uses it,
+#     already gracefully degrading (a warning, not a failure) if absent.
+#
+# Install locations are resolved by scripts/lib/paths.py (vendor-neutral;
+# never inside ~/.claude by default). Claude Code and GitHub Copilot CLI are
+# adapters on top of that shared store, never a dependency of it.
 
 set -euo pipefail
 
@@ -76,16 +85,11 @@ do_chmod() {
 
 # --- Preflight checks ---
 
-echo "=== Claude Code Self-Learning System Installer ==="
+echo "=== agent-self-learning Installer ==="
 echo ""
 
-if [[ ! -d "${HOME}/.claude" ]]; then
-    echo "Error: ~/.claude/ does not exist. Install Claude Code first." >&2
-    exit 1
-fi
-
 MISSING_DEPS=()
-for cmd in jq sqlite3 python3; do
+for cmd in jq python3; do
     if ! command -v "$cmd" &>/dev/null; then
         MISSING_DEPS+=("$cmd")
     fi
@@ -102,21 +106,88 @@ if [[ "$DRY_RUN" == "true" ]]; then
     echo ""
 fi
 
+# --- Resolve every install path exactly once, through paths.py ---
+#
+# Global constraint: paths are computed in exactly one place
+# (scripts/lib/paths.py). Bash obtains paths by calling it, once, here — never
+# by recomputing them or calling paths.py in a loop.
+
+PATHS_PY="${SCRIPT_DIR}/scripts/lib/paths.py"
+if [[ ! -f "$PATHS_PY" ]]; then
+    echo "Error: ${PATHS_PY} not found" >&2
+    exit 1
+fi
+
+SL_HOME="" SL_STATE="" SL_SKILLS="" SL_MEMORY="" SL_LOGS="" \
+SL_SESSIONS_DB="" SL_CONFIG_FILE="" SL_SCRIPTS=""
+while IFS='=' read -r _sl_key _sl_val; do
+    # Fix round E, defence in depth: see scripts/lib/config.sh's identical
+    # strip for the full rationale -- paths.py's stdout is now forced to
+    # LF-only, making this a no-op in practice, but `read` never strips a
+    # \r that isn't the record terminator itself, so this stays as a cheap
+    # second layer against a stray one corrupting every resolved path.
+    _sl_val="${_sl_val%$'\r'}"
+    case "$_sl_key" in
+        home)        SL_HOME="$_sl_val" ;;
+        state)       SL_STATE="$_sl_val" ;;
+        skills)      SL_SKILLS="$_sl_val" ;;
+        memory)      SL_MEMORY="$_sl_val" ;;
+        logs)        SL_LOGS="$_sl_val" ;;
+        sessions_db) SL_SESSIONS_DB="$_sl_val" ;;
+        config_file) SL_CONFIG_FILE="$_sl_val" ;;
+        scripts)     SL_SCRIPTS="$_sl_val" ;;
+    esac
+done < <(python3 "$PATHS_PY" all)
+
+if [[ -z "$SL_HOME" || -z "$SL_SCRIPTS" ]]; then
+    echo "Error: could not resolve install paths via ${PATHS_PY}" >&2
+    exit 1
+fi
+
+echo "Install target (resolved by paths.py): ${SL_HOME}"
+echo ""
+
+# Legacy-install detection (design decision 4): preserve-and-notify, never
+# migrate. This only reads ~/.claude to decide whether to print a note; it
+# never writes to or moves anything under it.
+# fix-p6: the lib directory used to be baked into the -c source string as
+# a bash-interpolated literal (`sys.path.insert(0, '${SCRIPT_DIR}/...')`).
+# Git Bash only auto-translates POSIX-style paths to Windows form when they
+# appear as their own argv token passed to a native executable, not when
+# baked into the middle of a quoted -c string -- passed as sys.argv[1]
+# instead, the same safe pattern doctor.sh's own legacy-home probe and
+# tests/lib/path-compare.sh's sl_legacy_home already use.
+LEGACY_HOME="$(python3 -c "
+import sys
+sys.path.insert(0, sys.argv[1])
+import paths
+found = paths.legacy_home()
+print(found or '')
+" "${SCRIPT_DIR}/scripts/lib" 2>/dev/null || true)"
+
+if [[ -n "$LEGACY_HOME" ]]; then
+    echo "NOTE: a legacy install was found at ${LEGACY_HOME}."
+    echo "      It is left untouched and will keep working as-is."
+    echo "      This install writes to the vendor-neutral store above instead;"
+    echo "      the two are independent until you migrate deliberately."
+    echo ""
+fi
+
 # --- Step 1: Create directories ---
 
 echo "Step 1: Creating directories..."
 
 DIRS=(
-    "${HOME}/.claude/state/self-learning"
-    "${HOME}/.claude/learned-skills"
-    "${HOME}/.claude/learned-skills/.archive"
-    "${HOME}/.claude/sessions"
-    "${HOME}/.claude/logs/reviews"
-    "${HOME}/.claude/logs/curator"
-    "${HOME}/.claude/backups/curator"
-    "${HOME}/.claude/scripts/self-learning"
-    "${HOME}/.claude/scripts/self-learning/prompts"
-    "${HOME}/.claude/memory"
+    "$SL_STATE"
+    "$SL_SKILLS"
+    "${SL_SKILLS}/.archive"
+    "$(dirname "$SL_SESSIONS_DB")"
+    "${SL_LOGS}/reviews"
+    "${SL_LOGS}/curator"
+    "${SL_HOME}/backups/curator"
+    "$SL_SCRIPTS"
+    "${SL_SCRIPTS}/prompts"
+    "$SL_MEMORY"
 )
 
 for dir in "${DIRS[@]}"; do
@@ -144,9 +215,11 @@ SCRIPTS=(
     "coach-export-read.py"
     "coach-signals.py"
     "skillopt-run.sh"
+    "persist-proposal.py"
+    "doctor.sh"
 )
 
-DEST_DIR="${HOME}/.claude/scripts/self-learning"
+DEST_DIR="$SL_SCRIPTS"
 
 for script in "${SCRIPTS[@]}"; do
     src="${SCRIPT_DIR}/scripts/${script}"
@@ -154,7 +227,16 @@ for script in "${SCRIPTS[@]}"; do
         do_copy "$src" "${DEST_DIR}/${script}"
         do_chmod "${DEST_DIR}/${script}"
     else
-        echo "  [WARN] Script not found: $src"
+        # M14: this used to print a [WARN] and continue, exiting 0 -- a
+        # missing script (potentially the writer itself, or something it
+        # imports) became a warning buried in a long log plus a successful
+        # exit. A script named in this file's own SCRIPTS array that is
+        # missing from the source tree means the install is broken; report
+        # that as fatal, not cosmetic.
+        echo "  [FAIL] Script not found: $src" >&2
+        echo "Error: install.sh's SCRIPTS array names '${script}', but it does not exist" >&2
+        echo "at ${src}. This install is incomplete; refusing to continue." >&2
+        exit 1
     fi
 done
 
@@ -162,6 +244,18 @@ echo ""
 echo "Step 2b: Copying shared libraries..."
 do_mkdir "${DEST_DIR}/lib"
 for lib in "${SCRIPT_DIR}/scripts/lib/"*.sh; do
+    if [[ -f "$lib" ]]; then
+        do_copy "$lib" "${DEST_DIR}/lib/$(basename "$lib")"
+    fi
+done
+# Python libraries too (e.g. paths.py, proposal_schema.py) — a loop, not a
+# hand-listed file, so a future library is never silently dropped the way
+# proposal_schema.py originally was: persist-proposal.py (in SCRIPTS above)
+# imports it from its own installed directory's lib/, and a missing import
+# fails the whole persistence pipeline on a real install with no error
+# surfaced above the hook layer — exactly the defect this project exists to
+# eliminate.
+for lib in "${SCRIPT_DIR}/scripts/lib/"*.py; do
     if [[ -f "$lib" ]]; then
         do_copy "$lib" "${DEST_DIR}/lib/$(basename "$lib")"
     fi
@@ -223,7 +317,7 @@ echo ""
 echo "Step 4: Copying configuration..."
 
 CONFIG_SRC="${SCRIPT_DIR}/config/self-learning.conf"
-CONFIG_DST="${HOME}/.claude/self-learning.conf"
+CONFIG_DST="$SL_CONFIG_FILE"
 
 if [[ -f "$CONFIG_SRC" ]]; then
     if [[ -f "$CONFIG_DST" ]]; then
@@ -239,11 +333,84 @@ echo ""
 echo "Step 4b: Copilot CLI adapter (optional)..."
 if [[ -d "${HOME}/.copilot" ]]; then
     do_mkdir "${HOME}/.copilot/hooks"
+    COPILOT_HOOK_SRC="${SCRIPT_DIR}/config/copilot-hooks.json"
     COPILOT_HOOK_DST="${HOME}/.copilot/hooks/self-learning.json"
-    if [[ -f "$COPILOT_HOOK_DST" ]]; then
-        echo "  Already exists: $COPILOT_HOOK_DST (skipping)"
+    # An existing hook file used to be skipped outright with "Already exists
+    # ... (skipping)". That made upgrading a SILENT NO-OP: anyone who had
+    # installed before the vendor-neutral store landed kept a hook pointing at
+    # the old ~/.claude/scripts/self-learning/... path, re-ran install.sh, was
+    # told it succeeded, and got no learning at all. Observed for real on the
+    # reporter's machine, where the file had to be re-rendered by hand.
+    #
+    # Three distinct states now, because "leave it alone" and "overwrite it"
+    # are both wrong as a blanket rule:
+    #
+    #   up to date   -- byte-identical to what we would render: say so, touch
+    #                   nothing.
+    #   ours, stale  -- normalizing every path that sits in front of one of
+    #                   OUR script names back to the template placeholder
+    #                   reproduces the template verbatim, so the only thing
+    #                   that differs is the install location. Nothing of the
+    #                   user's is in there to lose: re-render, and print the
+    #                   before/after paths.
+    #   ours, edited -- references our script but does not normalize to the
+    #                   template, i.e. someone changed a timeout or added a
+    #                   hook. Re-render (an upgrade that leaves a broken path
+    #                   in place is the defect being fixed) but keep a
+    #                   timestamped .bak alongside and say where it went.
+    #   not ours     -- never mentions our script. Do NOT overwrite someone
+    #                   else's hook file; warn loudly, twice (here and in the
+    #                   final summary), with the exact content to merge.
+    _render_copilot_hook() {
+        sed "s|__SL_SCRIPTS_DIR__|${SL_SCRIPTS}|g" "$COPILOT_HOOK_SRC" > "$COPILOT_HOOK_DST"
+    }
+    # Replace any absolute path immediately preceding one of our script names
+    # with the template's placeholder. Basic (not -E) sed for portability
+    # across GNU, BSD/macOS and MSYS.
+    _normalize_copilot_hook() {
+        sed 's#[^" ]*/copilot-session-review\.sh#__SL_SCRIPTS_DIR__/copilot-session-review.sh#g' "$1"
+    }
+
+    if [[ ! -f "$COPILOT_HOOK_DST" ]]; then
+        if [[ "$DRY_RUN" == "true" ]]; then
+            echo "[DRY RUN] render ${COPILOT_HOOK_SRC} -> ${COPILOT_HOOK_DST} (__SL_SCRIPTS_DIR__ -> ${SL_SCRIPTS})"
+        else
+            _render_copilot_hook
+            echo "  Rendered: copilot-hooks.json -> $COPILOT_HOOK_DST"
+        fi
+    elif [[ "$(sed "s|__SL_SCRIPTS_DIR__|${SL_SCRIPTS}|g" "$COPILOT_HOOK_SRC")" == "$(cat "$COPILOT_HOOK_DST")" ]]; then
+        echo "  Up to date: $COPILOT_HOOK_DST (already points at ${SL_SCRIPTS})"
+    elif [[ "$(_normalize_copilot_hook "$COPILOT_HOOK_DST")" == "$(cat "$COPILOT_HOOK_SRC")" ]]; then
+        OLD_HOOK_PATH="$(sed -n 's#.*"bash": "bash \(.*\)/copilot-session-review\.sh".*#\1#p' "$COPILOT_HOOK_DST" | head -n 1)"
+        if [[ "$DRY_RUN" == "true" ]]; then
+            echo "[DRY RUN] re-render STALE hook ${COPILOT_HOOK_DST}: ${OLD_HOOK_PATH:-<unknown>} -> ${SL_SCRIPTS}"
+        else
+            _render_copilot_hook
+            echo "  UPDATED (was stale): $COPILOT_HOOK_DST"
+            echo "    hook now runs ${SL_SCRIPTS}/copilot-session-review.sh"
+            echo "    (previously ${OLD_HOOK_PATH:-<unknown>}/copilot-session-review.sh)"
+        fi
+    elif grep -q 'copilot-session-review\.sh' "$COPILOT_HOOK_DST"; then
+        COPILOT_HOOK_BAK="${COPILOT_HOOK_DST}.bak-$(date -u +%Y%m%dT%H%M%SZ)"
+        if [[ "$DRY_RUN" == "true" ]]; then
+            echo "[DRY RUN] back up locally-modified ${COPILOT_HOOK_DST} -> ${COPILOT_HOOK_BAK}, then re-render"
+        else
+            cp "$COPILOT_HOOK_DST" "$COPILOT_HOOK_BAK"
+            _render_copilot_hook
+            echo "  UPDATED (had local modifications): $COPILOT_HOOK_DST"
+            echo "    previous version saved to: $COPILOT_HOOK_BAK"
+            echo "    re-apply any customizations from that file by hand."
+        fi
     else
-        do_copy "${SCRIPT_DIR}/config/copilot-hooks.json" "$COPILOT_HOOK_DST"
+        COPILOT_HOOK_CONFLICT="$COPILOT_HOOK_DST"
+        echo "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+        echo "  !!! NOT INSTALLED: $COPILOT_HOOK_DST already exists and is NOT ours"
+        echo "  !!! (it does not reference copilot-session-review.sh). Refusing to"
+        echo "  !!! overwrite someone else's hook file. Copilot CLI sessions will"
+        echo "  !!! NOT be reviewed until you merge this in by hand:"
+        echo "  !!!"
+        sed "s|__SL_SCRIPTS_DIR__|${SL_SCRIPTS}|g" "$COPILOT_HOOK_SRC" | sed 's/^/  !!!   /'
+        echo "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
     fi
 else
     echo "  ~/.copilot not found — Copilot CLI not installed; skipping (re-run install.sh after installing it)"
@@ -257,20 +424,38 @@ echo "Step 5: Initializing session search database..."
 
 SCHEMA_SRC="${SCRIPT_DIR}/schema/session-search-schema.sql"
 SCHEMA_DST="${DEST_DIR}/session-search-schema.sql"
-DB_PATH="${HOME}/.claude/sessions/search.db"
+FTS5_SCHEMA_SRC="${SCRIPT_DIR}/schema/session-search-fts5.sql"
+FTS5_SCHEMA_DST="${DEST_DIR}/session-search-fts5.sql"
+DB_PATH="$SL_SESSIONS_DB"
 
 if [[ -f "$SCHEMA_SRC" ]]; then
     do_copy "$SCHEMA_SRC" "$SCHEMA_DST"
+    [[ -f "$FTS5_SCHEMA_SRC" ]] && do_copy "$FTS5_SCHEMA_SRC" "$FTS5_SCHEMA_DST"
 
     if [[ "$DRY_RUN" != "true" ]]; then
         if [[ ! -f "$DB_PATH" ]]; then
-            sqlite3 "$DB_PATH" < "$SCHEMA_DST"
+            # fix-p6 (macOS CI): this used to be `sqlite3 "$DB_PATH" <
+            # "$SCHEMA_DST"` via the `sqlite3` CLI, which failed silently
+            # on macOS -- its bundled CLI commonly lacks FTS5, and its
+            # batch mode does not reliably surface a non-zero exit for a
+            # mid-script error. session_db.py applies the same schema via
+            # Python's own sqlite3 module (raises immediately on a real
+            # failure) and gates the FTS5-only part behind a functional
+            # probe -- see scripts/lib/session_db.py's module docstring.
+            if ! SCHEMA_RESULT=$(python3 "${DEST_DIR}/lib/session_db.py" \
+                    ensure-schema "$DB_PATH" "$SCHEMA_DST" "$FTS5_SCHEMA_DST" 2>&1); then
+                echo "  FATAL: failed to initialize session search database ($DB_PATH): $SCHEMA_RESULT" >&2
+                exit 1
+            fi
+            if [[ "$SCHEMA_RESULT" == no-fts5:* ]]; then
+                echo "  WARNING: ${SCHEMA_RESULT#no-fts5:} -- full-text search degraded to substring (LIKE) matching."
+            fi
             echo "  Initialized: $DB_PATH"
         else
             echo "  Database already exists: $DB_PATH (skipping)"
         fi
     else
-        echo "[DRY RUN] sqlite3 $DB_PATH < $SCHEMA_DST"
+        echo "[DRY RUN] python3 ${DEST_DIR}/lib/session_db.py ensure-schema $DB_PATH $SCHEMA_DST $FTS5_SCHEMA_DST"
     fi
 else
     echo "  No schema/session-search-schema.sql found"
@@ -283,7 +468,7 @@ echo ""
 
 echo "Step 6: Initializing learned skills tracker..."
 
-USAGE_FILE="${HOME}/.claude/learned-skills/.usage.json"
+USAGE_FILE="${SL_SKILLS}/.usage.json"
 if [[ ! -f "$USAGE_FILE" ]]; then
     if [[ "$DRY_RUN" != "true" ]]; then
         echo '{}' > "$USAGE_FILE"
@@ -303,7 +488,8 @@ echo "========================================"
 echo "  Installation complete!"
 echo "========================================"
 echo ""
-echo "NEXT STEP: Register hooks in ~/.claude/settings.json"
+echo "NEXT STEP (Claude Code only): Register hooks in ~/.claude/settings.json"
+echo "This is Claude Code's own config directory (not this project's store)."
 echo ""
 echo "Add the following to your settings.json (merge with existing hooks):"
 echo ""
@@ -312,19 +498,19 @@ echo '  "hooks": {'
 echo '    "PostToolUse": ['
 echo '      {'
 echo '        "matcher": "",'
-echo '        "command": "bash ~/.claude/scripts/self-learning/turn-counter.sh",'
+echo "        \"command\": \"bash ${SL_SCRIPTS}/turn-counter.sh\","
 echo '        "timeout": 3000'
 echo '      }'
 echo '    ],'
 echo '    "Stop": ['
 echo '      {'
 echo '        "matcher": "",'
-echo '        "command": "bash ~/.claude/scripts/self-learning/session-review.sh",'
+echo "        \"command\": \"bash ${SL_SCRIPTS}/session-review.sh\","
 echo '        "timeout": 10000'
 echo '      },'
 echo '      {'
 echo '        "matcher": "",'
-echo '        "command": "bash ~/.claude/scripts/self-learning/index-session.sh",'
+echo "        \"command\": \"bash ${SL_SCRIPTS}/index-session.sh\","
 echo '        "timeout": 15000'
 echo '      }'
 echo '    ]'
@@ -332,8 +518,26 @@ echo '  }'
 echo '}'
 echo ""
 echo "Optional: Add weekly curator cron job:"
-echo "  0 3 * * 0 bash ~/.claude/scripts/self-learning/curator-run.sh >> ~/.claude/logs/curator/cron.log 2>&1"
+echo "  0 3 * * 0 bash ${SL_SCRIPTS}/curator-run.sh >> ${SL_LOGS}/curator/cron.log 2>&1"
 echo ""
 echo "Verify installation:"
-echo "  bash ~/.claude/scripts/self-learning/self-learning-health.sh"
+echo "  bash ${SL_SCRIPTS}/self-learning-health.sh"
 echo ""
+echo "Diagnose state at any time (resolved paths, writability, detected"
+echo "harnesses, legacy store, and any silent persistence failures):"
+echo "  bash ${SL_SCRIPTS}/doctor.sh"
+echo ""
+if [[ -d "${HOME}/.copilot" ]]; then
+    if [[ -n "${COPILOT_HOOK_CONFLICT:-}" ]]; then
+        # Repeated here on purpose: Step 4b's output scrolls past on a normal
+        # install, and a hook that was never registered is indistinguishable
+        # from a working one until sessions quietly stop being reviewed --
+        # the exact silent-failure class this project exists to eliminate.
+        echo "ACTION REQUIRED -- GitHub Copilot CLI hooks were NOT installed:"
+        echo "  ${COPILOT_HOOK_CONFLICT} exists and is not ours; see Step 4b above"
+        echo "  for the JSON to merge. Until then, Copilot sessions are not reviewed."
+    else
+        echo "GitHub Copilot CLI: hooks were installed to ~/.copilot/hooks/self-learning.json"
+    fi
+    echo ""
+fi

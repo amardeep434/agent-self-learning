@@ -22,6 +22,12 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/config.sh"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/skill-layout.sh"
+
 QUIET="${1:-}"
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -61,12 +67,12 @@ section() {
 section "Directories"
 
 REQUIRED_DIRS=(
-    "${HOME}/.claude/state/self-learning"
-    "${HOME}/.claude/learned-skills"
-    "${HOME}/.claude/sessions"
-    "${HOME}/.claude/logs/reviews"
-    "${HOME}/.claude/logs/curator"
-    "${HOME}/.claude/scripts/self-learning"
+    "$SL_STATE_DIR"
+    "$SL_SKILLS_DIR"
+    "$(dirname "$SL_SEARCH_DB")"
+    "${SL_LOG_DIR}/reviews"
+    "${SL_LOG_DIR}/curator"
+    "$SCRIPT_DIR"
 )
 
 for dir in "${REQUIRED_DIRS[@]}"; do
@@ -81,6 +87,13 @@ done
 
 section "Scripts"
 
+# C3: this list omitted persist-proposal.py, lib/proposal_schema.py,
+# copilot-session-review.sh, and doctor.sh. A reviewer that copied a good
+# install and then deleted persist-proposal.py (the ONLY component that
+# writes memory/skills) and lib/proposal_schema.py (its own import) still
+# printed "Status: HEALTHY" -- install.sh tells every user to run this
+# exact command to verify their install, so a gap here is a gap in the
+# tool whose entire purpose is catching exactly this defect class.
 REQUIRED_SCRIPTS=(
     "turn-counter.sh"
     "session-review.sh"
@@ -90,9 +103,12 @@ REQUIRED_SCRIPTS=(
     "skill-lifecycle.py"
     "curator-run.sh"
     "self-learning-health.sh"
+    "persist-proposal.py"
+    "lib/proposal_schema.py"
+    "copilot-session-review.sh"
+    "doctor.sh"
 )
 
-SCRIPT_DIR="${HOME}/.claude/scripts/self-learning"
 for script in "${REQUIRED_SCRIPTS[@]}"; do
     script_path="${SCRIPT_DIR}/${script}"
     if [[ -f "$script_path" ]]; then
@@ -106,43 +122,156 @@ for script in "${REQUIRED_SCRIPTS[@]}"; do
     fi
 done
 
-# --- Check 3: Hooks registered in settings.json ---
+# --- Check 2b: Persistence writer self-check ---
+# C3: a file-existence check alone cannot prove persist-proposal.py and its
+# import (lib/proposal_schema.py) actually WORK -- a corrupt or otherwise
+# unimportable proposal_schema.py would still pass every check above. This
+# actually EXERCISES the writer end-to-end via its existing --dry-run mode
+# (validates and plans a write, but performs none) against a canned,
+# schema-valid proposal, so a broken import or a broken write-plan path
+# fails loudly here instead of silently the first time a real reviewer
+# proposal comes through.
+#
+# Never touches the real store: AGENT_LEARNING_HOME is overridden to a
+# throwaway temp directory for this one subprocess call only, removed
+# immediately after, regardless of outcome.
 
-section "Hook Registration"
+section "Persistence Writer Self-Check"
 
-SETTINGS_FILE="${HOME}/.claude/settings.json"
-if [[ -f "$SETTINGS_FILE" ]]; then
-    # Check for PostToolUse hook (turn counter)
-    if grep -q "turn-counter" "$SETTINGS_FILE" 2>/dev/null; then
-        pass "PostToolUse turn-counter hook registered"
-    else
-        fail "PostToolUse turn-counter hook not found in settings.json" \
-            "Add PostToolUse hook for turn-counter.sh to ~/.claude/settings.json"
-    fi
-
-    # Check for Stop hooks (session-review, index-session)
-    if grep -q "session-review" "$SETTINGS_FILE" 2>/dev/null; then
-        pass "Stop session-review hook registered"
-    else
-        fail "Stop session-review hook not found in settings.json" \
-            "Add Stop hook for session-review.sh to ~/.claude/settings.json"
-    fi
-
-    if grep -q "index-session" "$SETTINGS_FILE" 2>/dev/null; then
-        pass "Stop index-session hook registered"
-    else
-        fail "Stop index-session hook not found in settings.json" \
-            "Add Stop hook for index-session.sh to ~/.claude/settings.json"
-    fi
+WRITER_SCRIPT="${SCRIPT_DIR}/persist-proposal.py"
+if [[ ! -f "$WRITER_SCRIPT" ]]; then
+    fail "writer self-check skipped -- persist-proposal.py not present" "Run install.sh"
+elif ! command -v python3 >/dev/null 2>&1; then
+    fail "writer self-check skipped -- python3 not found on PATH" "Install python3"
 else
-    fail "settings.json not found" "Create ~/.claude/settings.json with hook configuration"
+    SELF_CHECK_HOME="$(mktemp -d 2>/dev/null || echo "")"
+    if [[ -z "$SELF_CHECK_HOME" ]]; then
+        fail "writer self-check could not create an isolated temp directory" "Check /tmp is writable"
+    else
+        CANNED_PROPOSAL='{"version": 1, "memory": [{"file": "MEMORY.md", "mode": "append", "content": "self-learning-health.sh writer self-check"}], "skills": []}'
+        # `|| SELF_CHECK_RC=$?` (not a trailing `; SELF_CHECK_RC=$?`) is
+        # required under this script's `set -e`: a bare failing command
+        # substitution assigned to a variable is a failing simple command,
+        # which set -e would abort the WHOLE health check on immediately --
+        # silently, before fail() ever ran -- exactly the kind of exit
+        # discipline this self-check exists to enforce on persist-proposal.py.
+        SELF_CHECK_RC=0
+        SELF_CHECK_OUT="$(printf '%s' "$CANNED_PROPOSAL" | \
+            AGENT_LEARNING_HOME="$SELF_CHECK_HOME" SL_CONFIG_FILE="/nonexistent/self-check.conf" \
+            python3 "$WRITER_SCRIPT" --dry-run 2>&1)" || SELF_CHECK_RC=$?
+        rm -rf "$SELF_CHECK_HOME"
+
+        if [[ "$SELF_CHECK_RC" -ne 0 ]]; then
+            fail "writer self-check failed (persist-proposal.py exited ${SELF_CHECK_RC})" \
+                "Inspect: ${SELF_CHECK_OUT}"
+        elif ! printf '%s' "$SELF_CHECK_OUT" | jq -e '.skipped | length == 1' >/dev/null 2>&1; then
+            fail "writer self-check produced unexpected output" \
+                "persist-proposal.py --dry-run did not return the expected plan: ${SELF_CHECK_OUT}"
+        else
+            pass "writer self-check: persist-proposal.py + lib/proposal_schema.py import and run correctly"
+        fi
+    fi
+fi
+
+# --- Check 3: Hooks registered in settings.json ---
+# This check is Claude-Code-specific: settings.json is Claude Code's own
+# config file, not part of the framework's (vendor-neutral) store. On a
+# Copilot-only machine it is normal and expected to be absent -- that is a
+# WARN, never a FAIL, so a Copilot-only user never sees a spurious failure
+# here.
+
+section "Hook Registration (Claude Code)"
+
+# Freshness (not just registration) is checked via sl_check_hook_fresh(),
+# shared with scripts/doctor.sh in lib/config.sh, so the two diagnostic
+# tools can never disagree about the same hook config file by construction.
+# A prior version of this check here substring-matched only the script name
+# anywhere in the file and reported [PASS] even when the registered command
+# pointed at a stale, no-longer-resolved scripts path -- exactly the Task 7c
+# bug class, and worse for being the tool that actually ships in every
+# install while doctor.sh (which caught it) did not yet.
+SETTINGS_FILE="${HOME}/.claude/settings.json"
+if command -v python3 >/dev/null 2>&1; then
+    SL_SCRIPTS_DIR="$(python3 "${SCRIPT_DIR}/lib/paths.py" get scripts 2>/dev/null || true)"
+else
+    SL_SCRIPTS_DIR=""
+fi
+
+# Deferred minor 10: when python3 is unavailable, SL_SCRIPTS_DIR silently
+# resolved to "" here, and sl_check_hook_fresh() (lib/config.sh) treats an
+# empty scripts_dir as "never fresh" -- so every hook was reported as
+# STALE regardless of whether it was actually fine. That is a wrong
+# diagnosis pinned on the hook config, when the real problem is a missing
+# dependency this check never named. Fail loudly and specifically instead:
+# one clear FAIL that says python3 is the blocker, and skip the per-hook
+# freshness checks entirely rather than emit misleading verdicts for them.
+if ! command -v python3 >/dev/null 2>&1; then
+    fail "cannot verify hook freshness -- python3 not found on PATH" \
+        "Install python3 so scripts/lib/paths.py (this project's sole path resolver) can run"
+elif [[ -f "$SETTINGS_FILE" ]]; then
+    for pair in "turn-counter.sh:PostToolUse turn-counter" \
+                "session-review.sh:Stop session-review" \
+                "index-session.sh:Stop index-session"; do
+        script_name="${pair%%:*}"
+        label="${pair#*:}"
+        state="$(sl_check_hook_fresh "$SETTINGS_FILE" "$script_name" "$SL_SCRIPTS_DIR")"
+        case "$state" in
+            fresh)
+                pass "$label hook registered and points at the resolved scripts dir"
+                ;;
+            stale)
+                fail "$label hook registered but STALE -- does not point at ${SL_SCRIPTS_DIR}/${script_name}" \
+                    "Re-render the hook command in ~/.claude/settings.json (e.g. re-run install.sh) so it points at ${SL_SCRIPTS_DIR}/${script_name}"
+                ;;
+            missing)
+                fail "$label hook not found in settings.json" \
+                    "Add $label hook for ${script_name} to ~/.claude/settings.json"
+                ;;
+        esac
+    done
+else
+    warn "settings.json not found (normal on a Copilot-only install -- Claude Code hooks live here, Copilot hooks are registered separately under ~/.copilot/hooks/)"
+fi
+
+# --- Check 3b: Hooks registered for Copilot CLI ---
+# Deferred minor 11: this tool -- the one install.sh tells every user to
+# run -- checked only Claude Code's hook registration. Only doctor.sh (a
+# secondary, opt-in diagnostic) checked Copilot's. A Copilot-only install
+# with a stale or missing hook registration got zero signal from the
+# command users are actually told to run. On a Claude-Code-only machine,
+# absence of ~/.copilot/hooks/self-learning.json is normal -- a WARN, never
+# a FAIL, mirroring the Claude Code section above.
+
+section "Hook Registration (Copilot CLI)"
+
+COPILOT_HOOKS_FILE="${HOME}/.copilot/hooks/self-learning.json"
+if ! command -v python3 >/dev/null 2>&1; then
+    fail "cannot verify Copilot hook freshness -- python3 not found on PATH" \
+        "Install python3 so scripts/lib/paths.py (this project's sole path resolver) can run"
+elif [[ -f "$COPILOT_HOOKS_FILE" ]]; then
+    state="$(sl_check_hook_fresh "$COPILOT_HOOKS_FILE" "copilot-session-review.sh" "$SL_SCRIPTS_DIR")"
+    case "$state" in
+        fresh)
+            pass "copilot-session-review.sh hook registered and points at the resolved scripts dir"
+            ;;
+        stale)
+            fail "copilot-session-review.sh hook registered but STALE -- does not point at ${SL_SCRIPTS_DIR}/copilot-session-review.sh" \
+                "Re-render the hook command in ~/.copilot/hooks/self-learning.json (e.g. re-run install.sh) so it points at ${SL_SCRIPTS_DIR}/copilot-session-review.sh"
+            ;;
+        missing)
+            fail "copilot-session-review.sh hook not found in ~/.copilot/hooks/self-learning.json" \
+                "Add the sessionEnd hook for copilot-session-review.sh to ~/.copilot/hooks/self-learning.json"
+            ;;
+    esac
+else
+    warn "~/.copilot/hooks/self-learning.json not found (normal on a Claude-Code-only or VS-Code-only install -- Copilot hooks live here, Claude Code hooks are registered separately in ~/.claude/settings.json)"
 fi
 
 # --- Check 4: Turn counter state ---
 
 section "Turn Counter"
 
-COUNTER_FILE="${HOME}/.claude/state/self-learning/turn_counter.json"
+COUNTER_FILE="${SL_STATE_DIR}/turn_counter.json"
 if [[ -f "$COUNTER_FILE" ]]; then
     if jq empty "$COUNTER_FILE" 2>/dev/null; then
         pass "turn_counter.json is valid JSON"
@@ -158,9 +287,10 @@ else
 fi
 
 # Check for stale lock
-LOCK_DIR="${HOME}/.claude/state/self-learning/counter.lock"
+LOCK_DIR="${SL_STATE_DIR}/counter.lock"
 if [[ -d "$LOCK_DIR" ]]; then
-    LOCK_AGE=$(( $(date +%s) - $(stat -c %Y "$LOCK_DIR" 2>/dev/null || echo 0) ))
+    LOCK_MTIME=$(stat -c %Y "$LOCK_DIR" 2>/dev/null || stat -f %m "$LOCK_DIR" 2>/dev/null || echo 0)
+    LOCK_AGE=$(( $(date +%s) - LOCK_MTIME ))
     if [[ "$LOCK_AGE" -gt 30 ]]; then
         warn "Stale lock directory found (${LOCK_AGE}s old). Removing."
         rmdir "$LOCK_DIR" 2>/dev/null || rm -rf "$LOCK_DIR"
@@ -173,7 +303,7 @@ fi
 
 section "Session Search Database"
 
-DB_PATH="${HOME}/.claude/sessions/search.db"
+DB_PATH="$SL_SEARCH_DB"
 if [[ -f "$DB_PATH" ]]; then
     if command -v sqlite3 &>/dev/null; then
         SESSION_COUNT=$(sqlite3 "$DB_PATH" "SELECT count(*) FROM sessions" 2>/dev/null || echo "ERROR")
@@ -193,7 +323,7 @@ fi
 
 section "Learned Skills"
 
-USAGE_FILE="${HOME}/.claude/learned-skills/.usage.json"
+USAGE_FILE="${SL_SKILLS_DIR}/${SL_USAGE_FILENAME}"
 if [[ -f "$USAGE_FILE" ]]; then
     if jq empty "$USAGE_FILE" 2>/dev/null; then
         SKILL_COUNT=$(jq 'keys | length' "$USAGE_FILE" 2>/dev/null || echo 0)
@@ -215,13 +345,27 @@ fi
 
 section "Dependencies"
 
-for cmd in jq sqlite3 python3; do
+for cmd in jq python3; do
     if command -v "$cmd" &>/dev/null; then
         pass "$cmd available ($(command -v "$cmd"))"
     else
         fail "$cmd not found" "Install $cmd (required for self-learning system)"
     fi
 done
+
+# sqlite3 (the CLI) is optional, not required: fix-p6 moved session-search
+# schema init and per-session writes off the CLI entirely and onto
+# python3's own bundled sqlite3 module (session_db.py), because macOS's
+# system `sqlite3` CLI commonly lacks the FTS5 extension while Python's
+# bundled SQLite usually has it. Only this health check's own DB-inspection
+# step below (Check: Session Search Database) still shells out to the CLI,
+# and it already degrades to a warning, not a failure, if absent -- this
+# dependency check must agree with that, not contradict it.
+if command -v sqlite3 &>/dev/null; then
+    pass "sqlite3 available ($(command -v sqlite3)) -- optional, used only for manual DB inspection here"
+else
+    warn "sqlite3 not found -- optional; session search itself uses python3's bundled sqlite3 module, not this CLI"
+fi
 
 # --- Summary ---
 

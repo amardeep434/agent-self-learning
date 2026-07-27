@@ -90,7 +90,7 @@ if [[ "$SESSION_ID" != "$CURRENT_SESSION" && "$SESSION_ID" != "unknown" ]]; then
     SKILL_ITERS=0
     TOTAL_TURNS=0
     LAST_REVIEW=""
-    SESSION_START=$(date -Iseconds)
+    SESSION_START=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     CURRENT_SESSION="$SESSION_ID"
 fi
 
@@ -143,7 +143,7 @@ mv "${COUNTER_FILE}.tmp" "$COUNTER_FILE"
 if [[ "$REVIEW_MEMORY" == "true" || "$REVIEW_SKILLS" == "true" ]]; then
     # Prevent rapid re-triggering (minimum 60 seconds between reviews)
     if [[ -n "$LAST_REVIEW" ]]; then
-        LAST_EPOCH=$(date -d "$LAST_REVIEW" +%s 2>/dev/null || echo "0")
+        LAST_EPOCH=$(sl_iso_to_epoch "$LAST_REVIEW")
         NOW_EPOCH=$(date +%s)
         if (( NOW_EPOCH - LAST_EPOCH < 60 )); then
             exit 0
@@ -155,7 +155,7 @@ if [[ "$REVIEW_MEMORY" == "true" || "$REVIEW_SKILLS" == "true" ]]; then
 {
   "review_memory": ${REVIEW_MEMORY},
   "review_skills": ${REVIEW_SKILLS},
-  "triggered_at": "$(date -Iseconds)",
+  "triggered_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "session_id": "${CURRENT_SESSION}",
   "total_turns": ${TOTAL_TURNS}
 }

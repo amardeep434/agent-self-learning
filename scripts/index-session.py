@@ -13,11 +13,15 @@ Arguments:
     project_path  - Relative project path (used for grouping)
 """
 
+from __future__ import annotations
+
 import json
 import sqlite3
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+from isotime import now_iso  # noqa: E402  (fix round D: shared with skill-lifecycle.py, persist-proposal.py, coach-signals.py)
 
 
 def parse_session(jsonl_path: str) -> dict:
@@ -102,7 +106,7 @@ def parse_session(jsonl_path: str) -> dict:
                 'timestamp': timestamp,
             })
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = now_iso()
     return {
         'title': title or '(untitled session)',
         'started_at': session_start or now,
@@ -144,9 +148,20 @@ def index_session(jsonl_path: str, db_path: str, project_path: str) -> None:
     parent_id = detect_parent_session(jsonl_path)
 
     conn = sqlite3.connect(db_path)
-    now = datetime.now(timezone.utc).isoformat()
+    now = now_iso()
 
     try:
+        # fix-p6: this used to be the shell wrapper's job (index-session.sh
+        # SELECTed indexed_at via the `sqlite3` CLI, then issued two more
+        # CLI DELETEs if a row already existed) -- folded in here so the
+        # whole index path uses only Python's sqlite3 module, no `sqlite3`
+        # CLI dependency at runtime. Unconditional and idempotent: a no-op
+        # DELETE when session_id has never been indexed, and necessary (not
+        # just belt-and-suspenders) when it HAS -- INSERT OR REPLACE alone
+        # would leave stale trailing rows behind if a re-indexed session
+        # now has FEWER messages than it did last time.
+        conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+
         conn.execute(
             """INSERT OR REPLACE INTO sessions
                (session_id, project_path, title, started_at, last_active,

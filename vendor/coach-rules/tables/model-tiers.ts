@@ -1,0 +1,18 @@
+const MODEL_TIERS: Record<string, number> = {
+  'claude-opus-4.7': 7.5,
+  'claude-opus-4.6-fast': 30, 'claude-opus-4.6': 3, 'claude-opus-4.5': 3,
+  'claude-haiku-4.5': 0.33,
+  'claude-sonnet-4.6': 1, 'claude-sonnet-4.5': 1, 'claude-sonnet-4': 1,
+  'claude-opus-41': 1, 'claude-opus-4': 1,
+  'claude-3.5-sonnet': 1, 'claude-3.7-sonnet': 1, 'claude-4': 1, 'claude-3-opus': 3,
+  'gpt-5.4-mini': 0.33, 'gpt-5.4-nano': 0.2, 'gpt-5.4': 1,
+  'gpt-5.3-codex': 1, 'gpt-5.2-codex': 1, 'gpt-5.2': 1,
+  'gpt-5.1-codex-max': 1, 'gpt-5.1-codex-mini': 0.33, 'gpt-5.1-codex': 1, 'gpt-5.1': 1,
+  'gpt-5.5': 3, 'gpt-5-mini': 0.33,
+  'o4-mini': 2, 'o3-mini': 1, 'o3': 3, 'o1-mini': 1, 'o1-preview': 2, 'o1': 2,
+  'gpt-4.1-nano': 0.2, 'gpt-4.1-mini': 0.5, 'gpt-4.1': 1,
+  'gpt-4-turbo': 1, 'gpt-4': 1,
+  'gemini-3.1-pro': 1, 'gemini-3-pro': 1, 'gemini-3-flash': 0.33,
+  'gemini-2.5-pro': 1, 'gemini-2.0-flash': 0.3,
+  'grok-code-fast-1': 0.25,
+}

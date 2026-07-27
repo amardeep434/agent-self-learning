@@ -1,0 +1,98 @@
+name: CI
+
+"on":
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.9", "3.13"]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # actions/setup-python on Windows only provides `python.exe`, never a
+      # `python3` on PATH (this is a known upstream gap, not a project bug).
+      # Every script in this repo shells out to `python3` by convention
+      # (config.sh, install.sh, curator-run.sh, ...), so without this shim
+      # every Windows job would fail with "python3: command not found"
+      # before a single test suite ran. Shimming here keeps that convention
+      # intact everywhere else instead of scattering python/python3
+      # fallbacks across scripts/.
+      - name: Ensure python3 resolves (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          set -euo pipefail
+          PY_PATH="$(command -v python)"
+          PY_DIR="$(dirname "$PY_PATH")"
+          if [[ ! -e "${PY_DIR}/python3.exe" ]]; then
+            cp "$PY_PATH" "${PY_DIR}/python3.exe"
+          fi
+          command -v python3
+          python3 --version
+
+      # jq is preinstalled on ubuntu-latest and windows-latest, but not
+      # guaranteed on macos-latest images; install explicitly rather than
+      # assume. `brew install` exits 0 (with a warning) if already present,
+      # so this is safe either way.
+      - name: Install jq (macOS)
+        if: runner.os == 'macOS'
+        run: brew install jq
+
+      # sqlite3 (the CLI, not Python's bundled sqlite3 module) ships with
+      # ubuntu-latest and macos-latest but not windows-latest. This install is
+      # now a convenience, not a requirement: index-session.sh moved off the
+      # sqlite3 CLI entirely (scripts/lib/session_db.py, via python3's bundled
+      # module) and the only remaining caller degrades to a warning. Kept so
+      # the health check's DB-inspection branch is exercised on Windows when
+      # choco cooperates; the verification step below reports either way and
+      # no longer fails when it does not.
+      - name: Install sqlite3 (Windows, optional)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        run: choco install sqlite -y --no-progress
+
+      - name: Verify required tools are on PATH
+        run: |
+          set -euo pipefail
+          # REQUIRED: absence of any of these means a suite would silently
+          # degrade rather than test anything, so fail loudly and early.
+          for tool in python3 jq bash; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              echo "::error::required tool '$tool' is not resolvable on PATH — failing loudly instead of letting a downstream suite silently degrade" >&2
+              exit 1
+            fi
+          done
+          # OPTIONAL: the sqlite3 CLI is no longer a runtime dependency. The
+          # session index and search moved to python3's bundled sqlite3 module
+          # (scripts/lib/session_db.py) precisely because macOS ships a CLI
+          # built without FTS5, and the only remaining CLI use --
+          # self-learning-health.sh's manual DB inspection -- is `command -v`
+          # guarded and degrades to a warning by design. Requiring it here
+          # contradicted both that code and README's requirements table, and
+          # broke both Windows cells when choco's install stopped landing on
+          # PATH. Report its absence rather than failing on it, so the log
+          # still says which branch of the health check was exercised.
+          if command -v sqlite3 >/dev/null 2>&1; then
+            echo "[capability probe] sqlite3 CLI: AVAILABLE ($(command -v sqlite3)) -- health-check DB inspection will be exercised"
+          else
+            echo "::notice::[capability probe] sqlite3 CLI: UNAVAILABLE -- optional; session search uses python3's bundled module. self-learning-health.sh's DB-inspection branch is not exercised on this runner."
+          fi
+
+      - name: Run tests
+        run: bash tests/run-all.sh

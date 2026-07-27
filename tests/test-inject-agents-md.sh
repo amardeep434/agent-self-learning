@@ -35,5 +35,23 @@ check "new memory present" "yes" "$(grep -q 'New fact only' "$TARGET" && echo ye
 python3 "${SCRIPT_DIR}/scripts/inject-agents-md.py" "$TMP/fresh/AGENTS.md"
 check "creates missing target" "yes" "$([[ -f "$TMP/fresh/AGENTS.md" ]] && echo yes || echo no)"
 
+# 5) C2-shaped fallback: with SL_MEMORY_DIR/SL_SKILLS_DIR unset, this must
+#    consult lib/paths.py (AGENT_LEARNING_HOME here) rather than a
+#    hardcoded ~/.claude/... literal, which would be wrong-location on any
+#    install that isn't Claude Code.
+FALLBACK_HOME=$(mktemp -d)
+FALLBACK_STORE="${FALLBACK_HOME}/store"
+mkdir -p "${FALLBACK_STORE}/learned-skills/fallback-skill" "${FALLBACK_STORE}/memory"
+printf -- '---\nname: fallback-skill\ndescription: Reached via paths.py, not a hardcoded default.\n---\nBody\n' \
+    > "${FALLBACK_STORE}/learned-skills/fallback-skill/SKILL.md"
+echo "- fallback memory line" > "${FALLBACK_STORE}/memory/MEMORY.md"
+env -i HOME="$FALLBACK_HOME" AGENT_LEARNING_HOME="$FALLBACK_STORE" PATH="$PATH" \
+    python3 "${SCRIPT_DIR}/scripts/inject-agents-md.py" "${FALLBACK_HOME}/AGENTS.md"
+FALLBACK_BLOCK="$(cat "${FALLBACK_HOME}/AGENTS.md" 2>/dev/null || echo MISSING)"
+check "fallback resolves via paths.py: skill found" "yes" "$([[ "$FALLBACK_BLOCK" == *"fallback-skill"* ]] && echo yes || echo no)"
+check "fallback resolves via paths.py: memory found" "yes" "$([[ "$FALLBACK_BLOCK" == *"fallback memory line"* ]] && echo yes || echo no)"
+check "fallback never created ~/.claude" "no" "$([[ -e "${FALLBACK_HOME}/.claude" ]] && echo yes || echo no)"
+rm -rf "$FALLBACK_HOME"
+
 if [[ "$FAILURES" -gt 0 ]]; then exit 1; fi
 echo "All inject-agents-md tests passed."

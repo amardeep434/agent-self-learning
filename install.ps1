@@ -1,18 +1,28 @@
 # install.ps1 — Windows wrapper. Requires Git for Windows (bash) or WSL.
 # All installation logic lives in install.sh; this locates bash and delegates.
+#
+# "Locates bash" is doing real work here: the first `bash` on a Windows PATH
+# may be WSL's launcher, which cannot see this repo's Windows path at all
+# and whose $HOME is a different user's. scripts/lib/find-bash.ps1 probes
+# for that functionally (never by filename) and fails with an explanation
+# rather than delegating into the wrong filesystem. See its header.
 $ErrorActionPreference = "Stop"
 
-$bash = Get-Command bash -ErrorAction SilentlyContinue
-if (-not $bash) {
-    Write-Error @"
-bash was not found on PATH. Install one of:
-  - Git for Windows (https://git-scm.com/download/win) — provides Git Bash
-  - WSL (wsl --install) — then run 'bash install.sh' inside WSL instead
-Then re-run: .\install.ps1
-"@
+$repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $repoRoot "scripts/lib/find-bash.ps1")
+
+# Forward slashes throughout: Git Bash accepts 'C:/repo/install.sh' as-is,
+# and a mixed 'C:\repo/install.sh' is needlessly harder to read in the error
+# message the probe may print.
+$scriptPath = ($repoRoot -replace '\\', '/') + "/install.sh"
+
+try {
+    $bashExe = Resolve-DelegableBash -ScriptPath $scriptPath
+}
+catch {
+    Write-Error $_.Exception.Message
     exit 1
 }
 
-$repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-& $bash.Source "$repoRoot/install.sh" @args
+& $bashExe $scriptPath @args
 exit $LASTEXITCODE

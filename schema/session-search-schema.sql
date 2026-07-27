@@ -1,15 +1,23 @@
 -- session-search-schema.sql
 --
--- SQLite schema for cross-session full-text search.
--- Initialized by install.sh or index-session.sh on first use.
+-- BASE SQLite schema for cross-session search: the sessions/messages tables
+-- and their plain indexes. Always applied, on every platform, regardless of
+-- whether the local SQLite build has the FTS5 extension.
+--
+-- Full-text search itself (the messages_fts virtual table + sync triggers)
+-- lives in the SIBLING file session-search-fts5.sql, applied only after a
+-- functional probe (scripts/lib/session_db.py's probe_fts5()) confirms FTS5
+-- is actually available -- not inferred from platform name. This split
+-- exists because macOS's bundled `sqlite3` CLI is commonly built WITHOUT
+-- FTS5 (`no such module: fts5`), which used to fail loudly mid-script and
+-- then get silently absorbed by the old `sqlite3 db < schema.sql` CLI
+-- invocation -- the base tables never got created either, on a platform
+-- where a working Python sqlite3 module (with FTS5) was sitting right
+-- there unused. See session_db.py's module docstring for the full story.
 --
 -- Tables:
---   sessions     - one row per Claude Code session
---   messages     - individual messages within sessions
---   messages_fts - FTS5 virtual table for full-text search
---
--- Triggers keep messages_fts in sync with the messages table
--- automatically on insert, update, and delete.
+--   sessions - one row per Claude Code session
+--   messages - individual messages within sessions
 
 CREATE TABLE IF NOT EXISTS sessions (
     session_id    TEXT PRIMARY KEY,
@@ -32,30 +40,6 @@ CREATE TABLE IF NOT EXISTS messages (
     timestamp   TEXT,              -- ISO 8601 if available
     UNIQUE(session_id, msg_index)
 );
-
--- FTS5 virtual table for full-text search
-CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-    content,                       -- searchable text
-    content=messages,              -- content table
-    content_rowid=id,              -- rowid mapping
-    tokenize='porter unicode61'    -- stemming + unicode support
-);
-
--- Triggers to keep FTS5 in sync with messages table
-CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
-    INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
-END;
-
-CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, content)
-        VALUES('delete', old.id, old.content);
-END;
-
-CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, content)
-        VALUES('delete', old.id, old.content);
-    INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
-END;
 
 -- Index for session lookup and chronological browsing
 CREATE INDEX IF NOT EXISTS idx_sessions_last_active

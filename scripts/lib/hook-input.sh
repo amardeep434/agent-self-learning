@@ -7,8 +7,17 @@
 #
 # Claude Code hook payload fields used here:
 #   session_id, tool_name, hook_event_name, transcript_path
+#
+# Reads via lib/stdin-safe.sh's sl_read_stdin_safe rather than a bare `cat`:
+# doctor.sh and humans also run hook scripts directly from an interactive
+# shell, where a bare `cat` on stdin blocks forever waiting for a Ctrl-D
+# that never comes in normal usage.
 
-_HOOK_RAW="$(cat 2>/dev/null || true)"
+_HI_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${_HI_LIB_DIR}/stdin-safe.sh"
+
+_HOOK_RAW="$(sl_read_stdin_safe)"
 
 _hook_field() {
     # $1 = jq field name, $2 = default

@@ -1,4 +1,11 @@
 {
+  "env": {
+    "SL_MEMORY_REVIEW_INTERVAL": "10",
+    "SL_SKILL_REVIEW_INTERVAL": "10",
+    "SL_REVIEW_ENABLED": "true",
+    "SL_REVIEW_MIN_TURNS": "5",
+    "SL_REVIEW_MAX_TURNS": "16"
+  },
   "hooks": {
     "PostToolUse": [
       {
