@@ -233,8 +233,9 @@ Say these plainly rather than letting the green matrix imply otherwise.
   - Artifacts, as long as the job dir survives: `$CLAUDE_JOB_DIR/tmp/live2-store/`
     (`memory/MEMORY.md`, `logs/persist.log`, empty `logs/reviews/transcript.err`). The
     durable record is the session transcript at `2026-07-26T17:07–17:08Z`.
-  - **`CLAUDE.md` still carries the pre-run-2 residual** and should be corrected the same
-    way; it is the file every session loads, so a stale gap claim there propagates.
+  - **`CLAUDE.md` has been updated to reflect Run 2.** The remaining residual is only that no
+    *human, multi-turn, TUI* Copilot session has yet fired the hook; ensure other docs do not
+    repeat the older “transcript reaching the prompt is unexercised” wording.
 - **Route C (SkillOpt) has never run end-to-end** — needs a `microsoft/SkillOpt` checkout.
 - **Route B (Coach export) has never run here** — needs a fork `.vsix` this repo does not
   contain.
