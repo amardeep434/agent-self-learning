@@ -74,5 +74,38 @@ check "resolved skills removed" "no" "$([[ -d "${AGENT_LEARNING_HOME}/learned-sk
 check "resolved search db removed" "no" "$([[ -f "${AGENT_LEARNING_HOME}/sessions/search.db" ]] && echo yes || echo no)"
 unset AGENT_LEARNING_HOME
 
+# 4) A1 follow-on: hooks registered with the CURRENT, correct commands must be
+# stripped too. Every case above feeds the pre-Task-7b shape
+# (~/.claude/scripts/self-learning/...), whose path happens to contain the
+# literal string "self-learning" that uninstall.sh used to match on. A hook
+# registered the way install.sh now tells users to register it reads
+# `bash <store>/scripts/turn-counter.sh` and contains no such substring, so the
+# stripper skipped it in silence and reported success. The rendered
+# settings-hooks.json is checked here for the same reason: it names paths that
+# no longer exist after an uninstall.
+export AGENT_LEARNING_HOME="${HOME}/store2"
+mkdir -p "${AGENT_LEARNING_HOME}/scripts" "${HOME}/.claude"
+SL_SCRIPTS_NOW="${AGENT_LEARNING_HOME}/scripts"
+touch "${SL_SCRIPTS_NOW}/turn-counter.sh"
+printf '%s\n' '{"hooks":{"PostToolUse":[{"matcher":"","hooks":[{"type":"command","command":"bash '"${SL_SCRIPTS_NOW}"'/turn-counter.sh","timeout":3}]}],"Stop":[{"matcher":"","hooks":[{"type":"command","command":"bash '"${SL_SCRIPTS_NOW}"'/session-review.sh","timeout":15},{"type":"command","command":"bash '"${SL_SCRIPTS_NOW}"'/index-session.sh","timeout":10}]},{"matcher":"","hooks":[{"type":"command","command":"echo user-own-hook","timeout":3}]}]}}' \
+    > "${HOME}/.claude/settings.json"
+printf '%s\n' '{"hooks":{}}' > "${AGENT_LEARNING_HOME}/settings-hooks.json"
+
+bash "${SCRIPT_DIR}/uninstall.sh" --yes
+
+check "store-path turn-counter hook stripped" "0" \
+    "$(grep -c 'turn-counter' "${HOME}/.claude/settings.json" || true)"
+check "store-path session-review hook stripped" "0" \
+    "$(grep -c 'session-review' "${HOME}/.claude/settings.json" || true)"
+check "store-path index-session hook stripped" "0" \
+    "$(grep -c 'index-session' "${HOME}/.claude/settings.json" || true)"
+check "unrelated user hook still survives" "1" \
+    "$(grep -c user-own-hook "${HOME}/.claude/settings.json")"
+check "settings still valid json after store-path strip" "yes" \
+    "$(jq . "${HOME}/.claude/settings.json" >/dev/null && echo yes)"
+check "rendered settings-hooks.json removed" "no" \
+    "$([[ -f "${AGENT_LEARNING_HOME}/settings-hooks.json" ]] && echo yes || echo no)"
+unset AGENT_LEARNING_HOME
+
 if [[ "$FAILURES" -gt 0 ]]; then exit 1; fi
 echo "All uninstall tests passed."
