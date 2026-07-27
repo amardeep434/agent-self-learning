@@ -240,9 +240,9 @@ REPORT CLAIM CONTRADICTED BY THE TREE: residuals-research-report.md discusses "t
 remaining 10 Coach rules"; later work reduced the skip list to 3. The tree wins.
 
 STILL NEVER VERIFIED (stated plainly so the green matrix does not imply otherwise): no
-genuine INTERACTIVE Copilot session has fired sessionEnd with real conversation history in
-the payload -- the 2026-07-26 live check covered hook+real model+writer and contract+real
-model+real content, but not Copilot's own transcript reaching the prompt; Route C never
+human, multi-turn, TUI Copilot session has fired sessionEnd with real multi-turn history in
+the payload — the 2026-07-26 live check *did* exercise Copilot's on-disk transcript reaching
+the prompt, but only for a one-shot `-p` invocation; Route C never
 run end-to-end; Route B never run here; live telemetry/transcript extraction never
 exercised in CI on any platform; cross-process store-lock writer tests never run on
 Windows; the symlink/hardlink/O_NOFOLLOW write-path surface exercised on Linux and macOS
