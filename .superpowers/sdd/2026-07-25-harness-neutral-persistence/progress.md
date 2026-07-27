@@ -248,3 +248,15 @@ exercised in CI on any platform; cross-process store-lock writer tests never run
 Windows; the symlink/hardlink/O_NOFOLLOW write-path surface exercised on Linux and macOS
 only (Windows covers the same threat by a different mechanism, win_dir_pin's CreateFileW
 share-mode pin, which IS probe-verified in CI).
+
+=== FINAL SWEEP FINDINGS EXTRACTED (2026-07-27) ===
+The closing audit's detailed findings were first written inline in
+docs/superpowers/HANDOFF-2026-07-27-harness-neutral-persistence.md and have been moved to
+final-sweep-findings.md in this directory, so they sit with the other per-round reports
+rather than inside a document meant to be skimmed. The handoff's section 4 is now a ranked
+index linking into that file, section by section. No content was lost in the move.
+Headline: A1 (Claude Code hook registration broken three ways -- stale path in
+settings-hooks.json, flat schema in install.sh's printed block, timeouts 1000x too large;
+following EITHER documented route fails) was previously mis-carried as a user decision. It
+is a defect that prevents the decision, and it has no test because the surface it lives on
+-- what a user does AFTER install -- is untested end to end.
