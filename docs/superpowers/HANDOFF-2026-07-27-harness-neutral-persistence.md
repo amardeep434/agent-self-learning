@@ -108,8 +108,8 @@ Two known-stale statements inside that record, so you do not act on them:
 | Working tree | clean, nothing unpushed | `git status --porcelain && git log @{u}..HEAD` |
 | **PR #2** | **MERGED** 2026-07-27T10:02:16Z, merge commit `1c93605` | `gh pr view 2 --json state,mergedAt,mergeCommit` |
 | Is HEAD on main? | yes | `git branch -r --contains ae9e8f6` |
-| CI | run `30255824383`, 6/6 green on `ae9e8f6` | `gh run list --branch harness-neutral-persistence` then `gh run view <id>` |
-| Local suite | 43 suites (29 shell, 14 python), all pass | `bash tests/run-all.sh` |
+| CI | last observed 6/6 green on `main`; the A1/A2 branch was green on run `30284745998` | `gh run list --branch main` then `gh run view <id>` — the old branch is merged, do not query it |
+| Local suite | 44 suites (30 shell, 14 python), all pass — was 43 before A1 added `test-claude-hooks-json.sh` | `bash tests/run-all.sh` |
 | Coach rules / evaluable | 45 rules, 3 skipped → 42 evaluable | count `^id:` in `vendor/coach-rules/*.md`; count keys of `UNSUPPORTED_REASONS` in `scripts/coach-rules-eval.py` — **parse it, do not grep it** (see §7) |
 | Resolved store paths | see below | `python3 scripts/lib/paths.py all` |
 | Claude Code hooks registered | **0** | `python3 -c "import json,os;print(json.dumps(json.load(open(os.path.expanduser('~/.claude/settings.json')))['hooks']))"` and look for the scripts dir |
