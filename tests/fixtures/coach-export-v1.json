@@ -1,0 +1,180 @@
+{
+  "_fixture": "Derived from a real ai-engineer-coach `Export Summary` run (schemaVersion 1). Top-level shape is verbatim; dates are pinned and all counts scaled by 10 so this is a stable fixture, not a snapshot of anyone's activity.",
+  "schemaVersion": 1,
+  "generatedAt": "2020-01-01T00:00:00.000Z",
+  "filter": {},
+  "totals": {
+    "sessions": 55,
+    "requests": 507,
+    "workspaces": 18
+  },
+  "production": {
+    "totalAiLoc": 7552,
+    "totalUserLoc": 0,
+    "totalLoc": 7552,
+    "aiRatio": 1,
+    "topLanguages": [
+      {
+        "language": "python",
+        "aiLoc": 2288,
+        "userLoc": 0
+      },
+      {
+        "language": "unknown",
+        "aiLoc": 1736,
+        "userLoc": 0
+      },
+      {
+        "language": "markdown",
+        "aiLoc": 1055,
+        "userLoc": 0
+      },
+      {
+        "language": "bash",
+        "aiLoc": 886,
+        "userLoc": 0
+      },
+      {
+        "language": "md",
+        "aiLoc": 661,
+        "userLoc": 0
+      },
+      {
+        "language": "html",
+        "aiLoc": 343,
+        "userLoc": 0
+      },
+      {
+        "language": "kt",
+        "aiLoc": 315,
+        "userLoc": 0
+      },
+      {
+        "language": "sql",
+        "aiLoc": 50,
+        "userLoc": 0
+      },
+      {
+        "language": "yaml",
+        "aiLoc": 49,
+        "userLoc": 0
+      },
+      {
+        "language": "json",
+        "aiLoc": 35,
+        "userLoc": 0
+      }
+    ]
+  },
+  "activity": {
+    "activeDays": 55,
+    "firstActivityDate": "2020-01-01",
+    "lastActivityDate": "2020-02-24",
+    "maxStreak": 15
+  },
+  "flow": {
+    "overallScore": 70,
+    "deepFlowDays": 27,
+    "totalDays": 36,
+    "avgBlockMin": 3211,
+    "suggestions": [
+      "Your deepest flow tends to happen around 10:00 (score 97). Block this time for uninterrupted work.",
+      "Strong flow patterns detected. Maintain your current work blocks and keep distractions at bay."
+    ]
+  },
+  "antiPatterns": {
+    "totalOccurrences": 3292,
+    "topPatterns": [
+      {
+        "id": "no-slash-commands",
+        "name": "No Slash Commands",
+        "severity": "low",
+        "group": "tool-mastery",
+        "occurrences": 507,
+        "description": "Only 0 of 507 requests use slash commands. Slash commands produce more targeted responses.",
+        "suggestion": "Try /fix for bugs, /explain for understanding code, /tests for test generation, /doc for documentation."
+      },
+      {
+        "id": "no-custom-instructions",
+        "name": "No Custom Instructions",
+        "severity": "medium",
+        "group": "tool-mastery",
+        "occurrences": 498,
+        "description": "Only 2% of requests use custom instructions (8/507). Missing out on personalized responses.",
+        "suggestion": "Create a .github/copilot-instructions.md or .instructions.md file in your workspace to give Copilot persistent context about your project conventions, stack, and coding style."
+      },
+      {
+        "id": "low-context-provision-claude",
+        "name": "Low Context Provision (Claude)",
+        "severity": "high",
+        "group": "tool-mastery",
+        "occurrences": 470,
+        "description": "Claude: 470 requests with context score 8/100. Only 12% include file references, 0% use custom instructions.",
+        "suggestion": "In Claude, reference files with #file, add .instructions.md files, and use skills/prompts to provide richer context."
+      },
+      {
+        "id": "no-file-context",
+        "name": "Missing File Context",
+        "severity": "medium",
+        "group": "prompt-quality",
+        "occurrences": 422,
+        "description": "83% of requests have no file references. Copilot gives better answers with file context.",
+        "suggestion": "Use #file to reference relevant files, or open files in the editor so Copilot can use them as context."
+      },
+      {
+        "id": "agentic-no-tools",
+        "name": "Agentic Without Tools",
+        "severity": "low",
+        "group": "tool-mastery",
+        "occurrences": 376,
+        "description": "376 agentic requests used no tools. Agent mode is most effective when tools are enabled.",
+        "suggestion": "Ensure tools are enabled in agent mode for file search, terminal access, and web search capabilities."
+      },
+      {
+        "id": "repeated-prompts",
+        "name": "Repeated Prompts",
+        "severity": "high",
+        "group": "prompt-quality",
+        "occurrences": 356,
+        "description": "356 requests are near-duplicates across 34 distinct prompts. This wastes quota without new results.",
+        "suggestion": "If a prompt isn't working, rephrase it or provide more context instead of retrying the same message."
+      },
+      {
+        "id": "frustration-signals",
+        "name": "Frustration Signals",
+        "severity": "medium",
+        "group": "prompt-quality",
+        "occurrences": 194,
+        "description": "194 requests show frustration indicators (excessive punctuation, ALL CAPS). This usually means the approach isn't working.",
+        "suggestion": "When frustrated, step back and change strategy. Start a new session, rephrase the problem, or break it into smaller pieces instead of escalating the same prompt."
+      },
+      {
+        "id": "slow-responses",
+        "name": "Slow Responses",
+        "severity": "low",
+        "group": "session-hygiene",
+        "occurrences": 141,
+        "description": "141 requests took over 30 seconds (avg 292s). May indicate overly broad prompts.",
+        "suggestion": "Break complex tasks into smaller, focused requests. Use lighter models for simple questions."
+      },
+      {
+        "id": "weekend-overwork",
+        "name": "Weekend Overwork",
+        "severity": "low",
+        "group": "session-hygiene",
+        "occurrences": 135,
+        "description": "135 requests (27%) happen on weekends. This may indicate work-life balance issues.",
+        "suggestion": "Consider maintaining boundaries between work and personal time. Sustained overwork leads to burnout and decreased productivity."
+      },
+      {
+        "id": "late-night-coding",
+        "name": "Late-Night Coding",
+        "severity": "low",
+        "group": "session-hygiene",
+        "occurrences": 74,
+        "description": "74 requests were made between midnight and 5am. Late-night coding correlates with more bugs and lower quality.",
+        "suggestion": "Consider establishing healthier work hours. Quality drops significantly when fatigued."
+      }
+    ]
+  }
+}
