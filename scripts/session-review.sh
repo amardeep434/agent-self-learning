@@ -109,7 +109,9 @@ Then perform a combined memory + skill review:
 
 ## Rules
 
-- Maximum 3 memory writes + 2 skill operations per review cycle
+- Maximum 3 new memory FACTS + 2 skill operations per review cycle. Those
+  facts go into at most ONE JSON entry per memory file (there are only two
+  legal files, MEMORY.md and USER.md) -- see the OUTPUT CONTRACT below
 - Each memory entry must be a single line, under 120 characters
 - Never save: secrets, tokens, API keys, passwords, personal data beyond name/role
 - Check existing memory before adding -- do not duplicate

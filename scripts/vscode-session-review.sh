@@ -134,7 +134,8 @@ ${SL_MEMORY_DIR}/USER.md, and scan ${SL_SKILLS_DIR}/ for existing skills.
    ${SL_SKILLS_DIR}/<skill-name>/SKILL.md. Prefer updating existing skills.
 
 ## Rules
-- Maximum 3 memory writes + 2 skill operations.
+- Maximum 3 new memory FACTS + 2 skill operations. Those facts go into at
+  most one JSON entry per memory file -- see the OUTPUT CONTRACT below.
 - Never save secrets, tokens, API keys, passwords, or personal data.
 - Skill names must match [A-Za-z0-9][A-Za-z0-9_-]{0,63} (max 64 chars,
   case-sensitive, digits/letters/underscore/hyphen only -- no dots); skill
