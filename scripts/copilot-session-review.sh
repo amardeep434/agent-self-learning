@@ -70,7 +70,8 @@ ${SL_SKILLS_DIR}/ for existing skills.
    ${SL_SKILLS_DIR}/<skill-name>/SKILL.md. Prefer updating existing skills.
 
 ## Rules
-- Maximum 3 memory writes + 2 skill operations.
+- Maximum 3 new memory FACTS + 2 skill operations. Those facts go into at
+  most one JSON entry per memory file -- see the OUTPUT CONTRACT below.
 - Never save secrets, tokens, API keys, passwords, or personal data.
 - Skill names must match [A-Za-z0-9][A-Za-z0-9_-]{0,63} (max 64 chars,
   case-sensitive, digits/letters/underscore/hyphen only -- no dots); skill
@@ -135,6 +136,11 @@ if command -v copilot &>/dev/null; then
     sl_review_launch_detached copilot-session-review copilot-review-stderr.log \
         "$SL_LOG_DIR" "${SCRIPT_DIR}/persist-proposal.py" \
         copilot "${COPILOT_ARGS[@]}" -p "$REVIEW_PROMPT"
+else
+    # See the identical else branch in session-review.sh: a bare `fi` here
+    # means a machine whose copilot CLI is missing or renamed reviews nothing,
+    # forever, and says so nowhere.
+    sl_review_no_reviewer_available copilot-session-review "$SL_LOG_DIR" copilot
 fi
 
 exit 0

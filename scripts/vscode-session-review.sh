@@ -77,7 +77,22 @@ if [[ ! -f "$COUNTER_FILE" ]]; then
     exit 0
 fi
 
-TOTAL_TURNS=$(jq -r '.total_turns_this_session // 0' "$COUNTER_FILE" 2>/dev/null || echo "0")
+# Same distinction session-review.sh draws, for the same reason: a missing jq
+# must not masquerade as a short session. See sl_review_precondition_failed.
+if ! command -v jq >/dev/null 2>&1; then
+    sl_review_precondition_failed vscode-session-review "$SL_LOG_DIR" \
+        "jq is not on PATH, so the turn counter cannot be read -- no session can be reviewed"
+    exit 0
+fi
+
+TOTAL_TURNS=$(jq -r '.total_turns_this_session // 0' "$COUNTER_FILE" 2>/dev/null || echo "")
+if [[ ! "$TOTAL_TURNS" =~ ^[0-9]+$ ]]; then
+    sl_review_precondition_failed vscode-session-review "$SL_LOG_DIR" \
+        "could not read .total_turns_this_session from ${COUNTER_FILE} (got: ${TOTAL_TURNS:-<empty>})"
+    exit 0
+fi
+
+# A genuinely short session is not a failure -- this one stays silent.
 if (( TOTAL_TURNS < MIN_TURNS_FOR_REVIEW )); then
     exit 0
 fi
@@ -134,7 +149,8 @@ ${SL_MEMORY_DIR}/USER.md, and scan ${SL_SKILLS_DIR}/ for existing skills.
    ${SL_SKILLS_DIR}/<skill-name>/SKILL.md. Prefer updating existing skills.
 
 ## Rules
-- Maximum 3 memory writes + 2 skill operations.
+- Maximum 3 new memory FACTS + 2 skill operations. Those facts go into at
+  most one JSON entry per memory file -- see the OUTPUT CONTRACT below.
 - Never save secrets, tokens, API keys, passwords, or personal data.
 - Skill names must match [A-Za-z0-9][A-Za-z0-9_-]{0,63} (max 64 chars,
   case-sensitive, digits/letters/underscore/hyphen only -- no dots); skill

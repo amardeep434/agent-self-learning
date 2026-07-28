@@ -45,6 +45,17 @@ _RC_SCRIPTS_DIR="$(cd "${_RC_LIB_DIR}/.." && pwd)"
 # that contradicted the schema a few lines below it in the same prompt (I8);
 # tests/test-session-review.sh and tests/test-copilot-session-review.sh both
 # pin against the stale form, and now pin it in this one place.
+#
+# The "AT MOST ONE entry per file" rule is the same class of defect, found in
+# production rather than in review. proposal_schema.validate_proposal has
+# always rejected duplicate memory file entries wholesale, but this contract
+# never said so, while every harness preamble told the reviewer it had a
+# budget of "3 memory writes" over an allow-list of exactly TWO filenames --
+# so a reviewer that simply spent its stated budget produced a proposal that
+# could not validate. Measured, on the first real Claude Code review this
+# machine ever ran (2026-07-28T09:07:43Z): a whole paid review discarded,
+# `persist-proposal: invalid proposal: duplicate memory file entries`.
+# tests/test-review-failure-legibility.sh pins both halves.
 # ---------------------------------------------------------------------------
 sl_review_output_contract() {
     # TWO leading blank lines, not one, and they are load-bearing: callers
@@ -70,6 +81,10 @@ final message, in a fenced json block:
 ```
 
 Rules: "file" must be MEMORY.md or USER.md. "mode" is "replace" or "append".
+AT MOST ONE entry per file -- never two entries naming the same file. To
+record several facts in one file, put them all in that file's single entry
+(newline-separated for "append"). A proposal with two MEMORY.md entries is
+rejected in full and NOTHING is saved.
 "name" must match [A-Za-z0-9][A-Za-z0-9_-]{0,63}. Omit "memory" or "skills"
 entirely when there is nothing to record. Emit nothing after the block.
 RCEOF
@@ -163,6 +178,21 @@ sl_review_coach_section() {
 # <log_dir>/persist-failures.log, which scripts/doctor.sh surfaces -- that
 # log is the visibility mechanism replacing the exit code.
 #
+# That line names WHICH stage failed and WHY, via PIPESTATUS rather than a
+# single `$?` under pipefail. The old form printed only
+# "pipeline failed (status N)", which is the same text whether the model call
+# died or the writer rejected the proposal -- and the writer's own diagnostic
+# went to persist.log with no timestamp and no component, so the two halves
+# could not be joined. Diagnosing the 2026-07-28T09:07:43Z failure on a real
+# install required reconstructing which line of persist.log fell between two
+# unrelated timestamped lines written by a concurrent Copilot pipeline. Hence
+# the writer's stderr is captured separately: it is still appended to
+# persist.log verbatim (unchanged visibility), and its last line is ALSO
+# quoted in the failure line so persist-failures.log is self-sufficient.
+# Exactly one line per failed run even when both stages fail -- doctor.sh
+# reports this file's line count as "N persistence failure(s) recorded".
+# Pinned by tests/test-review-failure-legibility.sh.
+#
 # The last statement is an unconditional (success OR failure) completion
 # marker, <log_dir>/.review-complete. Nothing else signals "the async work
 # behind this hook invocation is actually finished" -- only "a write
@@ -179,12 +209,36 @@ sl_review_launch_detached() {
     SL_REVIEW_ACTIVE=1 nohup bash -c '
         set -o pipefail
         component="$1"; stderr_log="$2"; logdir="$3"; writer="$4"; shift 4
+        writer_err="${logdir}/.writer-stderr.$$"
+        : >"$writer_err"
         "$@" 2>>"${logdir}/${stderr_log}" \
-            | python3 "$writer" >>"${logdir}/persist.log" 2>&1
-        status=$?
-        if [[ $status -ne 0 ]]; then
-            printf "%s %s: pipeline failed (status %s)\n" \
-                "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$component" "$status" \
+            | python3 "$writer" >>"${logdir}/persist.log" 2>"$writer_err"
+        stages=("${PIPESTATUS[@]}")
+        reviewer_status="${stages[0]}"
+        writer_status="${stages[1]}"
+        # The writer diagnostic stays visible in persist.log byte-for-byte as it
+        # was when this pipeline used a bare 2>&1. Splitting the stream exists
+        # solely so the SAME text can also be attributed in
+        # persist-failures.log, which is the only log doctor.sh reads.
+        if [[ -s "$writer_err" ]]; then
+            cat "$writer_err" >>"${logdir}/persist.log"
+        fi
+        reason="$(tail -n 1 "$writer_err" 2>/dev/null)"
+        rm -f "$writer_err"
+        detail=""
+        if [[ "$reviewer_status" -ne 0 ]]; then
+            detail="reviewer stage exited ${reviewer_status} -- see ${stderr_log}"
+        fi
+        if [[ "$writer_status" -ne 0 ]]; then
+            wdetail="writer stage exited ${writer_status}: ${reason:-no diagnostic on writer stderr}"
+            if [[ -n "$detail" ]]; then detail="${detail}; ${wdetail}"; else detail="$wdetail"; fi
+        fi
+        # ONE line per failed run even when both stages fail: doctor.sh reports
+        # the line count as "N persistence failure(s)", so a second line for a
+        # single broken run would inflate that count.
+        if [[ -n "$detail" ]]; then
+            printf "%s %s: %s\n" \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$component" "$detail" \
                 >>"${logdir}/persist-failures.log"
         fi
         printf "%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"${logdir}/.review-complete"
@@ -211,6 +265,39 @@ sl_review_no_reviewer_available() {
     shift 2
     mkdir -p "$log_dir"
     printf "%s %s: no reviewer CLI on PATH (looked for: %s) -- session NOT reviewed\n" \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$component" "$*" \
+        >>"${log_dir}/persist-failures.log"
+}
+
+# ---------------------------------------------------------------------------
+# sl_review_precondition_failed <component> <log_dir> <reason...>
+#
+# Records that a review was never even ATTEMPTED because a precondition was
+# unmet -- a missing tool, an unreadable counter file.
+#
+# Same rationale as sl_review_no_reviewer_available, different trigger. The
+# hook scripts gate on a turn count read with
+# `jq ... 2>/dev/null || echo "0"`, which maps BOTH "jq is absent" and "the
+# counter is corrupt" onto the number 0 -- and 0 is below every review
+# threshold, so the script exits 0 having silently switched the whole review
+# pipeline off. That is indistinguishable from "this session was too short to
+# be worth reviewing", which is the one case that must stay silent.
+#
+# Not hypothetical: it hid a Windows CI failure for a full round. The suite
+# tests/test-review-failure-legibility.sh drove the hook under `env -i` with a
+# PATH that carried no jq (Git Bash's /usr/bin has none), every session scored
+# 0 turns, no review ever launched, and the ONLY evidence left anywhere on
+# disk was an empty logs/reviews/ directory. Diagnosing it needed a
+# byte-for-byte comparison of `find` output against a local simulation.
+#
+# A short session stays silent. A BROKEN one says so, in the one channel
+# doctor.sh reads.
+# ---------------------------------------------------------------------------
+sl_review_precondition_failed() {
+    local component="$1" log_dir="$2"
+    shift 2
+    mkdir -p "$log_dir"
+    printf "%s %s: review NOT attempted -- %s\n" \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$component" "$*" \
         >>"${log_dir}/persist-failures.log"
 }

@@ -398,5 +398,39 @@ class TestFencePerformance(unittest.TestCase):
         self.assertEqual(result, {"version": 1})
 
 
+class TestMemoryEntryLimitIsHonest(unittest.TestCase):
+    """MAX_MEMORY_ENTRIES must not advertise headroom no valid proposal can use.
+
+    Memory entries are allow-listed by exact filename AND de-duplicated, so the
+    real ceiling is len(ALLOWED_MEMORY_FILES). The constant was a hand-written
+    4, whose error message ("at most 4 memory entries per proposal") contradicted
+    the limit actually enforced -- the same prompt-vs-schema contradiction that
+    discarded a whole paid review on 2026-07-28 (see
+    tests/test-review-failure-legibility.sh).
+    """
+
+    def test_limit_equals_number_of_allowed_files(self):
+        self.assertEqual(ps.MAX_MEMORY_ENTRIES, len(ps.ALLOWED_MEMORY_FILES))
+
+    def test_no_valid_proposal_can_exceed_the_limit(self):
+        """Every entry count up to the limit is reachable; one more never is."""
+        files = sorted(ps.ALLOWED_MEMORY_FILES)
+        at_limit = {"version": 1,
+                    "memory": [{"file": f, "mode": "append", "content": "x"}
+                               for f in files]}
+        # The largest proposal the allow-list permits must validate.
+        self.assertEqual(len(ps.validate_proposal(at_limit)["memory"]),
+                         ps.MAX_MEMORY_ENTRIES)
+        # One more entry can only be a duplicate, so it must be rejected -- and
+        # the count check must be what rejects it, so the message names the
+        # limit rather than blaming a duplicate the reviewer could not avoid.
+        over = {"version": 1,
+                "memory": at_limit["memory"] + [{"file": files[0], "mode": "append",
+                                                 "content": "x"}]}
+        with self.assertRaises(ps.ValidationError) as ctx:
+            ps.validate_proposal(over)
+        self.assertIn(f"at most {ps.MAX_MEMORY_ENTRIES} memory entries", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -19,9 +19,17 @@ MAX_SKILL_BYTES = 32 * 1024
 MAX_SKILLS = 10
 MAX_TOTAL_BYTES = 256 * 1024
 MAX_INPUT_BYTES = 4 * MAX_TOTAL_BYTES
-MAX_MEMORY_ENTRIES = 4
 
 ALLOWED_MEMORY_FILES = frozenset({"MEMORY.md", "USER.md"})
+
+# Derived, not a hand-written 4. Entries are allow-listed by exact filename AND
+# checked for duplicates below, so more entries than there are legal filenames
+# is unreachable by construction -- the old literal 4 advertised a headroom of
+# two entries that no valid proposal could ever occupy, and its error message
+# ("at most 4 memory entries per proposal") actively contradicted the real
+# limit. Deriving it keeps the two facts from drifting if a third memory file
+# is ever allow-listed.
+MAX_MEMORY_ENTRIES = len(ALLOWED_MEMORY_FILES)
 ALLOWED_MODES = frozenset({"replace", "append"})
 SKILL_NAME_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 
