@@ -136,6 +136,11 @@ if command -v copilot &>/dev/null; then
     sl_review_launch_detached copilot-session-review copilot-review-stderr.log \
         "$SL_LOG_DIR" "${SCRIPT_DIR}/persist-proposal.py" \
         copilot "${COPILOT_ARGS[@]}" -p "$REVIEW_PROMPT"
+else
+    # See the identical else branch in session-review.sh: a bare `fi` here
+    # means a machine whose copilot CLI is missing or renamed reviews nothing,
+    # forever, and says so nowhere.
+    sl_review_no_reviewer_available copilot-session-review "$SL_LOG_DIR" copilot
 fi
 
 exit 0

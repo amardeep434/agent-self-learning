@@ -47,7 +47,27 @@ if [[ ! -f "$COUNTER_FILE" ]]; then
     exit 0
 fi
 
-TOTAL_TURNS=$(jq -r '.total_turns_this_session // 0' "$COUNTER_FILE" 2>/dev/null || echo "0")
+# "jq is missing" and "the counter says 0" must not be the same outcome. The
+# old form, `jq ... 2>/dev/null || echo "0"`, collapsed them: on a machine
+# with no jq every session scored 0 turns, fell through the gate below, and
+# exited 0 with nothing written anywhere -- the review pipeline silently
+# switched off for good, looking exactly like a healthy install with short
+# sessions. See sl_review_precondition_failed's header for the Windows CI
+# round this cost.
+if ! command -v jq >/dev/null 2>&1; then
+    sl_review_precondition_failed session-review "$SL_LOG_DIR" \
+        "jq is not on PATH, so the turn counter cannot be read -- no session can be reviewed"
+    exit 0
+fi
+
+TOTAL_TURNS=$(jq -r '.total_turns_this_session // 0' "$COUNTER_FILE" 2>/dev/null || echo "")
+if [[ ! "$TOTAL_TURNS" =~ ^[0-9]+$ ]]; then
+    sl_review_precondition_failed session-review "$SL_LOG_DIR" \
+        "could not read .total_turns_this_session from ${COUNTER_FILE} (got: ${TOTAL_TURNS:-<empty>})"
+    exit 0
+fi
+
+# A genuinely short session is not a failure -- this one stays silent.
 if (( TOTAL_TURNS < MIN_TURNS_FOR_REVIEW )); then
     exit 0
 fi
@@ -182,6 +202,15 @@ if command -v claude &>/dev/null; then
         --output-format text \
         --allowedTools "Read,Glob,Grep" \
         --disallowedTools "Write,Edit,NotebookEdit"
+else
+    # `if command -v X; then ... fi` with no else branch is this project's
+    # signature defect wearing a shell idiom -- exit 0 having done nothing,
+    # indistinguishable from a working install. review-common.sh has shipped
+    # sl_review_no_reviewer_available for precisely this since Task 6, and
+    # documents that shape as the reason it exists, but only
+    # vscode-session-review.sh ever called it; this path and the Copilot path
+    # still had the bare `fi`.
+    sl_review_no_reviewer_available session-review "$SL_LOG_DIR" claude
 fi
 
 # --- Update counter state ---

@@ -33,6 +33,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tests/lib/wait-for-review.sh
 source "${SCRIPT_DIR}/tests/lib/wait-for-review.sh"
+# shellcheck source=tests/lib/path-compare.sh
+source "${SCRIPT_DIR}/tests/lib/path-compare.sh"
 
 FAILURES=0
 CASE_DIRS=()
@@ -66,11 +68,77 @@ run_review() {
     # env -i: the real store on the developer's own machine must never be
     # reachable from this suite, and AGENT_LEARNING_HOME is only authoritative
     # when no inherited XDG_DATA_HOME/HOME can win.
+    #
+    # PATH PREPENDS to the inherited $PATH -- it does NOT replace it, and the
+    # difference cost a full Windows CI round. An earlier draft passed a
+    # hardcoded PATH="$R/bin:/usr/bin:/bin", reasoning that env -i should be
+    # total. On ubuntu/macOS that is fine. On windows-latest under Git Bash,
+    # /usr/bin is C:\Program Files\Git\usr\bin, which ships no jq -- jq lives
+    # on the runner's native PATH -- so session-review.sh's turn-count gate
+    # scored 0 turns, exited 0 at its MIN_TURNS check, and never launched the
+    # pipeline. The suite then timed out waiting for a marker that nothing was
+    # ever going to write, and the only evidence left on disk was an empty
+    # logs/reviews/ directory. Store isolation comes from HOME and
+    # AGENT_LEARNING_HOME, not from amputating PATH; every other review suite
+    # in this directory already prepends (test-session-review.sh:147,
+    # test-copilot-session-review.sh:173, test-vscode-session-review.sh:237)
+    # and all three stayed green on Windows in the run this one failed.
     echo '{"session_id":"leg","hook_event_name":"Stop"}' \
         | env -i HOME="$R/home" AGENT_LEARNING_HOME="$R/store" \
-              PATH="$R/bin:/usr/bin:/bin" FAKE_PROMPT_LOG="$R/prompt.txt" \
+              PATH="$R/bin:$PATH" FAKE_PROMPT_LOG="$R/prompt.txt" \
               bash "${SCRIPT_DIR}/scripts/session-review.sh"
-    sl_wait_for_review_complete "$STORE/logs" || true
+    if ! sl_wait_for_review_complete "$STORE/logs"; then
+        diagnose_timeout "$R"
+    fi
+}
+
+# On timeout, say WHY offline. The Windows round this suite already cost was
+# diagnosable only by comparing `find` output against a local simulation; the
+# two things that had to be ruled out were (H1) the marker being written to a
+# different spelling of the same directory, and (H2) the detached body dying
+# before its last statement. Both are answerable on the runner itself.
+diagnose_timeout() {
+    local R="$1"
+    echo "--- self-diagnosis -------------------------------------------------"
+    echo "polled log dir : $STORE/logs"
+    # H1: does the product's own resolution of the store agree with the path
+    # this suite polls? sl_check_same_path compares by identity, not spelling,
+    # which is the whole point on MSYS.
+    local resolved
+    # sl_resolve_path, not a hand-rolled python3 call: it goes through the
+    # identical subprocess/env/OS-path-conversion pipeline config.sh uses, so
+    # the string is comparable to what the product actually resolved.
+    # sl_same_path (the predicate), NOT sl_check_same_path -- the latter prints
+    # PASS/FAIL and mutates FAILURES, which would corrupt this suite's tally
+    # from inside a diagnostic.
+    resolved="$(sl_resolve_path "${SCRIPT_DIR}/scripts/lib/paths.py" logs \
+        HOME="$R/home" AGENT_LEARNING_HOME="$R/store" PATH="$R/bin:$PATH")"
+    echo "paths.py logs  : ${resolved:-<paths.py produced nothing>}"
+    if sl_same_path "$STORE/logs" "$resolved"; then
+        echo "same path?     : YES -- H1 (path-spelling mismatch) is ruled out"
+    else
+        echo "same path?     : NO  -- H1 (path-spelling mismatch) is LIVE"
+    fi
+    echo "ls -la polled  :"; ls -la "$STORE/logs" 2>&1 | sed 's/^/    /'
+    echo "ls -la resolved:"; ls -la "$resolved" 2>&1 | sed 's/^/    /'
+    # H2: if the detached body ran at all, these exist (their redirects create
+    # them even when empty). All absent => the pipeline was never launched, so
+    # the hook exited before reaching it.
+    echo "pipeline ran?  : review-stderr.log=$([[ -e "$STORE/logs/review-stderr.log" ]] && echo yes || echo no)" \
+         "persist.log=$([[ -e "$STORE/logs/persist.log" ]] && echo yes || echo no)"
+    echo "leftover tmp   : $(find "$STORE/logs" -name '.writer-stderr.*' 2>/dev/null | tr '\n' ' ')"
+    echo "persist-failures.log:"; sed 's/^/    /' "$STORE/logs/persist-failures.log" 2>&1 || echo "    (absent)"
+    # The precondition gates the hook can exit through, and the tools they need.
+    # `command` is a shell BUILTIN, so `env -i ... command -v jq` cannot work --
+    # env execs a file and there is none. It must go through a shell. Caught by
+    # running this diagnostic under mutation M7 rather than by reading it.
+    local probe
+    for probe in jq python3 claude; do
+        printf '%-15s: %s\n' "$probe" \
+            "$(env -i PATH="$R/bin:$PATH" bash -c "command -v $probe" 2>&1 || echo '<NOT FOUND>')"
+    done
+    echo "fake claude -x : $([[ -x "$R/bin/claude" ]] && echo yes || echo no)"
+    echo "--------------------------------------------------------------------"
 }
 
 # The failure line for this run, with the "transcript unavailable" line the
@@ -175,6 +243,94 @@ check "E: both-stage line carries the writer's reason" "yes" "$(emits "$LINE" "v
 # ---------------------------------------------------------------------------
 check "F: writer stderr temp file is cleaned up" "" \
     "$(find "$STORE/logs" -name '.writer-stderr.*' 2>/dev/null)"
+
+# ---------------------------------------------------------------------------
+# G) THE WINDOWS-CI GUARD. When the turn count cannot be READ, the hook must
+# say so -- not score it as 0 turns and exit 0.
+#
+# `jq ... 2>/dev/null || echo "0"` collapsed "jq is broken or absent" into
+# "0 turns", which is below every review threshold, so the hook exited 0 and
+# the entire review pipeline was silently off. That is precisely what happened
+# on windows-latest: Git Bash's /usr/bin carries no jq, this suite had
+# amputated PATH, and the only trace left on disk was an empty logs/reviews/.
+#
+# The jq shim exits 127, which is exactly how the `|| echo` fallback behaved
+# with jq absent, and unlike a truly emptied PATH it is portable to every
+# runner in the matrix.
+# ---------------------------------------------------------------------------
+G_DIR="$(mktemp -d)"
+CASE_DIRS+=("$G_DIR")
+mkdir -p "$G_DIR/home" "$G_DIR/store/state" "$G_DIR/store/logs" "$G_DIR/bin"
+printf '#!/usr/bin/env bash\nexit 127\n' > "$G_DIR/bin/jq"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$G_DIR/bin/claude"
+chmod +x "$G_DIR/bin/jq" "$G_DIR/bin/claude"
+printf '%s\n' \
+    '{"session_id":"g","total_turns_this_session":9,"memory_turns":0,"skill_iterations":0}' \
+    > "$G_DIR/store/state/turn_counter.json"
+sl_clear_review_marker "$G_DIR/store/logs"
+echo '{"session_id":"g","hook_event_name":"Stop"}' \
+    | env -i HOME="$G_DIR/home" AGENT_LEARNING_HOME="$G_DIR/store" \
+          PATH="$G_DIR/bin:$PATH" bash "${SCRIPT_DIR}/scripts/session-review.sh"
+check "G: an unreadable turn counter spawns no review" "0" \
+    "$(sl_expect_no_review_spawned "$G_DIR/store/logs" >/dev/null 2>&1; echo $?)"
+G_LOG="$(cat "$G_DIR/store/logs/persist-failures.log" 2>/dev/null || true)"
+check "G: an unreadable turn counter is REPORTED, not scored as zero" "yes" \
+    "$(emits "$G_LOG" "review NOT attempted")"
+check "G: the report names the counter file it could not read" "yes" \
+    "$(emits "$G_LOG" "total_turns_this_session")"
+
+# ---------------------------------------------------------------------------
+# H) A missing reviewer CLI must be reported. `if command -v claude; then ...
+# fi` with no else branch is the same silent-no-op shape; review-common.sh has
+# shipped sl_review_no_reviewer_available for it since Task 6, but only
+# vscode-session-review.sh called it.
+# ---------------------------------------------------------------------------
+H_DIR="$(mktemp -d)"
+CASE_DIRS+=("$H_DIR")
+mkdir -p "$H_DIR/home" "$H_DIR/store/state" "$H_DIR/store/logs"
+printf '%s\n' \
+    '{"session_id":"h","total_turns_this_session":9,"memory_turns":0,"skill_iterations":0}' \
+    > "$H_DIR/store/state/turn_counter.json"
+# A PATH carrying the base tools but no `claude`, built the way
+# tests/test-vscode-session-review.sh builds its NO_REVIEWER_PATH: the real
+# directory of each tool, never a symlink farm (a symlinked python3 breaks
+# outright when python3 is a pyenv/asdf shim, and this case would then "pass"
+# for the wrong reason -- a missing interpreter, not a missing reviewer).
+# A directory named `claude` on PATH does NOT work as a shadow: command -v
+# skips non-executables and finds the real CLI further along. Measured here.
+NO_CLAUDE_PATH=""
+for tool in bash jq python3 date mkdir rm mv cat grep sed cut head tail find \
+            dirname basename nohup sleep env chmod touch; do
+    tp="$(command -v "$tool" 2>/dev/null || true)"
+    if [[ -z "$tp" ]]; then
+        echo "FAIL: H setup is wrong -- '$tool' is not resolvable on this machine"
+        FAILURES=$((FAILURES + 1))
+        continue
+    fi
+    td="$(dirname "$tp")"
+    case ":${NO_CLAUDE_PATH}:" in
+        *":${td}:"*) ;;
+        *) NO_CLAUDE_PATH="${NO_CLAUDE_PATH:+${NO_CLAUDE_PATH}:}${td}" ;;
+    esac
+done
+# PROBE, not an assumption: where claude shares a directory with the base
+# tools this construction cannot express "no reviewer", so skip with the
+# reason printed rather than assert against a false premise.
+if PATH="$NO_CLAUDE_PATH" command -v claude >/dev/null 2>&1; then
+    echo "SKIP: H -- claude shares a directory with the base tools on this"
+    echo "      machine (PATH=${NO_CLAUDE_PATH}), so a claude-free PATH cannot"
+    echo "      be constructed this way."
+else
+    sl_clear_review_marker "$H_DIR/store/logs"
+    echo '{"session_id":"h","hook_event_name":"Stop"}' \
+        | env -i HOME="$H_DIR/home" AGENT_LEARNING_HOME="$H_DIR/store" \
+              PATH="$NO_CLAUDE_PATH" bash "${SCRIPT_DIR}/scripts/session-review.sh"
+    check "H: a missing reviewer CLI spawns no review" "0" \
+        "$(sl_expect_no_review_spawned "$H_DIR/store/logs" >/dev/null 2>&1; echo $?)"
+    check "H: a missing reviewer CLI is REPORTED" "yes" \
+        "$(emits "$(cat "$H_DIR/store/logs/persist-failures.log" 2>/dev/null || true)" \
+            "no reviewer CLI on PATH")"
+fi
 
 echo
 if (( FAILURES > 0 )); then

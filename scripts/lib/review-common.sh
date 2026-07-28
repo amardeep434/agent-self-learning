@@ -268,3 +268,36 @@ sl_review_no_reviewer_available() {
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$component" "$*" \
         >>"${log_dir}/persist-failures.log"
 }
+
+# ---------------------------------------------------------------------------
+# sl_review_precondition_failed <component> <log_dir> <reason...>
+#
+# Records that a review was never even ATTEMPTED because a precondition was
+# unmet -- a missing tool, an unreadable counter file.
+#
+# Same rationale as sl_review_no_reviewer_available, different trigger. The
+# hook scripts gate on a turn count read with
+# `jq ... 2>/dev/null || echo "0"`, which maps BOTH "jq is absent" and "the
+# counter is corrupt" onto the number 0 -- and 0 is below every review
+# threshold, so the script exits 0 having silently switched the whole review
+# pipeline off. That is indistinguishable from "this session was too short to
+# be worth reviewing", which is the one case that must stay silent.
+#
+# Not hypothetical: it hid a Windows CI failure for a full round. The suite
+# tests/test-review-failure-legibility.sh drove the hook under `env -i` with a
+# PATH that carried no jq (Git Bash's /usr/bin has none), every session scored
+# 0 turns, no review ever launched, and the ONLY evidence left anywhere on
+# disk was an empty logs/reviews/ directory. Diagnosing it needed a
+# byte-for-byte comparison of `find` output against a local simulation.
+#
+# A short session stays silent. A BROKEN one says so, in the one channel
+# doctor.sh reads.
+# ---------------------------------------------------------------------------
+sl_review_precondition_failed() {
+    local component="$1" log_dir="$2"
+    shift 2
+    mkdir -p "$log_dir"
+    printf "%s %s: review NOT attempted -- %s\n" \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$component" "$*" \
+        >>"${log_dir}/persist-failures.log"
+}
