@@ -289,8 +289,27 @@ else
 fi
 
 if command -v code >/dev/null 2>&1 || [[ -d "${HOME}/.vscode" ]]; then
-    echo "  vscode   present (VS Code) -- Copilot Chat adapter/hooks are not yet"
-    echo "           shipped by this release (tracked separately); nothing to check"
+    echo "  vscode   present (VS Code)"
+    # VS Code Copilot Chat reads ~/.claude/settings.json by DEFAULT -- its
+    # `chat.hookFilesLocations` ships that path enabled, as a compatibility
+    # import of Claude Code's hook format. So the Claude Code hooks reported
+    # above are the same ones VS Code runs; there is no separate VS Code hook
+    # file to inspect, and reporting "nothing to check" here (as this branch
+    # did before the adapter shipped) understated it.
+    # Deliberately NOT $CLAUDE_SETTINGS: that is assigned inside the `claude`
+    # branch above, so it is unset on a VS-Code-only machine -- which is exactly
+    # the case this branch exists for, since VS Code reads ~/.claude/settings.json
+    # whether or not Claude Code is installed.
+    _sl_vscode_settings="${HOME}/.claude/settings.json"
+    if [[ -f "$_sl_vscode_settings" ]] && grep -q 'agent-learning\|self-learning' "$_sl_vscode_settings" 2>/dev/null; then
+        echo "           Copilot Chat runs the ~/.claude/settings.json hooks above"
+        echo "           (VS Code reads that file by default); vscode-session-review.sh"
+        echo "           handles its transcript format."
+    else
+        echo "           no hooks registered for it -- VS Code reads"
+        echo "           ~/.claude/settings.json by default, so registering the Claude"
+        echo "           Code hooks also enables Copilot Chat here."
+    fi
 else
     echo "  vscode   absent"
 fi

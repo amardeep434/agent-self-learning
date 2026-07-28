@@ -413,6 +413,37 @@ Enable either or both in the resolved store's `self-learning.conf` (see
 When both are enabled, signals are merged and deduplicated by rule id; Route B
 (export) data wins because it comes from Coach's complete analyzer.
 
+#### Producing the Route B export
+
+`~/.aiec/summary-latest.json` does not appear on its own — it is written by a
+command **this project's fork adds**. Upstream Coach ships only
+`aiEngineerCoach.exportSummary`, which opens a save dialog and so cannot be
+driven unattended; the fork adds a dialog-free variant plus an auto-export after
+every data reload. Both live in
+[`amardeep434/AI-Engineering-Coach`](https://github.com/amardeep434/AI-Engineering-Coach),
+branch `feature/auto-export` (`src/summary-export-auto.ts`).
+
+With the fork's `.vsix` installed in VS Code:
+
+1. Open the Command Palette (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd>, or
+   <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> on macOS).
+2. Run **`AI Engineer Coach: Export Summary (Auto, No Dialog)`**
+   (command id `aiEngineerCoach.exportSummaryAuto`). No dialog should appear; a
+   status-bar message names the file it wrote.
+   Running **`AI Engineer Coach: Reload Data`** also triggers the same export,
+   which is what makes the route self-maintaining once it is set up.
+3. Confirm it landed:
+
+   ```bash
+   jq '.antiPatterns.totalOccurrences' ~/.aiec/summary-latest.json
+   ```
+
+   A number means Route B has real data. Then set `SL_COACH_EXPORT_ENABLED=true`.
+
+If the command is missing from the palette, the installed extension is upstream's
+build rather than the fork's — check that the `.vsix` you installed came from the
+fork checkout.
+
 **Route A evaluates 42 of the 45 vendored rules (measured, pinned by tests -
 see the Coach signals row above). They come from two data sources and are
 still ADAPTATIONS, not re-implementations of the upstream rules.**
