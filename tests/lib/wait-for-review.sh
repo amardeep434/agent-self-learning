@@ -73,6 +73,42 @@ sl_wait_for_review_complete() {
     return 1
 }
 
+# sl_assert_review_marker_or_abort <log_dir>
+#
+# The marker is the one signal every wait in every suite synchronises on,
+# and until this existed NOTHING asserted it. Every sl_wait_for_review_complete
+# call site ends in `|| true` (deliberately -- the cases that expect no review
+# at all share the helper), and sl_expect_no_review_spawned is *satisfied* by a
+# marker that never arrives. MEASURED with the marker write deleted from
+# scripts/lib/review-common.sh: tests/test-copilot-session-review.sh exit 0 in
+# 372s (healthy: 11s) and tests/test-session-review.sh exit 0 in 186s
+# (healthy: 6s) -- green, while every wait in both files burned its full 30s
+# budget, which on CI trends toward a job timeout rather than a test failure.
+#
+# Hence both halves of this helper's contract:
+#   - LOUD: one named assertion, printed in the suites' own `check` format, so
+#     a missing marker is a test failure with a name rather than a slow pass.
+#   - FAST: it aborts the suite. Every remaining case in the file waits on the
+#     same marker, so once it is provably not being written they can only
+#     repeat this same failure at 30s each. Aborting turns 372s into ~30s.
+#
+# Call it ONCE per suite, right after the FIRST wait on a case that genuinely
+# expects a review (aborting there costs one wait budget, not N).
+sl_assert_review_marker_or_abort() {
+    local log_dir="$1"
+    local marker
+    marker="$(sl_review_marker_path "$log_dir")"
+    if [[ -f "$marker" ]]; then
+        echo "PASS: the detached pipeline wrote its completion marker"
+        return 0
+    fi
+    echo "FAIL: the detached pipeline wrote its completion marker (expected 'yes', got 'no')"
+    echo "--- aborting: ${marker} was never written, so every later wait in this"
+    echo "--- suite would time out identically. Check sl_review_launch_detached's"
+    echo "--- last statement in scripts/lib/review-common.sh."
+    exit 1
+}
+
 # sl_expect_no_review_spawned <log_dir> [max_iterations]
 #
 # The mirror image of sl_wait_for_review_complete, for the cases that assert

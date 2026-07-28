@@ -44,6 +44,12 @@ export PATH="$TMP/bin:$PATH" FAKE_COPILOT_LOG="$TMP/copilot-calls.log"
 sl_clear_review_marker "$SL_LOG_DIR"
 bash "${SCRIPT_DIR}/scripts/copilot-session-review.sh" </dev/null
 sl_wait_for_review_complete "$SL_LOG_DIR" || true
+# The marker itself, asserted rather than merely waited on -- see
+# sl_assert_review_marker_or_abort's header for why every wait below is
+# `|| true` and what that used to hide (this suite: exit 0 in 372s with the
+# marker write deleted). Placed on the first case that expects a review, so
+# a broken marker costs one wait budget rather than eleven.
+sl_assert_review_marker_or_abort "$SL_LOG_DIR"
 check "copilot invoked" "yes" "$([[ -s "$FAKE_COPILOT_LOG" ]] && echo yes || echo no)"
 check "guard env set" "1" "$(grep -m1 '^GUARD:' "$FAKE_COPILOT_LOG" | cut -d: -f2)"
 check "headless flags present" "yes" "$(grep -m1 '^ARGS:' "$FAKE_COPILOT_LOG" | grep -q -- '-p ' && echo yes || echo no)"
@@ -244,6 +250,8 @@ unset FAKE_COPILOT_PROMPT_FILE
 # 9) Missing transcript is logged visibly to persist-failures.log, never a
 # silent empty review -- a sessionId with no matching session-state dir.
 TMP9="$(mktemp -d)"
+mkdir -p "${TMP9}/store/logs"
+sl_clear_review_marker "${TMP9}/store/logs"
 echo '{"sessionId":"session-with-no-transcript-on-disk","reason":"complete"}' \
     | env -i HOME="$TMP9" PATH="$PATH" \
         AGENT_LEARNING_HOME="${TMP9}/store" SL_CONFIG_FILE="/nonexistent/x.conf" \
@@ -251,6 +259,22 @@ echo '{"sessionId":"session-with-no-transcript-on-disk","reason":"complete"}' \
 FAILURE_LOG="${TMP9}/store/logs/persist-failures.log"
 check "missing transcript logged to persist-failures.log" "yes" \
     "$([[ -f "$FAILURE_LOG" ]] && grep -q 'transcript unavailable' "$FAILURE_LOG" && echo yes || echo no)"
+# The assertion above cannot race: transcript.py runs SYNCHRONOUSLY at
+# copilot-session-review.sh:44 and writes that line before the script continues.
+# But the script does not stop there -- its own comment is explicit that "a real
+# transcript failure still logs loudly AND still spawns the review; only the
+# provably-empty case short-circuits" -- so on a machine with `copilot` on PATH
+# this case DOES leave a detached pipeline writing into ${TMP9}/store while the
+# suite moves on to teardown. sl_rm_rf_retry made that survivable; it did not
+# make it correct. Gate on the same condition the script gates on, so the wait
+# is real where a pipeline exists and the no-spawn case is asserted (2s) rather
+# than waited out (30s) where it does not.
+if command -v copilot >/dev/null 2>&1; then
+    sl_wait_for_review_complete "${TMP9}/store/logs" || true
+else
+    sl_expect_no_review_spawned "${TMP9}/store/logs" \
+        || { echo "FAIL: review spawned with no copilot on PATH"; FAILURES=$((FAILURES+1)); }
+fi
 
 # 10) fix-empty-session. A session that started and ended without ever taking
 # a turn is NOT a persistence failure. `sessionEnd` fires for those too, and

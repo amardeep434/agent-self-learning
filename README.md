@@ -1,6 +1,6 @@
 # Claude Self-Learning
 
-A cross-harness self-learning system, adapted from NousResearch's Hermes Agent architecture. It serves Claude Code, GitHub Copilot CLI, and (planned) VS Code Copilot Chat as peers -- Claude Code is one adapter among them, and no shared code path (storage, review pipeline, skill/memory schema) may depend on it. Sessions learn from every interaction, accumulating reusable skills, refined memories, and searchable session history -- without requiring the user to manually curate any of it. The system runs entirely in the background via hooks and subagents, writing to a shared, vendor-neutral disk-backed store (see "Storage locations" below) that persists across sessions and is loaded as a frozen snapshot at session start.
+A cross-harness self-learning system, adapted from NousResearch's Hermes Agent architecture. It serves Claude Code, GitHub Copilot CLI, and VS Code Copilot Chat as peers -- Claude Code is one adapter among them, and no shared code path (storage, review pipeline, skill/memory schema) may depend on it. Sessions learn from every interaction, accumulating reusable skills, refined memories, and searchable session history -- without requiring the user to manually curate any of it. The system runs entirely in the background via hooks and subagents, writing to a shared, vendor-neutral disk-backed store (see "Storage locations" below) that persists across sessions and is loaded as a frozen snapshot at session start.
 
 ## Architecture
 
@@ -55,10 +55,13 @@ SESSION START
 | sqlite3 (CLI, optional) | manual DB inspection; `self-learning-health.sh`'s database check (degrades to a warning, not a failure, if absent) | any | bundled with Git for Windows or `winget install SQLite.SQLite` |
 | Claude Code | Claude adapter (optional) | current | — |
 | GitHub Copilot CLI | Copilot adapter (optional) | current, authenticated | PowerShell 7+ required for its hooks |
+| VS Code + GitHub Copilot Chat | VS Code adapter (optional) | VS Code 1.130+, `GitHub.copilot-chat` 0.58+ | untested on Windows/macOS and on VS Code Server/remote — Linux only so far |
 | gh CLI | vendoring Coach rules, fork maintenance | 2.40+ | `winget install GitHub.cli` |
 | Node.js + npm | building the Coach fork VSIX (Route B only) | Node 22+ | `winget install OpenJS.NodeJS` |
 
-At least one of Claude Code / Copilot CLI must be installed for the system to do anything.
+At least one of Claude Code / Copilot CLI must be installed for the system to do anything. The
+VS Code adapter is not self-sufficient: VS Code Copilot Chat has no headless CLI, so the review
+it triggers runs in `copilot` or `claude` (see `SL_VSCODE_REVIEWER`).
 
 ## Install
 
@@ -85,10 +88,74 @@ user's, so an install through it would land somewhere you are not looking.
 The wrappers refuse with an explanation instead. To install for WSL, run
 `bash install.sh` inside WSL deliberately.
 
-Then register the Claude Code hooks by merging `config/settings-hooks.json` into
-`~/.claude/settings.json` (the installer prints the exact JSON). The Copilot CLI
-hook is installed automatically to `~/.copilot/hooks/self-learning.json` when
-`~/.copilot` exists.
+Then register the Claude Code hooks. `config/settings-hooks.json` is a
+**template**, not a file to merge as-is: it carries a `__SL_SCRIPTS_DIR__`
+placeholder that install.sh substitutes with the resolved store's `scripts`
+directory. Merge the rendered copy, which install.sh both prints and writes to
+`<store>/settings-hooks.json`, into `~/.claude/settings.json`. Merging the raw
+template registers hooks that invoke a literal `__SL_SCRIPTS_DIR__` path and
+never fire.
+
+To render it yourself without re-running the installer:
+
+```bash
+printf '%s' "$(python3 scripts/lib/paths.py get scripts)" \
+    | python3 scripts/lib/render-template.py config/settings-hooks.json
+```
+
+This is the same renderer `install.sh` calls, so you get exactly the bytes it
+would have written. It replaced a `sed "s|__SL_SCRIPTS_DIR__|...|g"` one-liner
+that silently corrupted any store path containing `&`, `\` or `|` — see
+`scripts/lib/render-template.py` for what each one did. The same command
+renders `config/copilot-hooks.json` and `config/vscode-hooks.json`.
+
+The scripts directory is piped in rather than passed as an argument on
+purpose: on Git Bash, MSYS rewrites POSIX-looking *arguments* to native
+Windows form as they cross into `python3`, which would change the path
+spelling written into your hook file. Keep the pipe.
+
+`~/.claude/settings.json` is Claude Code's own config file, so *that* location
+is deliberately Claude-specific; the **script paths it invokes** are not, and
+must point at the vendor-neutral store. The Copilot CLI hook is installed
+automatically to `~/.copilot/hooks/self-learning.json` when `~/.copilot` exists.
+
+### VS Code Copilot Chat
+
+`install.sh` renders `config/vscode-hooks.json` to `<store>/vscode-hooks.json`
+and prints the one setting that registers it:
+
+```jsonc
+"chat.hookFilesLocations": {
+  "/path/to/store/vscode-hooks.json": true
+}
+```
+
+It does **not** edit your VS Code settings.json — an installer writing into an
+editor's user settings is not something this project does.
+
+**Read this before you register anything.** VS Code's *default*
+`chat.hookFilesLocations` already includes `~/.claude/settings.json`
+([docs](https://code.visualstudio.com/docs/copilot/customization/hooks)) — the
+same file the Claude Code step above tells you to merge hooks into. So
+completing the Claude Code step also registers these hooks inside VS Code, with
+no action from you and no Claude extension involved (`chat.hookFilesLocations`
+lives in VS Code's own core bundle). That is handled rather than assumed away:
+`session-review.sh` and `vscode-session-review.sh` both detect which transcript
+format they were handed by reading the file, because the two hook payloads are
+otherwise identical. But registering **both** sources means two reviews per VS
+Code turn, so pick one:
+
+- **Claude Code hooks only** — nothing more to do; VS Code reuses them, and a VS
+  Code transcript reaching `session-review.sh` is parsed correctly.
+- **The VS Code file** — add it as above, and set `"~/.claude/settings.json": false`
+  in the same setting.
+
+Note what VS Code registration does *not* include: `index-session.sh`. That
+indexes Claude Code's own `~/.claude/projects` directory and has nothing to say
+about a VS Code session. `turn-counter.sh` **is** registered on `PostToolUse`,
+and it is load-bearing here: VS Code's `Stop` hook fires **per turn**, not per
+session (measured — 3 prompts produced 3 `Stop`s), so the turn gate is the only
+thing between this adapter and one paid model call per user turn.
 
 ## Storage locations
 
@@ -148,7 +215,11 @@ Grep any run's log for `store_lock backend=` to see it for yourself.
 Harness-owned config files are a deliberate exception and stay where each
 harness owns them: Claude Code's `~/.claude/settings.json` and Copilot CLI's
 `~/.copilot/hooks/self-learning.json` are not moved into the store — only the
-script paths those configs invoke are resolved through the neutral store.
+script paths those configs invoke are resolved through the neutral store. The VS
+Code hook file is the exception to the exception: it is rendered *into* the
+store (`<store>/vscode-hooks.json`), because VS Code takes hook sources from a
+settings key rather than from a fixed path, so there is no harness-owned
+location to write it to.
 
 ### Migrating from an existing `~/.claude` install
 
@@ -222,10 +293,16 @@ it goes.
   but no WSL — so the *scenario* it defends against cannot be reproduced
   without a Windows PowerShell CI job, which does not exist. The logic is
   tested; the environment is not.
-- **`transcript.py` parses two undocumented, unversioned third-party on-disk
-  formats** — Copilot CLI's `session-state/<id>/events.jsonl` and Claude
-  Code's `projects/<slug>/<id>.jsonl`. Both were reverse-engineered from real
-  files and neither vendor documents or versions them, so an update on either
+- **`transcript.py` parses three third-party on-disk formats, none of them a
+  stable API** — Copilot CLI's `session-state/<id>/events.jsonl`, Claude
+  Code's `projects/<slug>/<id>.jsonl`, and VS Code Copilot Chat's
+  `workspaceStorage/<ws>/GitHub.copilot-chat/transcripts/<id>.jsonl` (the
+  third shares the first's event vocabulary, so it adds a pairing, not a
+  parser). All three were reverse-engineered from real files; the first two
+  are undocumented and unversioned, and the third is **worse** — VS Code
+  documents it explicitly as "not a stable hook API and may change in future
+  VS Code releases", inside a feature marked Preview. Since no vendor
+  documents or versions them, so an update on either
   side can break session digestion. The mitigation is that it **fails
   loudly**: every degraded outcome — file missing, zero parseable events, or
   events present but none matching the expected message shape (the exact
@@ -233,6 +310,24 @@ it goes.
   `persist-failures.log`, which `doctor.sh` surfaces. It never yields a
   silently empty transcript, which is this project's signature failure mode.
   It cannot be made immune to a format change; it can only refuse to hide one.
+- **VS Code adapter: the platform was measured live, our own loop was not.**
+  On 2026-07-28 (Linux, VS Code 1.130.0 / `GitHub.copilot-chat` 0.58.0) a
+  throwaway probe established that hooks fire from a plain JSON file, the
+  payload arrives as JSON on stdin (11/11, argv empty 11/11), `transcript_path`
+  is present and already exists (11/11), `Stop` fires per turn (3 prompts → 3
+  `Stop`s), an ask-only turn still produces a transcript, and
+  `summarize_events` read the live files unmodified. `vscode-session-review.sh`
+  itself has only run under `tests/test-vscode-session-review.sh` against fake
+  reviewer CLIs — no real VS Code hook has invoked it and no real model call
+  has been made on this path. Windows, macOS, VS Code Insiders and VS Code
+  Server/remote (`~/.vscode-server/data/User/workspaceStorage`) are entirely
+  unmeasured.
+- **The `~/.claude/settings.json` hook source is shared with VS Code, by VS
+  Code's own default.** Registering the Claude Code hooks therefore also
+  registers them in VS Code. The transcript format is detected from the file's
+  content (the two hook payloads are identical), so this is correct rather than
+  damaging — but registering the VS Code hook file *as well* produces two
+  reviews per VS Code turn. See "VS Code Copilot Chat" under Install.
 - **No genuine interactive Copilot session has yet fired `sessionEnd` with
   real conversation history in the payload.** The path is verified end-to-end
   with a real paid model call (see the compatibility table); the remaining gap
@@ -282,21 +377,26 @@ and removes `~/.copilot/hooks/self-learning.json`.
 ## Agent compatibility
 
 Only rows backed by a suite in `tests/run-all.sh` are marked supported. VS
-Code Copilot Chat has no adapter or hooks in this release (tracked as a
-follow-up plan) and no row below claims otherwise.
+Code Copilot Chat now has an adapter (`scripts/vscode-session-review.sh`,
+`config/vscode-hooks.json`), covered by `test-vscode-session-review.sh`,
+`test-vscode-hooks-json.sh` and the VS Code fixtures in `test-transcript.py`.
+What it has **not** had is any run on Windows, macOS, or VS Code Server/remote:
+every VS Code measurement behind it was taken on Linux, VS Code 1.130.0 /
+`GitHub.copilot-chat` 0.58.0. The rows below say so per capability rather than
+letting a single ✅ imply parity.
 
-| Capability | Claude Code | GitHub Copilot CLI | Notes |
-|------------|-------------|--------------------|-------|
-| Learned memory + skills stores | ✅ | ✅ | shared files, agent-agnostic; covered by `test-persist-proposal.py`, `test-proposal-schema.py` |
-| AGENTS.md learned-context injection | ✅ | ✅ | Copilot also reads CLAUDE.md; covered by `test-inject-agents-md.sh` |
-| Session-end background review | ✅ Stop hook | ✅ sessionEnd hook | both spawn a headless reviewer that is **denied file-write tools** — Claude via `--allowedTools Read,Glob,Grep --disallowedTools Write,Edit,NotebookEdit`, Copilot via `--allow-tool read`. Every write is `persist-proposal.py`'s. Both argv shapes are asserted (`test-session-review.sh`, `test-copilot-session-review.sh`) and checked against the real installed binaries with no model calls (`test-review-cli-flags.sh`). See "Bounding reviewer cost" for the cost knobs. |
-| Mid-session turn counting | ✅ PostToolUse hook | ❌ not wired | deliberate: session-end loop is the portable core; covered by `test-turn-counter.sh` |
-| Copilot path independent of Claude Code | — | ✅ | `test-claude-absent.sh` runs the full Copilot review path with no `claude` binary or `~/.claude` present |
-| Session search indexing | ✅ (Claude JSONL) | ❌ planned | Copilot session-state parser is a follow-up plan; not yet exercised by run-all.sh beyond schema tests |
-| Coach signals (Routes A/B) | ✅ Route A (42/45 rules, adapted) + ✅ Route B (full, when the fork is installed) | same | reaches the reviewer prompt: `session-review.sh`/`copilot-session-review.sh` call `coach-signals.py` then append its merged output as a "Coach signals" section of the review prompt when present and <7 days old; covered by `test-coach-signals.py`, `test-coach-rules-eval.py`, and `test-session-review.sh`'s "coach signal id reaches prompt" assertion, which fails if that wiring ever regresses. **Route A is not upstream-equivalent**: `scripts/coach-rules-eval.py` evaluates 42 of the 45 vendored rules - 11 adapted to this project's own `messages`/`sessions` columns, and 31 read from the harnesses' own telemetry stores via `scripts/lib/telemetry.py` (Copilot's `events.jsonl`, `session-store.db` and `workspace.yaml`, Claude Code's `projects/*.jsonl`). Only 3 are skipped, and each skip reason must cite an upstream file:line or a measurement over the local stores - a reason with no checkable evidence fails the suite. See `UNSUPPORTED_REASONS` in `coach-rules-eval.py` and the "AI Engineering Coach integration" section below for all three, and for the twelve false skip reasons that were removed on 2026-07-26. `bash tests/run-all.sh` pins the count so a silent coverage drop fails, and `TelemetryAbsentSkipsLoudlyTest` pins that a missing harness store produces skips rather than a false all-clear. Route B, when the maintained fork is installed, reads Coach's own complete analysis rather than re-deriving it from our narrower data. |
-| Windows | ✅ green (Git Bash), with skips — see note | ✅ green (Git Bash), with skips — see note | CI results are per-OS (the whole matrix cell passes or fails), not per-harness, so both columns show the same Windows result. **No run id is frozen here** — earlier versions of this row cited one and went stale within hours, twice. Get the current state with `gh run list --branch harness-neutral-persistence` and `gh run view <id>`; the matrix is `{ubuntu, macos, windows}-latest × Python {3.9, 3.13}`, six cells. As of the last run observed while writing this, all six were green with the full suite. **Green ≠ equally covered**: 7 write-path security tests in `test-persist-proposal.py` (symlink, hardlink, `O_NOFOLLOW`) and 3 shell assertions skip on Windows, because creating a real symlink needs Developer Mode or elevation and `chmod` does not deny writes on ACL-governed filesystems. Every skip prints its reason and is gated on a probe that *verifies* the limitation rather than assuming it from the platform name. The symlink/hardlink attack surface is therefore exercised on Linux and macOS only. |
-| macOS | ✅ green | ✅ green | Same per-OS note as the Windows row, including the "no frozen run id" part. No skips on macOS. |
-| Copilot CLI live end-to-end (real session, real file on disk) | n/a | ✅ verified 2026-07-25 (one residual) | Run against whatever `copilot` version was installed on 2026-07-25 (1.0.73 at that moment; it has since auto-updated past that, e.g. 1.0.75 — this project targets "current, authenticated `copilot` on PATH," never a pinned version, so treat any specific number here as a point-in-time observation, not a requirement) with a real paid model call. `copilot-session-review.sh` completed end-to-end and the writer accepted a valid empty proposal (correct — headless `-p` has no transcript to mine); the same OUTPUT CONTRACT with a transcript produced a conforming proposal and **real content persisted** to `<store>/memory/MEMORY.md`, append mode, 0600, nothing written outside the store. Residual: no genuine *interactive* session has fired the `sessionEnd` hook with real conversation history in the payload yet — that needs ordinary use. |
+| Capability | Claude Code | GitHub Copilot CLI | VS Code Copilot Chat | Notes |
+|------------|-------------|--------------------|----------------------|-------|
+| Learned memory + skills stores | ✅ | ✅ | ✅ | shared files, agent-agnostic; covered by `test-persist-proposal.py`, `test-proposal-schema.py` |
+| AGENTS.md learned-context injection | ✅ | ✅ | ✅ | Copilot also reads CLAUDE.md; covered by `test-inject-agents-md.sh` |
+| Session-end background review | ✅ Stop hook | ✅ sessionEnd hook | ✅ Stop hook (**per turn**, not per session) | both spawn a headless reviewer that is **denied file-write tools** — Claude via `--allowedTools Read,Glob,Grep --disallowedTools Write,Edit,NotebookEdit`, Copilot via `--allow-tool read`. Every write is `persist-proposal.py`'s. Both argv shapes are asserted (`test-session-review.sh`, `test-copilot-session-review.sh`) and checked against the real installed binaries with no model calls (`test-review-cli-flags.sh`). See "Bounding reviewer cost" for the cost knobs. |
+| Mid-session turn counting | ✅ PostToolUse hook | ❌ not wired | ✅ PostToolUse hook — required, not optional, because Stop is per turn; note an ask-only turn fires no PostToolUse, so a purely conversational VS Code session accumulates no count and is never reviewed | deliberate: session-end loop is the portable core; covered by `test-turn-counter.sh` |
+| Copilot path independent of Claude Code | — | ✅ | n/a | `test-claude-absent.sh` runs the full Copilot review path with no `claude` binary or `~/.claude` present |
+| Session search indexing | ✅ (Claude JSONL) | ❌ planned | ❌ not wired — `index-session.sh` reads `~/.claude/projects` and is deliberately not registered for VS Code | Copilot session-state parser is a follow-up plan; not yet exercised by run-all.sh beyond schema tests |
+| Coach signals (Routes A/B) | ✅ Route A (42/45 rules, adapted) + ✅ Route B (full, when the fork is installed) | same | same | reaches the reviewer prompt: `session-review.sh`/`copilot-session-review.sh` call `coach-signals.py` then append its merged output as a "Coach signals" section of the review prompt when present and <7 days old; covered by `test-coach-signals.py`, `test-coach-rules-eval.py`, and `test-session-review.sh`'s "coach signal id reaches prompt" assertion, which fails if that wiring ever regresses. **Route A is not upstream-equivalent**: `scripts/coach-rules-eval.py` evaluates 42 of the 45 vendored rules - 11 adapted to this project's own `messages`/`sessions` columns, and 31 read from the harnesses' own telemetry stores via `scripts/lib/telemetry.py` (Copilot's `events.jsonl`, `session-store.db` and `workspace.yaml`, Claude Code's `projects/*.jsonl`). Only 3 are skipped, and each skip reason must cite an upstream file:line or a measurement over the local stores - a reason with no checkable evidence fails the suite. See `UNSUPPORTED_REASONS` in `coach-rules-eval.py` and the "AI Engineering Coach integration" section below for all three, and for the twelve false skip reasons that were removed on 2026-07-26. `bash tests/run-all.sh` pins the count so a silent coverage drop fails, and `TelemetryAbsentSkipsLoudlyTest` pins that a missing harness store produces skips rather than a false all-clear. Route B, when the maintained fork is installed, reads Coach's own complete analysis rather than re-deriving it from our narrower data. |
+| Windows | ✅ green (Git Bash), with skips — see note | ✅ green (Git Bash), with skips — see note | ⚠️ **untested** — CI runs the adapter's suites on Windows, but no VS Code hook has ever fired there; `transcript_path` form in particular is unverified (MSYS path forms are exactly where the Copilot adapter broke before) | CI results are per-OS (the whole matrix cell passes or fails), not per-harness, so both columns show the same Windows result. **No run id is frozen here** — earlier versions of this row cited one and went stale within hours, twice. Get the current state with `gh run list --branch main` and `gh run view <id>`; the matrix is `{ubuntu, macos, windows}-latest × Python {3.9, 3.13}`, six cells. As of the last run observed while writing this, all six were green with the full suite. **Green ≠ equally covered.** Re-derive the current figures rather than trusting these — `gh run view --job <windows job id> --log`, then count `SKIP:` lines and `OK (skipped=N)` per `=== tests/… ===` banner; do not count by eye. As measured on run `30284745998`, windows-latest 3.13 against ubuntu-latest 3.13: **4 shell skips** across 3 suites (`test-path-compare-lib.sh` prints two, `test-copilot-hook-input.sh` and `test-doctor.sh` one each) and **21 Python skips** across 5 suites, of which **11 are Windows-only** (`test-persist-proposal.py` 5, `test-adversarial-sweep.py` 3, `test-store-lock-writers.py` 3). `test-win-dir-pin.py` is the inverse suite — 6 skip on Windows, 9 on Linux. **There is no single reason, and "symlinks need elevation" is only half right.** Each skip names its own probed cause: `test-persist-proposal.py`'s 5 are `O_NOFOLLOW: UNAVAILABLE (POSIX-only primitive)` and `dir_fd (functional): UNAVAILABLE` — note that suite also prints `symlink creation: AVAILABLE` and `hardlink creation: AVAILABLE`, so Python *can* build the attack fixtures there; `test-adversarial-sweep.py`'s 3 are `chmod read-only probed and not enforced` (×2) and "POSIX permission bits are not meaningful on Windows/NTFS ACLs"; `test-doctor.sh`'s 1 is the same ACL behaviour, verified by writing a probe file rather than assumed; `test-copilot-hook-input.sh`'s 1 is `pty allocation: UNAVAILABLE (No module named 'termios')`; and `test-path-compare-lib.sh`'s 2 *are* symlink-creation failures — `ln -s` could not create one, verified with `[[ -L … ]]`. So the shell half fails to make symlinks while the Python half succeeds. Every skip is gated on a probe that verifies the limitation instead of inferring it from the platform name. Three things to state plainly rather than let green imply otherwise: `test-store-lock-writers.py`'s 3 skip because **`bash` is not runnable from Python on that runner** (probed), so the bash-driven concurrent-writer scenarios go unexercised on Windows — the lock backend itself does run there (`store_lock backend=msvcrt`); **4 live telemetry/transcript tests skip on every cell on every platform**, because no runner has a Copilot or Claude store, so live extraction is exercised only on a developer machine with both harnesses installed; and conversely Windows covers what POSIX cannot — `win32 directory pinning: AVAILABLE (verified: a pinned directory could not be renamed, and our own staged replace inside it still succeeded)`. |
+| macOS | ✅ green | ✅ green | ⚠️ **untested** — same as Windows: suites run, no VS Code hook has fired | Same per-OS note as the Windows row, including the "no frozen run id" part. No skips on macOS. |
+| Copilot CLI live end-to-end (real session, real file on disk) | n/a | ✅ verified 2026-07-25 (one residual) | n/a | Run against whatever `copilot` version was installed on 2026-07-25 (1.0.73 at that moment; it has since auto-updated past that, e.g. 1.0.75 — this project targets "current, authenticated `copilot` on PATH," never a pinned version, so treat any specific number here as a point-in-time observation, not a requirement) with a real paid model call. `copilot-session-review.sh` completed end-to-end and the writer accepted a valid empty proposal (correct — headless `-p` has no transcript to mine); the same OUTPUT CONTRACT with a transcript produced a conforming proposal and **real content persisted** to `<store>/memory/MEMORY.md`, append mode, 0600, nothing written outside the store. Residual: no genuine *interactive* session has fired the `sessionEnd` hook with real conversation history in the payload yet — that needs ordinary use. |
 
 ## AI Engineering Coach integration (optional)
 
@@ -435,7 +535,38 @@ Route A's `detect` parser is a deliberately narrow subset of upstream's DSL
 each adapter pins the exact predicate it implements and refuses to run if a
 re-vendor changes it. Re-vendor rules with
 `bash scripts/sync-coach-rules.sh`. The fork lives at
-`<org>/ai-engineering-coach-fork` (see its FORK-NOTES.md for the sync protocol).
+[`amardeep434/AI-Engineering-Coach`](https://github.com/amardeep434/AI-Engineering-Coach),
+branch `feature/auto-export` (see its `FORK-NOTES.md` for the sync protocol and
+`scripts/sync-upstream.sh` for the rebase-and-rebuild run). Verified 2026-07-28:
+pushed and current with itself, 2 commits ahead of `microsoft/AI-Engineering-Coach`
+and 6 behind — a sync is due. An earlier version of this line named
+`<org>/ai-engineering-coach-fork`, which is not a repository that exists.
+
+### Route C — SkillOpt (optional, manual, and wired into nothing)
+
+`scripts/skillopt-run.sh` is a thin opt-in wrapper around
+[microsoft/SkillOpt](https://github.com/microsoft/SkillOpt)'s Sleep CLI. It is
+installed into the store's `scripts/` directory, but **no hook, cron job or
+curator step invokes it** — you run it yourself:
+
+```bash
+SL_SKILLOPT_ENABLED=true SL_SKILLOPT_REPO=/path/to/SkillOpt \
+  <store>/scripts/skillopt-run.sh status    # or harvest | dry-run | adopt
+```
+
+It resolves SkillOpt in upstream's own precedence order: a source checkout
+(`$SL_SKILLOPT_REPO/plugins/run-sleep.sh`) first, then a `skillopt-sleep` on
+`PATH` (`pip install skillopt`). With neither, it explains which one is missing
+and exits 0. The expensive `run` verb additionally requires
+`SL_SKILLOPT_RUN_CONFIRMED=true`.
+
+**Nothing reads SkillOpt's output back into this system.** Importing a resulting
+`best_skill.md` into the skill store, with provenance, and any automatic
+scheduling are both deferred. Status as of 2026-07-28: `status`, `harvest` and
+`dry-run` have been exercised end to end against a real checkout on upstream's
+default `mock` backend at zero cost; the `run` verb has never been executed on
+any backend, and SkillOpt has never harvested a non-empty session store, so the
+data contract between it and our store is still unproven.
 
 ## Roadmap
 
@@ -445,12 +576,12 @@ re-vendor changes it. Re-vendor rules with
 | 2 | Background Review (review prompts, memory/skill writes) | Done — reviewer proposes JSON on stdout, `scripts/persist-proposal.py` validates and writes, confined to the resolved store |
 | 3 | Skill Lifecycle (telemetry, state machine, authoring standards) | Done |
 | 4 | Curator + Session Search (consolidation, FTS5 index) | Done |
-| 5 | Integration + Polish (config, caching, install, health check) | Done for Claude Code + Copilot CLI; VS Code Copilot Chat adapter not started (tracked separately). For CI status run `gh run list --branch harness-neutral-persistence` — no run id is recorded here, deliberately; see "Agent compatibility" above for the Windows skip caveat |
+| 5 | Integration + Polish (config, caching, install, health check) | Done for Claude Code, Copilot CLI and VS Code Copilot Chat. The VS Code adapter shipped after the 2026-07-28 spike passed (`docs/superpowers/vscode-adapter-spike.md`): a hook system that needs no extension of ours, and the existing transcript parser reading its transcripts unmodified. It is **Linux-only measured** — see "Known residuals". For CI status run `gh run list --branch main` — no run id is recorded here, deliberately; see "Agent compatibility" above for the Windows skip caveat |
 
 See "Storage locations" above for the harness-neutral persistence work that
 followed the original 5-phase plan: a shared, vendor-neutral store plus a
-`doctor.sh` diagnostic, so Claude Code, Copilot CLI, and (eventually) VS Code
-Copilot Chat consume the same files as peers.
+`doctor.sh` diagnostic, so Claude Code, Copilot CLI, and VS Code Copilot Chat
+consume the same files as peers.
 
 ## Project Structure
 
@@ -458,7 +589,10 @@ Copilot Chat consume the same files as peers.
 claude-self-learning/
   config/
     self-learning.yaml          # Default configuration (all parameters)
-    settings-hooks.json         # Hook registration template for settings.json
+    settings-hooks.json         # Hook registration template for Claude Code's settings.json
+    copilot-hooks.json          # Hook registration template for ~/.copilot/hooks/
+    vscode-hooks.json           # Hook registration template for VS Code's chat.hookFilesLocations
+                                #   (Claude Code's schema — VS Code parses it — not Copilot CLI's)
     claude-md-snippet.md        # Self-learning protocol for CLAUDE.md
   prompts/
     memory-review.md            # Memory review prompt
@@ -523,8 +657,9 @@ by default. Environment variables with the same names override the file.
 | `SL_REVIEW_MAX_TURNS` | `16` | Turn cap for the spawned Claude Code reviewer (`--max-turns`) |
 | `SL_COPILOT_REVIEW_MODEL` | (CLI default) | Model for Copilot reviews; use the cheapest available. Must match `^[A-Za-z0-9._-]+$` |
 | `SL_COPILOT_MAX_AI_CREDITS` | (empty — off) | Optional cost ceiling for Copilot reviews (`--max-ai-credits`). Integer, minimum 30; anything else is dropped with a reason on stderr. See note below |
+| `SL_VSCODE_REVIEWER` | (empty — auto) | Which CLI reviews a VS Code Copilot Chat session: `copilot` or `claude`. VS Code Copilot Chat has no headless CLI of its own, so the review has to run in one of the two this project already drives. Empty auto-detects, preferring `copilot` (a VS Code Copilot Chat user has a Copilot entitlement by construction, and the transcript being reviewed is Copilot's own). Anything outside that closed set is dropped with a reason on stderr, never passed to argv. If neither CLI is on `PATH`, the hook writes a named line to `persist-failures.log` rather than exiting 0 having done nothing |
 | `SL_SKILLOPT_ENABLED` | `false` | Route C: SkillOpt skill optimization (opt-in) |
-| `SL_SKILLOPT_REPO` | (empty) | path to a microsoft/SkillOpt checkout |
+| `SL_SKILLOPT_REPO` | (empty) | path to a microsoft/SkillOpt checkout. **Optional** when the `skillopt-sleep` CLI is on `PATH` (`pip install skillopt` / `uv tool install skillopt`): `scripts/skillopt-run.sh` prefers a checkout when one is set and usable, and otherwise falls back to that CLI — upstream's own precedence. A checkout is still worth setting, because a clone of `main` can be ahead of the published package |
 | `SL_SKILLOPT_RUN_CONFIRMED` | `false` | safety gate; the expensive `run` verb refuses until set true after a dry-run cost review |
 
 ### Bounding reviewer cost

@@ -81,13 +81,29 @@ ACLs)". Re-derived from CI run `30255824383`, `windows-latest, 3.13`:
   two), not 3.
 - Python skips: **21** cases across 5 suites. Windows-only (these skip **zero** on
   Linux): `test-adversarial-sweep.py` 3, `test-persist-proposal.py` 5,
-  `test-store-lock-writers.py` 3, `test-telemetry.py` 4 — **15**.
+  `test-store-lock-writers.py` 3 — **11**.
   `test-win-dir-pin.py` skips 6 on Windows and 9 on Linux (it is the inverse suite).
+
+  > **Corrected 2026-07-27 while fixing A2.** This bullet originally said **15**,
+  > counting `test-telemetry.py`'s 4 as Windows-only. They are not: re-measured on run
+  > `30284745998`, telemetry skips 4 on ubuntu-latest 3.13 as well — which the very next
+  > bullet already said ("4 telemetry live-store tests skip on every CI cell on every
+  > platform"), so this section contradicted itself. 11 is the measured figure.
 - The stated *reason* is false. The Windows runner prints
   `[capability probe] symlink creation: AVAILABLE` and
   `[capability probe] hardlink creation: AVAILABLE`. The real causes are
   `[capability probe] O_NOFOLLOW: UNAVAILABLE (POSIX-only primitive)` and
   `[capability probe] dir_fd (functional): UNAVAILABLE (e.g. native Windows)`.
+
+  > **Refined 2026-07-27 while fixing A2.** "The reason is false" is itself too broad, and
+  > correcting it that way would have flipped the error rather than fixed it. Both probes
+  > above come from the *Python* suites, and there symlink/hardlink creation genuinely
+  > works. But `tests/test-path-compare-lib.sh`'s 2 skips are real symlink-creation
+  > failures — `ln -s` could not create one, verified with `[[ -L … ]]`. So the shell half
+  > cannot make symlinks while the Python half can, and each skip must be attributed to its
+  > own probe. Also measured: `test-store-lock-writers.py`'s 3 skips are gated on "bash not
+  > runnable here (probed)", not on any lock limitation — the msvcrt backend does run on
+  > Windows. Full per-suite breakdown now in `README.md` and `CLAUDE.md`.
 - Two categories are unmentioned anywhere: **3 cross-process store-lock writer tests do
   not run on Windows** — that is the lost-update-race fix, unverified there — and **4
   telemetry live-store tests skip on every CI cell on every platform**, because no runner
@@ -147,11 +163,23 @@ invokes `transcript.py`. When the transcript is missing there is also no `copilo
 detach into. So the log line is durably on disk before the hook returns, and the assertion
 cannot observe a partial state.
 
-**Do not "fix" case 9 by adding a wait** — there is no completion marker to wait on in
-that path, and the wait would hang for its full timeout on every run. Re-derive with
-`grep -n 'transcript.py\|nohup' scripts/copilot-session-review.sh`. If a future change
-moves transcript resolution *into* the detached block, this analysis inverts and case 9
-becomes genuinely racy — that move is the thing to watch for, not the current assertion.
+> **Half of this was wrong, and the B3 lint caught it on 2026-07-27.** The assertion
+> genuinely cannot race — that part holds. But this entry went on to claim there is "no
+> completion marker to wait on in that path" because no `copilot` call is reached, and told
+> the reader not to add a wait. False. `copilot-session-review.sh:40-42` says so in its own
+> words: "the failure path below is deliberately UNCHANGED — a real transcript failure still
+> logs loudly AND still spawns the review; only the provably-empty case short-circuits."
+> A missing session dir is a *failure*, not the empty case, so `TRANSCRIPT_STATUS` is 0, the
+> script runs on, and on any machine with `copilot` on PATH case 9 leaves a detached pipeline
+> writing into `$TMP9` while the suite tears it down. `sl_rm_rf_retry` made that survivable,
+> not correct.
+>
+> Fixed by pairing the launch the way every other site is paired, gated on the same
+> condition the script itself gates on: `command -v copilot` → `sl_wait_for_review_complete`;
+> otherwise `sl_expect_no_review_spawned` (2s) rather than waiting out a 30s timeout for a
+> pipeline that was never going to start. The lesson worth keeping: "I reasoned it cannot
+> race" is not evidence, and here it was contradicted by a comment sitting in the file the
+> whole time.
 
 ### C. DEFERRED with a reason that holds up
 
@@ -246,7 +274,44 @@ Sources: <https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-
 **E9 — the VS Code Copilot Chat adapter.** Named in the plan's own out-of-scope list
 (`2026-07-25-…​.md:1681`), and both `README.md:448` and `CLAUDE.md:88` say "not started
 (tracked separately)". There is no half-built adapter in the tree, no dead config, no
-test asserting a capability that does not exist. This is real exclusion, not debt. One
+test asserting a capability that does not exist.
+
+> **Corrected 2026-07-28. This section previously said "real exclusion, not debt", and
+> that was wrong twice over.**
+>
+> 1. **It is in project scope.** `README.md:3` and `CLAUDE.md:82` both state the system
+>    "serves Claude Code, GitHub Copilot CLI, and (planned) VS Code Copilot Chat as
+>    peers". VS Code is a declared peer, not a non-goal.
+> 2. **The plan deferred it, it did not exclude it.** The heading is
+>    `## Out of Scope (subsequent plans)` — "subsequent plans" means owed later. The
+>    entry reads "VS Code hook spike and adapter".
+>
+> And the claim that it is "tracked separately" is **false**: `gh issue list --state all`
+> returns zero issues (issues are enabled on the repo), and `docs/superpowers/plans/`
+> contains only the two completed plans. Nothing anywhere tracks this work. A phrase that
+> implies a backlog item which does not exist is the documentation form of this project's
+> signature defect — it reads as handled while nothing is.
+>
+> Correct status: **deferred to a subsequent plan, in scope, and now tracked** in
+> `docs/superpowers/vscode-adapter-spike.md` (created 2026-07-28).
+>
+> **Update, 2026-07-28 — feasibility is established and it is smaller than assumed.**
+> VS Code Copilot Chat ships a hook system that runs `command` hooks with **no
+> extension of ours**, and `transcript.summarize_events` already reads its stored
+> transcripts unmodified (measured: 17 of 19 local files yielded messages, largest
+> 703 events to 94 messages). The extension route is worse, not better — there is no
+> public API to observe Copilot Chat's conversation lifecycle.
+>
+> **The finding that matters most is not about scope.** VS Code's default
+> `chat.hookFilesLocations` includes `~/.claude/settings.json` — the file `install.sh`
+> tells users to merge our hooks into. So item D7 (registering the Claude Code hooks)
+> silently also registers them inside VS Code. Nothing is live on this machine today
+> (checked: zero mentions of ours in that file), but that must be a decision, not a
+> side effect.
+>
+> Still unobserved: nobody has watched a VS Code hook actually fire. Whether `Stop`
+> is per-turn or per-session, and whether ask-mode turns produce a transcript at all,
+> are inferred from docs and shipped bytes. The spike protocol is in the tracker. One
 caveat worth knowing: `README.md:311` documents Coach **Route B**
 (`SL_COACH_EXPORT_ENABLED=true`) as requiring "our maintained fork's `.vsix` installed in
 VS Code". That fork is an external dependency this repository does not contain, does not

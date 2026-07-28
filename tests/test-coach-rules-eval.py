@@ -2017,9 +2017,19 @@ class SuggestionOverrideAndScopeTest(CoachRulesEvalBase):
         self.assertEqual(merged["scope"], emitted["no-skills"]["scope"])
 
     def test_scope_note_is_rendered_into_the_reviewer_prompt_line(self):
-        """The jq in session-review.sh is the only thing that puts `scope` in
-        front of the model. A field the renderer drops is a field that does
-        not exist."""
+        """The jq in lib/review-common.sh's sl_review_coach_section is the only
+        thing that puts `scope` in front of the model. A field the renderer
+        drops is a field that does not exist.
+
+        This used to name scripts/session-review.sh and
+        scripts/copilot-session-review.sh, because each carried its own copy
+        of that jq. The VS Code adapter would have made three copies, so the
+        block moved into lib/review-common.sh -- and this test failing on
+        that move is the point of it: it is the assertion that noticed the
+        renderer had gone somewhere else. It now pins the one renderer, plus
+        the fact that every review script routes through it, so a fourth
+        adapter that re-inlines its own jq is caught the same way.
+        """
         self.plain_turns(60)
         merged = self.merged_signals()
         line = "- [{id}] severity={severity}: {suggestion}{scope}".format(
@@ -2027,14 +2037,16 @@ class SuggestionOverrideAndScopeTest(CoachRulesEvalBase):
                 k: merged["no-skills"][k]
                 for k in ("id", "severity", "suggestion")})
         self.assertIn("SCOPE:", line)
-        renderers = [
-            (REPO / "scripts" / "session-review.sh").read_text(),
-            (REPO / "scripts" / "copilot-session-review.sh").read_text(),
-        ]
-        for text in renderers:
-            self.assertIn(".scope", text,
-                          "a review script renders signals without .scope, so "
-                          "the window disclosure never reaches the model")
+        renderer = (REPO / "scripts" / "lib" / "review-common.sh").read_text()
+        self.assertIn(".scope", renderer,
+                      "the shared coach-signal renderer drops .scope, so the "
+                      "window disclosure never reaches the model")
+        for script in ("session-review.sh", "copilot-session-review.sh",
+                       "vscode-session-review.sh"):
+            text = (REPO / "scripts" / script).read_text()
+            self.assertIn("sl_review_coach_section", text,
+                          f"{script} does not use the shared coach-signal "
+                          "renderer, so .scope is only pinned for the others")
 
 
 class UndeterminedCorpusScanTest(unittest.TestCase):
@@ -2351,6 +2363,225 @@ class AiCodeAdapterTest(CoachRulesEvalBase):
         self.assertTrue(self.fired("no-language-exploration"))
 
 
+class FlowAndFileContextAdapterTest(CoachRulesEvalBase):
+    """Fire/no-fire pairs for the two rules restored on 2026-07-26, whose
+    recorded skip reasons turned out to be factually wrong about upstream.
+
+    Neither needs aiCode, so they live here rather than in
+    AiCodeAdapterTest: broken-flow-state needs only timestamp +
+    totalElapsed, no-file-context only referencedFiles + editedFiles.
+
+    Both predicates are strict (`ratio > t`, `lowScoreRate > t`), so every
+    firing case below has an at-the-threshold twin that must stay silent --
+    a fixture one sample past the line would pass whether the comparison
+    were `>` or `>=`, which is the shape of the fixture bug that once made
+    two of speed-accept's clauses unreachable while the suite stayed green.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = Path(self.tmp) / "search.db"
+        conn = make_db(str(self.db))
+        insert_session(conn, "s0", 1)
+        conn.commit()
+        conn.close()
+        self.store = Path(self.tmp) / "store"
+        (self.store / "session-state").mkdir(parents=True)
+
+    def fired(self, rule_id):
+        signals, stderr = self.run_eval(VENDOR_RULES, self.db, telemetry_home=self.store)
+        self.assertNotIn(
+            "skipping {} ".format(rule_id), stderr,
+            "{} skipped when it should have evaluated:\n{}".format(rule_id, stderr))
+        return [s for s in signals if s["id"] == rule_id]
+
+    # -- broken-flow-state -------------------------------------------------
+    @staticmethod
+    def _stamp(day, offset):
+        """A VALID ISO timestamp on a chosen July day, `offset` seconds in.
+
+        TFIX._ts() formats a seconds field only, so it cannot express either
+        a second day or an offset above 59 -- and an out-of-range field
+        parses to None, which silently unreaches every timestamp predicate.
+        This rule buckets sessions BY DAY (upstream takes the ISO date of a
+        session's first timed request), so multiple days are the whole point.
+        """
+        return "2026-07-{:02d}T{:02d}:{:02d}:{:02d}.000Z".format(
+            day, offset // 3600, (offset // 60) % 60, offset % 60)
+
+    def _flow_session(self, session_id, day, turns):
+        """One Copilot session from a list of (start, elapsed) second pairs.
+
+        Elapsed is per turn, not per session, because a negative inter-request
+        gap can only come from a response that OVERRUNS the next request's
+        start -- upstream sorts the timed requests by timestamp before
+        differencing them, so out-of-order starts alone never produce one.
+        """
+        events = []
+        for index, (start, elapsed) in enumerate(turns):
+            turn = TFIX.simple_turn(str(index), user="go")
+            for event in turn:
+                event["timestamp"] = (
+                    self._stamp(day, start + elapsed)
+                    if event["type"] == "assistant.turn_end"
+                    else self._stamp(day, start))
+            events.extend(turn)
+        TFIX.copilot_session(str(self.store), session_id, events)
+
+    def _flow_days(self, fragmented, clean=0, requests=3, elapsed=5):
+        """`fragmented` days of 10-minute pauses, `clean` days of 1s ones.
+
+        A 595s median gap scores 0 (no rapid follow-up, latency bonus fully
+        spent); a 1s median gap scores 100. Both sides of upstream's
+        hardcoded `avg < 50` day cut, with nothing near it.
+        """
+        day = 1
+        for _ in range(fragmented):
+            self._flow_session("frag{}".format(day), day,
+                               [(i * 600, elapsed) for i in range(requests)])
+            day += 1
+        for _ in range(clean):
+            self._flow_session("calm{}".format(day), day,
+                               [(i * 6, elapsed) for i in range(requests)])
+            day += 1
+
+    def test_broken_flow_state_fires_when_most_days_are_fragmented(self):
+        self._flow_days(fragmented=6)
+        self.assertEqual([s["count"] for s in self.fired("broken-flow-state")], [6])
+
+    def test_broken_flow_state_silent_at_exactly_the_low_score_rate(self):
+        """6 of 10 days is a lowScoreRate of exactly 0.6, and the check is
+        `> thresholds.lowScoreRate`. One day either side of this fixture
+        would pass under `>=` too, proving nothing about the comparison."""
+        self._flow_days(fragmented=6, clean=4)
+        self.assertEqual(self.fired("broken-flow-state"), [])
+
+    def test_broken_flow_state_silent_below_the_min_days_gate(self):
+        """Same 100% fragmented rate, four days instead of six. Isolates
+        `flow.totalDays >= thresholds.minDays` from the rate clause."""
+        self._flow_days(fragmented=4)
+        self.assertEqual(self.fired("broken-flow-state"), [])
+
+    def test_broken_flow_state_silent_below_the_session_min_reqs_gate(self):
+        """Two timed requests per session, so no session reaches
+        thresholds.sessionMinReqs and no day is scored at all. Without the
+        length gate each of these six days would score 0 and fire."""
+        self._flow_days(fragmented=6, requests=2)
+        self.assertEqual(self.fired("broken-flow-state"), [])
+
+    def test_broken_flow_state_excludes_requests_with_no_wall_clock(self):
+        """Upstream gates on `totalElapsed > 0`, and a turn whose start and
+        end stamps are equal yields 0 -- not None, so requests_with() lets it
+        through and only the adapter's own `> 0` check drops it. Scoring
+        these as instantaneous responses would invent six fragmented days
+        out of requests that were never timed.
+        """
+        self._flow_days(fragmented=6, elapsed=0)
+        self.assertEqual(self.fired("broken-flow-state"), [])
+
+    def test_broken_flow_state_clamps_negative_gaps_instead_of_dropping_them(self):
+        """Upstream CLAMPS a negative gap to zero here [interpreter.ts:432],
+        where speed-accept DISCARDS one [:393]. The difference is visible:
+        one 995s gap plus two responses that overrun the next request give
+        gaps [995s, 0, 0] -- median 0, rapid rate 2/3, score 80, a calm day.
+        Dropping the negatives instead would leave only the long gap (score
+        0, fragmented) and fire on all six days.
+        """
+        for day in range(1, 7):
+            self._flow_session("skew{}".format(day), day,
+                               [(0, 5), (1000, 600), (1200, 600), (1400, 5)])
+        self.assertEqual(self.fired("broken-flow-state"), [])
+
+    def test_broken_flow_state_takes_the_upper_median_of_an_even_gap_count(self):
+        """`sorted[Math.floor(len / 2)]` is the UPPER of the two middle gaps
+        on an even-length list, not their mean [interpreter.ts:437]. With
+        gaps of 0s and 100s the choice decides the verdict: the upper median
+        spends the whole latency bonus (score 30, fragmented), the lower one
+        keeps all 40 of it (score 70, calm). Transcribed, not corrected --
+        "fixing" it would make this project answer a vendored rule id
+        differently from upstream for the same input.
+        """
+        for day in range(1, 7):
+            self._flow_session("med{}".format(day), day,
+                               [(0, 5), (5, 5), (110, 5)])
+        self.assertEqual([s["count"] for s in self.fired("broken-flow-state")], [6])
+
+    # -- no-file-context ---------------------------------------------------
+    @staticmethod
+    def _view(path):
+        return ("view", {"path": path})
+
+    @staticmethod
+    def _edit(path):
+        return ("edit", {"path": path, "old_str": "x", "new_str": "y"})
+
+    def _context_turns(self, blind, with_context=0, tool=None):
+        """`blind` turns that touch no file, plus `with_context` that do."""
+        tool = tool or self._view("/r/a.py")
+        events = []
+        made = 0
+        for _ in range(blind):
+            events.extend(TFIX.simple_turn(str(made), user="fix the bug"))
+            made += 1
+        for _ in range(with_context):
+            events.extend(TFIX.simple_turn(str(made), user="fix the bug", tools=[tool]))
+            made += 1
+        TFIX.copilot_session(str(self.store), "s0", events)
+
+    def test_no_file_context_fires_when_requests_touch_no_file(self):
+        self._context_turns(blind=12)
+        self.assertEqual([s["count"] for s in self.fired("no-file-context")], [12])
+
+    def test_no_file_context_silent_at_exactly_the_rate_threshold(self):
+        """14 of 20 is exactly 0.7 and the check is `> maxNoContextRate`.
+        The count clause is satisfied (14 > 10), so only the rate decides."""
+        self._context_turns(blind=14, with_context=6)
+        self.assertEqual(self.fired("no-file-context"), [])
+
+    def test_no_file_context_silent_at_exactly_the_min_sample(self):
+        """A 100% rate over exactly 10 requests, and the check is
+        `count > thresholds.minSample`. Isolates the sample gate."""
+        self._context_turns(blind=10)
+        self.assertEqual(self.fired("no-file-context"), [])
+
+    def test_no_file_context_counts_a_read_as_context(self):
+        """referencedFiles comes from tool arguments -- upstream's own CLI
+        parser does the same [parser-vscode-cli.ts:88,:244] -- so a `view`
+        is context even though no human attached anything."""
+        self._context_turns(blind=0, with_context=12)
+        self.assertEqual(self.fired("no-file-context"), [])
+
+    def test_no_file_context_counts_an_edit_as_context(self):
+        """The second conjunct. Without it a session that only ever wrote
+        files, never read one, would be reported as context-blind."""
+        self._context_turns(blind=0, with_context=12, tool=self._edit("/r/a.py"))
+        self.assertEqual(self.fired("no-file-context"), [])
+
+
+class JsRoundUnitTest(unittest.TestCase):
+    """Called directly, because no end-to-end fixture can reach it.
+
+    The flow score is `Math.round(...)` compared against a hardcoded
+    `< 50`. Work the halves through: a raw score of 49.5 rounds to 50 under
+    BOTH rules (Python banker-rounds toward the even 50), 48.5 gives 48 vs
+    49 and 50.5 gives 50 vs 51 -- pairs that land on the same side of the
+    cut. So a single session's verdict is never changed by the difference,
+    and a fixture claiming to prove the helper would be proving nothing. It
+    still has to be right: day scores are AVERAGED across sessions before
+    the cut, where a one-point difference does move the answer.
+    """
+
+    def test_a_half_rounds_up_the_way_javascript_does_not_to_even(self):
+        self.assertEqual(CRE._js_round(0.5), 1)    # Python's round() gives 0
+        self.assertEqual(CRE._js_round(2.5), 3)    # Python's round() gives 2
+        self.assertEqual(CRE._js_round(48.5), 49)  # Python's round() gives 48
+
+    def test_ordinary_values_are_unaffected(self):
+        self.assertEqual(CRE._js_round(0), 0)
+        self.assertEqual(CRE._js_round(49.4), 49)
+        self.assertEqual(CRE._js_round(49.6), 50)
+
+
 class NoLanguageExplorationUnitTest(unittest.TestCase):
     """Calls the adapter directly, because the end-to-end path cannot
     distinguish "returned None" from "returned 0".
@@ -2428,7 +2659,14 @@ class TelemetryAbsentSkipsLoudlyTest(CoachRulesEvalBase):
         "no-custom-instructions", "context-engineering-gaps", "profanity",
         "yolo-mode", "auto-approve-terminal", "no-slash-commands",
         "no-plan-mode", "agent-mode-for-asks", "no-spec-driven-development",
+        "broken-flow-state", "no-file-context",
     ]
+
+    def test_the_id_list_covers_every_registered_telemetry_adapter(self):
+        """The loop below only checks ids it was handed, so an adapter added
+        to TELEMETRY_ADAPTERS and forgotten here would be exempt from this
+        whole class -- silently, which is the failure mode it exists for."""
+        self.assertEqual(set(self.TELEMETRY_RULE_IDS), set(CRE.TELEMETRY_ADAPTERS))
 
     def test_all_telemetry_rules_skip_with_a_source_naming_reason(self):
         tmp = tempfile.mkdtemp()
@@ -2544,12 +2782,12 @@ class CoverageAssertionTest(CoachRulesEvalBase):
     proving it can fire -- update both together, deliberately."""
 
     # 11 from the project's own index (generic engine + REQUEST_ADAPTERS +
-    # the two bespoke session adapters). The 13 TELEMETRY_ADAPTERS are NOT
+    # the two bespoke session adapters). The TELEMETRY_ADAPTERS are NOT
     # counted here: this test runs with no harness store, where they must
     # skip. TelemetryAdapterTest covers them with a store present, and
     # TelemetryAbsentSkipsLoudlyTest pins that they skip without one.
     EXPECTED_EVALUATED = 11
-    EXPECTED_TELEMETRY_ADAPTERS = 31
+    EXPECTED_TELEMETRY_ADAPTERS = 33
     EXPECTED_TOTAL_RULES = 45
 
     def test_coverage_count_pinned(self):
@@ -2560,6 +2798,7 @@ class CoverageAssertionTest(CoachRulesEvalBase):
         conn.commit()
         conn.close()
 
+        self.assertEqual(len(CRE.TELEMETRY_ADAPTERS), self.EXPECTED_TELEMETRY_ADAPTERS)
         _, stderr = self.run_eval(VENDOR_RULES, db)
         m = re.search(r"(\d+) of (\d+) vendored rules evaluated", stderr)
         self.assertIsNotNone(m, "coverage line missing from stderr:\n{}".format(stderr))

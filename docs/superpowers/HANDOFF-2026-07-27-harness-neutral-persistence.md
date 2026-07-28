@@ -36,7 +36,10 @@ file partly unreadable.
 3. **Re-derive state before trusting §3.** Run `bash tests/run-all.sh` and
    `gh run list --branch main`. Numbers in prose rot; the commands next to them do not.
 
-4. **Then take §4 in its ranked order — A1 first.** A1 is the only defect that breaks a
+4. **A1, A2 and B3 are DONE** (PR #4, CI 6/6 green on `4bc327a`) — if that PR is merged,
+   §4's first three rows are history and the remaining open items are C, D and E. If it is
+   *not* merged yet, merge it before starting anything else. Original ordering guidance,
+   kept because it explains the ranking: **take §4 in its ranked order — A1 first.** A1 is the only defect that breaks a
    user-facing path (Claude Code hook registration is wrong in three independent ways,
    so a user following the installer's own output gets hooks that never fire). A2 is a
    documentation correction; B3 is a lint. §5 lists rulings that must not be re-opened
@@ -108,8 +111,8 @@ Two known-stale statements inside that record, so you do not act on them:
 | Working tree | clean, nothing unpushed | `git status --porcelain && git log @{u}..HEAD` |
 | **PR #2** | **MERGED** 2026-07-27T10:02:16Z, merge commit `1c93605` | `gh pr view 2 --json state,mergedAt,mergeCommit` |
 | Is HEAD on main? | yes | `git branch -r --contains ae9e8f6` |
-| CI | run `30255824383`, 6/6 green on `ae9e8f6` | `gh run list --branch harness-neutral-persistence` then `gh run view <id>` |
-| Local suite | 43 suites (29 shell, 14 python), all pass | `bash tests/run-all.sh` |
+| CI | last observed 6/6 green on `main`; the A1/A2 branch was green on run `30284745998` | `gh run list --branch main` then `gh run view <id>` — the old branch is merged, do not query it |
+| Local suite | 44 suites (30 shell, 14 python), all pass — was 43 before A1 added `test-claude-hooks-json.sh` | `bash tests/run-all.sh` |
 | Coach rules / evaluable | 45 rules, 3 skipped → 42 evaluable | count `^id:` in `vendor/coach-rules/*.md`; count keys of `UNSUPPORTED_REASONS` in `scripts/coach-rules-eval.py` — **parse it, do not grep it** (see §7) |
 | Resolved store paths | see below | `python3 scripts/lib/paths.py all` |
 | Claude Code hooks registered | **0** | `python3 -c "import json,os;print(json.dumps(json.load(open(os.path.expanduser('~/.claude/settings.json')))['hooks']))"` and look for the scripts dir |
@@ -130,9 +133,9 @@ Read a row here, then read its section there before acting on it.
 
 | # | Item | Category | Detail |
 |---|---|---|---|
-| **A1** | Claude Code hook registration is broken **three ways** — `settings-hooks.json` names the pre-Task-7b `~/.claude/scripts/self-learning/` path that `install.sh` no longer writes, while `install.sh`'s printed block uses the flat schema Claude Code rejects and timeouts 1000× too large. Following *either* documented route fails. Was mis-carried as a "user decision"; it is a defect that *prevents* the decision. | **OWED** | [§A](../../.superpowers/sdd/2026-07-25-harness-neutral-persistence/final-sweep-findings.md#a-owed--real-defects-found-in-this-audit-not-previously-recorded) |
-| **A2** | The documented Windows coverage caveat is wrong on both its numbers (actual: 4 shell + 21 Python skips, 15 of them Windows-only) and its stated reason (the runner reports symlink and hardlink creation *available*; the real causes are `O_NOFOLLOW` and `dir_fd`). Two skip categories are undocumented entirely, including the cross-process store-lock tests. | **OWED** | [§A](../../.superpowers/sdd/2026-07-25-harness-neutral-persistence/final-sweep-findings.md#a-owed--real-defects-found-in-this-audit-not-previously-recorded) |
-| **B3** | The detached-pipeline spawn/teardown race. The `sl_wait_for_review_complete` + `sl_rm_rf_retry` pair exists because this broke a macOS suite; it has since been reintroduced at a *new* launch site three times (`cd04308` added the helper, `263a717` swept misses, `ae9e8f6` fixed another). 23 launch sites, held together by convention. A wrapper is the wrong fix — the sites are heterogeneous — a ~30-line lint is the right one. | **OWED, cheap** | [§B](../../.superpowers/sdd/2026-07-25-harness-neutral-persistence/final-sweep-findings.md#b-owed-cheap--a-structural-guard-for-the-class-that-keeps-coming-back) |
+| **A1** | Claude Code hook registration is broken **three ways** — `settings-hooks.json` names the pre-Task-7b `~/.claude/scripts/self-learning/` path that `install.sh` no longer writes, while `install.sh`'s printed block uses the flat schema Claude Code rejects and timeouts 1000× too large. Following *either* documented route fails. Was mis-carried as a "user decision"; it is a defect that *prevents* the decision. | **DONE** — PR #4, `1788463`+`44bd9e1`; template is now a `__SL_SCRIPTS_DIR__` placeholder install.sh renders, prints and writes to `<store>/settings-hooks.json`. New `tests/test-claude-hooks-json.sh` guards schema/timeout-unit/path; `test-install-paths.sh` asserts the rendered artifact end to end. Also fixed a second-order defect it exposed: `uninstall.sh` matched our hooks by the literal string `self-learning`, which no longer appears in a store path, so it silently left them registered. | [§A](../../.superpowers/sdd/2026-07-25-harness-neutral-persistence/final-sweep-findings.md#a-owed--real-defects-found-in-this-audit-not-previously-recorded) |
+| **A2** | The documented Windows coverage caveat is wrong on both its numbers (actual: 4 shell + 21 Python skips, 15 of them Windows-only) and its stated reason (the runner reports symlink and hardlink creation *available*; the real causes are `O_NOFOLLOW` and `dir_fd`). Two skip categories are undocumented entirely, including the cross-process store-lock tests. | **DONE** — PR #4, `fd126f5`. Re-measured on run `30284745998`: 4 shell + 21 Python skips, **11** Windows-only (not 15 — telemetry's 4 skip on every platform, which this row's own next bullet already said). Causes attributed per suite; note the shell half genuinely *cannot* create symlinks (`ln -s` fails) while the Python half can, so 'the elevation reason is false' would have been a second wrong claim. | [§A](../../.superpowers/sdd/2026-07-25-harness-neutral-persistence/final-sweep-findings.md#a-owed--real-defects-found-in-this-audit-not-previously-recorded) |
+| **B3** | The detached-pipeline spawn/teardown race. The `sl_wait_for_review_complete` + `sl_rm_rf_retry` pair exists because this broke a macOS suite; it has since been reintroduced at a *new* launch site three times (`cd04308` added the helper, `263a717` swept misses, `ae9e8f6` fixed another). 23 launch sites, held together by convention. A wrapper is the wrong fix — the sites are heterogeneous — a ~30-line lint is the right one. | **DONE** — PR #4, `4bc327a`. `tests/test-review-launch-lint.py`, ~30 lines, window = until the next launch. It immediately found a genuinely unpaired site (case 9 of `test-copilot-session-review.sh`) that this report had recorded as refuted; the failure path deliberately still spawns the reviewer. Site paired, findings corrected in place. | [§B](../../.superpowers/sdd/2026-07-25-harness-neutral-persistence/final-sweep-findings.md#b-owed-cheap--a-structural-guard-for-the-class-that-keeps-coming-back) |
 | **C** | Three Coach rules still skipped (`broken-flow-state`, `no-devcontainer`, `no-file-context`) — all three re-verified verbatim against upstream `766d0f2`; SkillOpt's `run-sleep.sh` contract intact but upstream now leads with a pip CLI our wrapper cannot drive; `transcript.py`'s two on-disk formats confirmed undocumented, where total breakage is loud but **partial drift is silent**. | **DEFERRED** | [§C](../../.superpowers/sdd/2026-07-25-harness-neutral-persistence/final-sweep-findings.md#c-deferred-with-a-reason-that-holds-up) |
 | **D** | Register the Claude Code hooks (use the corrected JSON in §A, **not** `install.sh`'s output) · rotate the `gho_` token if these logs are shared — GitHub documents keychain-first with plaintext fallback, and `/logout` does not revoke. | **USER DECISION** | [§D](../../.superpowers/sdd/2026-07-25-harness-neutral-persistence/final-sweep-findings.md#d-user-decision) |
 | **E** | VS Code Copilot Chat adapter — named in the plan's own exclusion list, no half-built code. Caveat: Coach Route B needs a fork `.vsix` this repo neither contains nor tests. | **OUT OF SCOPE** | [§E](../../.superpowers/sdd/2026-07-25-harness-neutral-persistence/final-sweep-findings.md#e-out-of-scope--genuinely-not-silent-debt) |
@@ -236,7 +239,12 @@ Say these plainly rather than letting the green matrix imply otherwise.
   - **`CLAUDE.md` has been updated to reflect Run 2.** The remaining residual is only that no
     *human, multi-turn, TUI* Copilot session has yet fired the hook; ensure other docs do not
     repeat the older “transcript reaching the prompt is unexercised” wording.
-- **Route C (SkillOpt) has never run end-to-end** — needs a `microsoft/SkillOpt` checkout.
+- **Route C (SkillOpt): the cheap verbs have now run end-to-end** (2026-07-28, against a
+  `microsoft/SkillOpt` checkout at `374c832`, upstream's default `mock` backend, zero
+  cost). `status`, `harvest` and `dry-run` all passed through and returned honest empty
+  results against an empty sandbox HOME. **The `run` verb has never been executed on any
+  backend**, and nothing in this repo consumes SkillOpt's output — verified, zero hits for
+  `best_skill|skillopt` across `scripts/*.py`. Route C is a launcher, not an integration.
 - **Route B (Coach export) has never run here** — needs a fork `.vsix` this repo does not
   contain.
 - **Live telemetry/transcript extraction is never exercised in CI on any platform** — no

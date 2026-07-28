@@ -76,6 +76,17 @@ if [[ -n "$SL_LOGS" ]]; then
 fi
 if [[ -n "$SL_HOME" ]]; then
     remove "${SL_HOME}/backups/curator"
+    # The rendered Claude Code hook JSON (install.sh Step 7). Leaving it behind
+    # would strand a file whose every path points into the scripts dir removed
+    # above -- a merge-me artifact that registers nothing.
+    remove "${SL_HOME}/settings-hooks.json"
+    # The rendered VS Code hook JSON (install.sh Step 4c), for the same
+    # reason. Note this does NOT remove the `chat.hookFilesLocations` entry
+    # from the user's VS Code settings.json -- this installer never wrote
+    # it, so it does not delete it either; a location pointing at a file
+    # that no longer exists is inert. Removing the entry is a one-line
+    # manual step, printed by uninstall's summary.
+    remove "${SL_HOME}/vscode-hooks.json"
 fi
 
 # Copilot hook config — harness-owned directory, installed by this project.
@@ -86,7 +97,15 @@ remove "${HOME}/.copilot/hooks/self-learning.json"
 # uninstall — guard on jq, tolerate both the nested and legacy-flat hook schemas,
 # and warn (not fail) if the edit cannot be applied.
 SETTINGS="${HOME}/.claude/settings.json"
-if [[ -f "$SETTINGS" ]] && grep -q self-learning "$SETTINGS"; then
+# Match our hooks by the SCRIPT NAMES they invoke, not by the literal string
+# "self-learning". That string only ever appeared in the pre-Task-7b layout
+# (~/.claude/scripts/self-learning/...); a correctly-registered hook today reads
+# `bash ~/.local/share/agent-learning/scripts/turn-counter.sh`, which contains
+# no such substring -- so both the gate below and the jq filter used to skip
+# right past the hooks they exist to remove, and say nothing. The test only fed
+# this the legacy shape, so nothing caught it.
+SL_HOOK_PATTERN='self-learning|/(turn-counter|session-review|index-session)\.sh'
+if [[ -f "$SETTINGS" ]] && grep -qE "$SL_HOOK_PATTERN" "$SETTINGS"; then
     if ! command -v jq >/dev/null 2>&1; then
         echo "  jq not found — leaving settings.json unchanged; remove self-learning hooks manually" >&2
     else
@@ -97,15 +116,15 @@ if [[ -f "$SETTINGS" ]] && grep -q self-learning "$SETTINGS"; then
         # and legacy-flat entries ({matcher,command}).
         ( umask 077
           cp "$SETTINGS" "$BAK" && \
-          jq '
+          jq --arg pat "$SL_HOOK_PATTERN" '
             if .hooks then
               .hooks |= map_values(
                 map(if has("hooks")
-                    then (.hooks |= map(select((.command // "") | test("self-learning") | not)))
+                    then (.hooks |= map(select((.command // "") | test($pat) | not)))
                     else . end)
                 | map(select(if has("hooks")
                              then ((.hooks | length) > 0)
-                             else ((.command // "") | test("self-learning") | not) end))
+                             else ((.command // "") | test($pat) | not) end))
               )
             else . end
           ' "$BAK" > "${SETTINGS}.tmp" 2>/dev/null
@@ -140,3 +159,9 @@ else
 fi
 
 echo "Uninstall complete."
+# The one registration this uninstaller cannot undo, said out loud rather
+# than left for the user to discover: install.sh never edited VS Code's
+# settings.json (it only printed the entry to add), so there is nothing here
+# it may safely edit back out.
+echo "If you registered the VS Code adapter, remove the ${SL_HOME:-<store>}/vscode-hooks.json"
+echo "entry from \"chat.hookFilesLocations\" in your VS Code settings.json."

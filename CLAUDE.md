@@ -18,13 +18,34 @@
 >
 > **CI.** The matrix is `{ubuntu, macos, windows}-latest × Python {3.9, 3.13}`, six cells.
 > **No run id is recorded here, deliberately** — every previous version of this paragraph
-> pinned one and went stale within hours. Run `gh run list --branch harness-neutral-persistence`
-> and `gh run view <id>`; the last run observed while writing this was green on all six cells
+> pinned one and went stale within hours. Run `gh run list --branch main` and
+> `gh run view <id>`; the last run observed while writing this was green on all six cells
 > with the full suite. The branch was red on this matrix repeatedly on 2026-07-25, so read the
-> run *history*, not just the newest entry, before concluding anything. Note that Windows green
-> is not equal coverage: 7 write-path security tests (symlink/hardlink/`O_NOFOLLOW`) and 3 shell
-> assertions skip there, each printed with its reason and gated on a probe that verifies the
-> limitation rather than assuming it from the platform name.
+> run *history*, not just the newest entry, before concluding anything.
+> **Windows green is not equal coverage, and the numbers here are re-derived, not remembered.**
+> Count them with `gh run view --job <windows job id> --log`, then `SKIP:` lines and
+> `OK (skipped=N)` per `=== tests/… ===` banner — never by eye. Run `30284745998`,
+> windows-latest 3.13 against ubuntu-latest 3.13: **4 shell skips** (3 suites) and **21 Python
+> skips** (5 suites), of which **11 are Windows-only** — `test-persist-proposal.py` 5,
+> `test-adversarial-sweep.py` 3, `test-store-lock-writers.py` 3. `test-win-dir-pin.py` is the
+> inverse suite (6 skip on Windows, 9 on Linux). **There is no single cause, and the old
+> "symlinks need elevation" line was half wrong.** Per suite, each from its own probe:
+> `test-persist-proposal.py` 5 — `O_NOFOLLOW: UNAVAILABLE` and `dir_fd (functional):
+> UNAVAILABLE` (that suite also prints `symlink creation: AVAILABLE` and `hardlink creation:
+> AVAILABLE`, so Python builds the attack fixtures fine); `test-adversarial-sweep.py` 3 —
+> `chmod read-only probed and not enforced` ×2 plus "POSIX permission bits are not meaningful
+> on Windows/NTFS ACLs"; `test-doctor.sh` 1 — the same ACL behaviour, verified by writing a
+> probe file; `test-copilot-hook-input.sh` 1 — `pty allocation: UNAVAILABLE (No module named
+> 'termios')`; `test-path-compare-lib.sh` 2 — these *are* symlink failures, `ln -s` could not
+> create one (verified with `[[ -L … ]]`). The shell half cannot make symlinks while the Python
+> half can; do not collapse the two. Three gaps to state rather than let green imply otherwise:
+> `test-store-lock-writers.py`'s 3 skip because **`bash` is not runnable from Python on that
+> runner** (probed) — so the bash-driven concurrent-writer scenarios are unexercised there,
+> though the lock backend itself runs (`store_lock backend=msvcrt`); **4 live
+> telemetry/transcript tests skip on every cell on every platform**, since no runner has a
+> Copilot or Claude store; and conversely Windows covers what POSIX cannot —
+> `win32 directory pinning: AVAILABLE (verified: a pinned directory could not be renamed, and
+> our own staged replace inside it still succeeded)`.
 > **Live Copilot CLI check: DONE (2026-07-25), with one residual.** Run against whatever
 > `copilot` was installed that day (1.0.73 at that moment; it auto-updates, and 1.0.75 has
 > since been observed installed -- this project targets "current, authenticated `copilot`
@@ -58,13 +79,13 @@
 
 ## Project Overview
 
-This project implements a Hermes-Agent-inspired self-learning system that serves Claude Code, GitHub Copilot CLI, and (planned) VS Code Copilot Chat as peers. The system adds background review, skill lifecycle, bounded memory, periodic curation, and cross-session search. **Claude Code is one adapter among peers, not a dependency: no shared code path (storage resolution, the review pipeline, the skill/memory schema) may assume Claude Code's binary, config, or `~/.claude` layout.** `tests/test-claude-absent.sh` is the regression guard for this — the Copilot review path must work with no `claude` binary and no `~/.claude` directory present.
+This project implements a Hermes-Agent-inspired self-learning system that serves Claude Code, GitHub Copilot CLI, and VS Code Copilot Chat as peers. The system adds background review, skill lifecycle, bounded memory, periodic curation, and cross-session search. **Claude Code is one adapter among peers, not a dependency: no shared code path (storage resolution, the review pipeline, the skill/memory schema) may assume Claude Code's binary, config, or `~/.claude` layout.** `tests/test-claude-absent.sh` is the regression guard for this — the Copilot review path must work with no `claude` binary and no `~/.claude` directory present.
 
 ## Repository Layout
 
 - `scripts/` — Deployable hook, review, curator, install/uninstall, and doctor scripts (bash + Python). `install.sh` copies these into the vendor-neutral store resolved by `scripts/lib/paths.py` (its `scripts` key) — not `~/.claude/scripts/self-learning`. See "Storage locations" and "Diagnostics" in `README.md`.
 - `prompts/` — Review prompt templates (memory, skill, combined, curator)
-- `config/` — Default configuration files, including hook-registration templates (`config/copilot-hooks.json` carries a `__SL_SCRIPTS_DIR__` placeholder substituted by `install.sh` at install time)
+- `config/` — Default configuration files, including the three hook-registration templates, each carrying a `__SL_SCRIPTS_DIR__` placeholder substituted by `install.sh` at install time: `settings-hooks.json` (Claude Code), `copilot-hooks.json` (Copilot CLI — note its different per-command shape: `bash`/`powershell`/`timeoutSec`), and `vscode-hooks.json` (VS Code Copilot Chat — Claude Code's nested schema, which VS Code parses, with `timeout` in SECONDS). `install.sh` renders the VS Code one into the store and prints the `chat.hookFilesLocations` entry; it never edits VS Code's settings.json.
 - `schema/` — Data schemas (SQLite DDL, JSON Schema)
 - `tests/` — Test suite: `tests/run-all.sh` discovers `tests/test-*.sh`/`tests/test-*.py` by glob (never hardcode a count here — it drifts on every suite added or removed; run `bash tests/run-all.sh` for the current total)
 - `docs/research/` — Hermes Agent research corpus (15 validated documents + 10K-line implementation guide)
@@ -94,6 +115,6 @@ This project originally followed a 5-phase, 10-week roadmap defined in the imple
 | 2 | Background Review (prompts, memory/skill writes) | Done — reviewer proposes JSON on stdout, `scripts/persist-proposal.py` validates and performs every write, confined to the resolved store |
 | 3 | Skill Lifecycle (telemetry, transitions) | Done |
 | 4 | Curator + Session Search | Done |
-| 5 | Integration + Polish | Done for Claude Code + Copilot CLI, including a `doctor.sh` diagnostic; VS Code Copilot Chat adapter/hooks not started (tracked separately). Windows support (Git Bash, PowerShell wrappers) is CI-verified across the six-cell matrix — for current status run `gh run list --branch harness-neutral-persistence` rather than trusting a run id written here. Fix rounds A-F and P0-P9 fixed real defects the matrix exposed: a Python 3.9 `fromisoformat` failure on `Z` timestamps, GNU-only `date` use on macOS, CRLF-corrupted `paths.py` stdout plus MSYS path-form mismatches on Windows, a flaky zero-tolerance timestamp round-trip in `tests/test-config.sh`, a lost-update race in concurrent appends (now a cross-process store lock), and a PowerShell syntax checker that had itself been the parse error. Windows green is not equal coverage: 7 write-path security tests and 3 shell assertions skip there (symlinks need elevation; `chmod` does not deny writes under ACLs), each announced with its reason. **The live Copilot CLI end-to-end check is DONE** (2026-07-25, real paid model call — see the branch-status block at the top of this file for exactly what it did and did not cover); an earlier version of this row said it was still pending, contradicting that block. |
+| 5 | Integration + Polish | Done for Claude Code + Copilot CLI, including a `doctor.sh` diagnostic; **the VS Code Copilot Chat adapter shipped 2026-07-28** (`scripts/vscode-session-review.sh`, `config/vscode-hooks.json`, `scripts/lib/review-common.sh`, `tests/test-vscode-*.sh`) after the spike in `docs/superpowers/vscode-adapter-spike.md` passed on Linux / VS Code 1.130.0 / `GitHub.copilot-chat` 0.58.0. Read §4 of that file before touching any review script: **VS Code's default `chat.hookFilesLocations` includes `~/.claude/settings.json`**, so registering the Claude Code hooks also registers them inside VS Code — that is VS Code core behaviour, not the Claude extension, and it means Claude Code and VS Code Copilot Chat **cannot be told apart by which config invoked the hook**. `session-review.sh` therefore runs `transcript.py --harness auto`, which sniffs the transcript's own `type` values (330/330 Claude files bare-word, 21/21 VS Code files dotted, 351/351 classified correctly). Reverting that to `--harness claude` reopens a measured defect: an empty digest, a `persist-failures.log` line, AND a paid contentless review, once per VS Code turn (VS Code's `Stop` is per turn, not per session). It is **Linux-only measured** — no real VS Code hook has ever invoked our scripts, and Windows/macOS/VS-Code-Server are entirely untested. Windows support (Git Bash, PowerShell wrappers) is CI-verified across the six-cell matrix — for current status run `gh run list --branch main` rather than trusting a run id written here. Fix rounds A-F and P0-P9 fixed real defects the matrix exposed: a Python 3.9 `fromisoformat` failure on `Z` timestamps, GNU-only `date` use on macOS, CRLF-corrupted `paths.py` stdout plus MSYS path-form mismatches on Windows, a flaky zero-tolerance timestamp round-trip in `tests/test-config.sh`, a lost-update race in concurrent appends (now a cross-process store lock), and a PowerShell syntax checker that had itself been the parse error. Windows green is not equal coverage: 4 shell and 21 Python assertions skip there (11 of them Windows-only), each announced with its reason — see the CI paragraph at the top of this file for the measured breakdown and the real causes, which are missing POSIX primitives rather than the elevation this row used to claim. **The live Copilot CLI end-to-end check is DONE** (2026-07-25, real paid model call — see the branch-status block at the top of this file for exactly what it did and did not cover); an earlier version of this row said it was still pending, contradicting that block. |
 
 The `harness-neutral-persistence` plan, now complete, replaced the original Claude-Code-only storage defaults with the vendor-neutral store described in `README.md` under "Storage locations" — the fix for a defect where Copilot CLI's path allow-list silently discarded review output written to `~/.claude`.

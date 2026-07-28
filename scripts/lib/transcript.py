@@ -1,10 +1,25 @@
 #!/usr/bin/env python3
-"""Extract a bounded, redacted conversation digest from a Copilot CLI or
-Claude Code session -- both harnesses share this module (P0b: the Claude
-Code path had the identical "reviewer sees no transcript" defect as
-Copilot's, fixed in P0; see the harness-specific sections below and each
-build_*_session_digest()'s docstring for what is shared vs. harness-specific
-and why).
+"""Extract a bounded, redacted conversation digest from a Copilot CLI,
+Claude Code, or VS Code Copilot Chat session -- all three harnesses share
+this module (P0b: the Claude Code path had the identical "reviewer sees no
+transcript" defect as Copilot's, fixed in P0; see the harness-specific
+sections below and each build_*_session_digest()'s docstring for what is
+shared vs. harness-specific and why).
+
+Three harnesses, two on-disk schemas, three resolution styles:
+
+  Copilot CLI     sessionId  -> ~/.copilot/session-state/<id>/events.jsonl
+                  parsed by summarize_events (dotted `<noun>.<verb>` types)
+  Claude Code     transcript_path handed over directly
+                  parsed by summarize_claude_events (bare-word types)
+  VS Code chat    transcript_path handed over directly
+                  parsed by summarize_events -- SAME schema as Copilot CLI
+
+The VS Code path adds no parser and no resolver: it is Claude's resolution
+paired with Copilot's parser. What it DOES add is detect_transcript_format,
+because VS Code and Claude Code share a hook-registration file and are
+therefore not separable by which config invoked the script -- see that
+function's docstring for the measurement and the trap it defuses.
 
 Copilot CLI's `sessionEnd` hook passes a JSON payload on stdin shaped like:
 
@@ -16,9 +31,11 @@ learns the session's id. The full conversation lives separately, in
 line, keys `data`, `id`, `parentId`, `timestamp`, `type`; verified against
 the real event schema written by Copilot CLI 1.0.75, both interactively and
 in this project's own probe sessions -- `event["data"]["content"]` for
-`user.message` / `assistant.message` was always a plain string across the
-corpus checked). Before this module, `copilot-session-review.sh` never read
-stdin at all, so the reviewer it spawns had zero information about what
+`user.message` / `assistant.message` was a plain string in 2,729 of 2,729
+such events across the 94 local sessions that have an `events.jsonl`, with
+no other type observed at all). Before this module,
+`copilot-session-review.sh` never read stdin at all, so the reviewer it
+spawns had zero information about what
 happened in the session it was asked to review -- a paid model call that,
 by construction, could never learn anything (this project's ninth instance
 of "a component that exits 0 while doing nothing").
@@ -78,15 +95,18 @@ unrelated purpose of full-text search indexing):
     harness-injected synthetic turns like "Continue from where you left
     off." -- not something the human typed).
   - `message.content` for `type: "user"` is EITHER a plain string (real
-    human-typed text, e.g. `"continue"`) OR a list of content blocks --
-    observed block `type`s: `"text"` (real text) and `"tool_result"` (a
-    tool's output being fed back to the model, not something a human
-    wrote). For `type: "assistant"` it is ALWAYS a list of blocks --
-    observed: `"thinking"` (internal reasoning, never shown to the human),
-    `"text"` (the actual reply), and `"tool_use"` (a tool invocation, not
-    prose). Confirmed empirically across the corpus on this machine
-    (1,029 user/assistant lines sampled): user content was `str` or
-    `list`, assistant content was always `list`, never `str`.
+    human-typed text, e.g. `"continue"`) OR a list of content blocks; for
+    `type: "assistant"` it is a list of blocks. Re-measured over the whole
+    local corpus (702 files, 58,124 user/assistant lines): content was
+    `str` 4,839 times and `list` 53,285 times -- 58,124/58,124 one of the
+    two -- and every one of the 53,305 list elements was a dict.
+    Observed block `type`s, with counts: `tool_use` 16,778,
+    `tool_result` 16,764, `thinking` 10,152, `text` 9,583, `fallback` 26,
+    `image` 2. The earlier version of this paragraph named only
+    text/tool_result/thinking/tool_use and called that "the observed
+    block set"; `fallback` and `image` disprove it, so the block-type set
+    is explicitly NOT treated as closed -- see UNKNOWN_SHAPE_THRESHOLD for
+    what IS treated as closed and why the distinction matters.
   - `isSidechain: true` lines are subagent-internal turns (none were
     observed on this machine, but the field exists in the schema
     `index-session.py` already handles) and `isMeta: true` lines are
@@ -180,6 +200,42 @@ OUTCOME_NO_CONVERSATION = "no-conversation"
 # that a transcript problem never fails the hook.
 EXIT_NO_CONVERSATION = 20
 
+# --- Schema-drift detection (C6) -----------------------------------------
+#
+# Both on-disk formats this module parses are third-party, undocumented and
+# unversioned. TOTAL breakage is already loud: zero extracted messages =>
+# OUTCOME_FAILURE => persist-failures.log => doctor.sh UNHEALTHY. PARTIAL
+# drift was not. Reproduced: a session where only `assistant.message`'s
+# `data.content` moves from a plain string to `[{"type": "text", ...}]`
+# loses EVERY assistant turn (5 of 5) and halves the digest (238 -> 93
+# bytes), while the exit code (0), persist.log and persist-failures.log are
+# byte-for-byte identical to a healthy run. The review still fires, still
+# costs a paid model call, and now reviews half a conversation -- a quieter
+# version of the same "exits 0 while doing nothing" defect this module was
+# written to fix.
+#
+# What is NOT used: a floor on messages-per-event. Measured across the 94
+# local Copilot sessions with an events.jsonl, the messages/events ratio is
+# min 0.0159, median 0.0571, max 0.1667, and no session has zero messages.
+# The drift above only moves a session from ~0.057 to ~0.028 -- comfortably
+# inside the healthy range, so any threshold that catches it also fires on
+# real sessions. A ratio detector is unshippable here.
+#
+# What IS used: a count of values whose SHAPE is one the schema has never
+# produced, with a threshold of one. That is justified only because the
+# shapes are perfectly stable in the corpora (see the module docstring):
+# Copilot `data["content"]` was `str` in 2,729/2,729 conversation events;
+# Claude `message["content"]` was `str` or `list` in 58,124/58,124
+# user/assistant lines, with all 53,305 list elements dicts. One occurrence
+# of anything else is therefore not noise, it is the format having changed.
+#
+# Deliberately NOT flagged: an unrecognised block `type` inside a Claude
+# content list. The local corpus already contains two (`fallback` x26,
+# `image` x2) that are legitimate and carry no prose, so that check has a
+# demonstrated false-positive rate; the block-type set is open, the
+# container shapes are closed.
+UNKNOWN_SHAPE_THRESHOLD = 1
+
 _SECRET_CATEGORIES = (
     "api_keys_and_tokens",
     "jwt_tokens",
@@ -256,16 +312,65 @@ def find_events_file(session_id: str, env: "dict[str, str] | None" = None) -> "P
     return candidate if candidate.is_file() else None
 
 
+class EventSummary(NamedTuple):
+    """(messages, total, unknown_shapes) from one transcript file.
+
+    `unknown_shapes` maps a JSON path (e.g. `data.content`) to how many
+    values at that path had a shape the schema has never produced. Empty on
+    every healthy session -- see UNKNOWN_SHAPE_THRESHOLD.
+    """
+
+    messages: "list[tuple[str, str]]"
+    total: int
+    unknown_shapes: "dict[str, int]"
+
+
+def describe_drift(unknown_shapes: "dict[str, int]", kept_messages: int) -> str:
+    """Render an unknown-shape tally as one loud, self-contained line.
+
+    Names the count, the path, and how many messages still came through --
+    the last of those is what tells a reader whether they are looking at a
+    total failure or the silent partial one, which is the whole point.
+    Returns "" when nothing drifted, so callers can test it as a boolean.
+    """
+    if not unknown_shapes:
+        return ""
+    where = ", ".join(
+        f"{count} at `{path}`" for path, count in sorted(unknown_shapes.items())
+    )
+    total = sum(unknown_shapes.values())
+    return (
+        f"SCHEMA DRIFT -- {total} value(s) of an unrecognised shape ({where}); "
+        f"only {kept_messages} message(s) extracted. The session transcript "
+        f"format has changed; the digest just produced is INCOMPLETE."
+    )
+
+
+def _drift_line(unknown_shapes: "dict[str, int]", kept_messages: int) -> str:
+    """describe_drift(), gated on UNKNOWN_SHAPE_THRESHOLD. Counts VALUES, not
+    distinct paths: one drifted value at one path must already trip it.
+    """
+    if sum(unknown_shapes.values()) < UNKNOWN_SHAPE_THRESHOLD:
+        return ""
+    return describe_drift(unknown_shapes, kept_messages)
+
+
 class TranscriptResult(NamedTuple):
-    """(digest, reason, outcome) -- see the OUTCOME_* constants.
+    """(digest, reason, outcome, drift) -- see the OUTCOME_* constants.
 
     Kept a NamedTuple rather than a bare tuple so `result.outcome` reads at
-    call sites while `digest, reason, outcome = ...` still works.
+    call sites while `digest, reason, outcome, drift = ...` still works.
+
+    `drift` is describe_drift()'s line, or "" when the transcript parsed
+    with no surprises. It is deliberately independent of `outcome`: drift
+    does NOT downgrade a usable digest to a failure (breaking a session over
+    it would be worse than the drift), it only demands to be seen.
     """
 
     digest: str
     reason: str
     outcome: str
+    drift: str = ""
 
 
 # Files Copilot CLI creates inside a session-state dir only once a turn
@@ -329,8 +434,8 @@ def _iter_events(events_path: Path):
                 continue
 
 
-def summarize_events(events_path: Path) -> "tuple[list[tuple[str, str]], int]":
-    """Return (ordered (role, content) messages, total parseable events seen).
+def summarize_events(events_path: Path) -> EventSummary:
+    """Return EventSummary(messages, total parseable events, unknown shapes).
 
     Only `user.message` / `assistant.message` events with a non-empty string
     `data.content` become messages -- every other event type (hook.*,
@@ -338,9 +443,16 @@ def summarize_events(events_path: Path) -> "tuple[list[tuple[str, str]], int]":
     conversation, and is skipped. `total` counts every line that parsed as
     JSON regardless of type, so a caller can distinguish "file was empty or
     entirely unparseable" from "file had events, just none worth reviewing".
+
+    A conversation event whose `data.content` is present but NOT a string is
+    counted as drift. An ABSENT `data.content`, and the empty string, are
+    not: 1,265 of the 2,729 local conversation events carry `""`, which is
+    ordinary (an assistant turn that only called tools says nothing), and
+    treating it as drift would fire on roughly half of all real sessions.
     """
     messages: "list[tuple[str, str]]" = []
     total = 0
+    unknown: "dict[str, int]" = {}
     for event in _iter_events(events_path):
         total += 1
         if not isinstance(event, dict):
@@ -350,10 +462,13 @@ def summarize_events(events_path: Path) -> "tuple[list[tuple[str, str]], int]":
         if event_type not in ("user.message", "assistant.message") or not isinstance(data, dict):
             continue
         content = data.get("content")
+        if content is not None and not isinstance(content, str):
+            unknown["data.content"] = unknown.get("data.content", 0) + 1
+            continue
         if isinstance(content, str) and content:
             role = "User" if event_type == "user.message" else "Assistant"
             messages.append((role, content))
-    return messages, total
+    return EventSummary(messages, total, unknown)
 
 
 def build_digest(messages: "list[tuple[str, str]]", max_chars: int = MAX_DIGEST_CHARS) -> str:
@@ -393,9 +508,11 @@ def build_copilot_session_digest(
 ) -> TranscriptResult:
     """Resolve + extract + redact in one call, for a Copilot CLI sessionId.
 
-    Returns TranscriptResult(digest, reason, outcome). `digest` is non-empty
-    only for OUTCOME_OK; otherwise `reason` explains why, and `outcome`
-    tells the caller WHICH log it belongs in:
+    Returns TranscriptResult(digest, reason, outcome, drift). `digest` is
+    non-empty only for OUTCOME_OK; otherwise `reason` explains why, and
+    `outcome` tells the caller WHICH log it belongs in. `drift` is set
+    independently of all three when the on-disk shapes stopped matching what
+    the corpus has ever produced -- see UNKNOWN_SHAPE_THRESHOLD:
 
       - OUTCOME_NO_CONVERSATION -- the session-state dir exists but the
         session never started a turn (see copilot_session_conversed for the
@@ -436,42 +553,56 @@ def build_copilot_session_digest(
             "", f"unavailable (events.jsonl not found under {state_dir})", OUTCOME_FAILURE
         )
 
-    messages, total = summarize_events(events_path)
+    messages, total, unknown = summarize_events(events_path)
+    drift = _drift_line(unknown, len(messages))
     if not messages:
         if total == 0:
             return TranscriptResult(
-                "", f"empty (0 parseable events in {events_path})", OUTCOME_FAILURE
+                "", f"empty (0 parseable events in {events_path})", OUTCOME_FAILURE, drift
             )
         return TranscriptResult(
             "",
             f"has no user/assistant messages ({total} other event(s) in {events_path})",
             OUTCOME_FAILURE,
+            drift,
         )
 
     digest = build_digest(messages, max_chars=max_chars)
-    return TranscriptResult(redact_secrets(digest), "", OUTCOME_OK)
+    return TranscriptResult(redact_secrets(digest), "", OUTCOME_OK, drift)
 
 
-def _claude_block_text(content) -> str:
+def _claude_block_text(content, unknown: "dict[str, int] | None" = None) -> str:
     """Extract only 'text' block content (or a plain string) from a Claude
     Code message's `content` field. Skips 'thinking', 'tool_use', and
     'tool_result' blocks entirely -- see this module's docstring for why.
+
+    When `unknown` is supplied, records shape drift into it: a `content`
+    that is neither `str` nor `list`, and any list element that is not a
+    dict. A block whose `type` is merely unfamiliar is NOT recorded --
+    `fallback` and `image` already occur legitimately in the local corpus.
     """
     if isinstance(content, str):
         return content
     if isinstance(content, list):
         parts = []
         for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
+            if not isinstance(block, dict):
+                if unknown is not None:
+                    key = "message.content[]"
+                    unknown[key] = unknown.get(key, 0) + 1
+                continue
+            if block.get("type") == "text":
                 text = block.get("text")
                 if isinstance(text, str) and text:
                     parts.append(text)
         return "\n".join(parts)
+    if content is not None and unknown is not None:
+        unknown["message.content"] = unknown.get("message.content", 0) + 1
     return ""
 
 
-def summarize_claude_events(transcript_path: Path) -> "tuple[list[tuple[str, str]], int]":
-    """Return (ordered (role, content) messages, total parseable events seen)
+def summarize_claude_events(transcript_path: Path) -> EventSummary:
+    """Return EventSummary(messages, total parseable events, unknown shapes)
     from a Claude Code session JSONL file.
 
     Only `type: "user"` / `type: "assistant"` lines with `message.role`
@@ -483,6 +614,7 @@ def summarize_claude_events(transcript_path: Path) -> "tuple[list[tuple[str, str
     """
     messages: "list[tuple[str, str]]" = []
     total = 0
+    unknown: "dict[str, int]" = {}
     for event in _iter_events(transcript_path):
         total += 1
         if not isinstance(event, dict):
@@ -498,10 +630,10 @@ def summarize_claude_events(transcript_path: Path) -> "tuple[list[tuple[str, str
         role = message.get("role")
         if role not in ("user", "assistant"):
             continue
-        text = _claude_block_text(message.get("content"))
+        text = _claude_block_text(message.get("content"), unknown)
         if text:
             messages.append(("User" if role == "user" else "Assistant", text))
-    return messages, total
+    return EventSummary(messages, total, unknown)
 
 
 def build_claude_session_digest(
@@ -514,8 +646,10 @@ def build_claude_session_digest(
     separate resolution step: Claude Code hands the file path directly, so
     this only needs to validate it exists and is readable before parsing.
 
-    Same TranscriptResult contract as build_copilot_session_digest, but this
-    path NEVER returns OUTCOME_NO_CONVERSATION, deliberately.
+    Same TranscriptResult contract as build_copilot_session_digest --
+    including `drift`, which is set on unrecognised container shapes without
+    downgrading the outcome -- but this path NEVER returns
+    OUTCOME_NO_CONVERSATION, deliberately.
 
     Copilot's `sessionEnd` fires for every session including ones that never
     took a turn -- that is what created the false-failure flood. Claude
@@ -548,18 +682,204 @@ def build_claude_session_digest(
             "", f"unavailable (transcript file not found: {path})", OUTCOME_FAILURE
         )
 
-    messages, total = summarize_claude_events(path)
+    messages, total, unknown = summarize_claude_events(path)
+    drift = _drift_line(unknown, len(messages))
     if not messages:
         if total == 0:
-            return TranscriptResult("", f"empty (0 parseable events in {path})", OUTCOME_FAILURE)
+            return TranscriptResult(
+                "", f"empty (0 parseable events in {path})", OUTCOME_FAILURE, drift
+            )
         return TranscriptResult(
             "",
             f"has no user/assistant text content ({total} other event(s) in {path})",
             OUTCOME_FAILURE,
+            drift,
         )
 
     digest = build_digest(messages, max_chars=max_chars)
-    return TranscriptResult(redact_secrets(digest), "", OUTCOME_OK)
+    return TranscriptResult(redact_secrets(digest), "", OUTCOME_OK, drift)
+
+
+# --- VS Code Copilot Chat path (third harness) ---------------------------
+#
+# VS Code's chat hooks hand over a `transcript_path` exactly like Claude
+# Code's Stop hook does (measured 2026-07-28, VS Code 1.130.0 /
+# GitHub.copilot-chat 0.58.0: present AND the file already existed on 11/11
+# hook invocations), but the file itself uses Copilot CLI's event
+# vocabulary, not Claude's tree shape. So the VS Code path is Claude's
+# RESOLUTION (a path, handed over, no lookup) with Copilot's PARSER
+# (summarize_events) -- which is why it needs neither a new resolver nor a
+# new parser, only the pairing.
+#
+# Measured over the 21 transcripts under
+# ~/.config/Code/User/workspaceStorage/*/GitHub.copilot-chat/transcripts/:
+# every one of the 2,573 typed lines carried one of `session.start`,
+# `user.message`, `assistant.turn_start`, `assistant.message`,
+# `assistant.turn_end`, `tool.execution_start`, `tool.execution_complete` --
+# the same `<noun>.<verb>` vocabulary summarize_events already speaks, and
+# it read them unmodified with unknown_shapes={}.
+#
+# WARNING, and it is load-bearing: VS Code documents this file as explicitly
+# NOT a stable API ("The transcript file format is not a stable hook API and
+# may change in future VS Code releases"), and the whole hook feature is
+# Preview. That is a WORSE footing than Copilot CLI's events.jsonl, which is
+# merely undocumented. summarize_events' unknown-shape canary
+# (UNKNOWN_SHAPE_THRESHOLD) is therefore not a nicety here, it is the only
+# thing standing between a format change and a silently halved digest.
+
+FORMAT_CLAUDE = "claude"
+FORMAT_VSCODE = "vscode"
+FORMAT_UNKNOWN = "unknown"
+
+# How many parseable lines detect_transcript_format() inspects before
+# deciding. Detection needs a handful of typed lines, not the whole file: a
+# 703-event transcript would otherwise be parsed twice on every hook, inside
+# a <100ms budget.
+_DETECT_MAX_LINES = 200
+
+
+def detect_transcript_format(path: Path, max_lines: int = _DETECT_MAX_LINES) -> str:
+    """Sniff whether a transcript file is Claude Code's or VS Code's shape.
+
+    Why this exists at all -- THE TRAP. VS Code's default
+    `chat.hookFilesLocations` includes `~/.claude/settings.json`
+    (<https://code.visualstudio.com/docs/copilot/customization/hooks>), which
+    is the exact file install.sh tells users to merge our Claude Code hooks
+    into. So registering the Claude Code hooks ALSO registers them inside VS
+    Code, and `session-review.sh` then receives a VS Code `transcript_path`
+    while believing it is Claude's. Measured before this function existed:
+    parsing a VS Code transcript with summarize_claude_events yields zero
+    messages, which is OUTCOME_FAILURE -- a persist-failures.log line and a
+    paid, contentless review on EVERY VS Code turn (VS Code's `Stop` fires
+    per turn, not per session). The payloads are otherwise indistinguishable
+    (same field names, same event name), so the file's own content is the
+    only available discriminator.
+
+    The discriminator is the top-level `type` containing a ".". Chosen
+    because it is perfectly separating on both real corpora on the machine
+    this was written on, not because it reads well:
+
+      - 330 real Claude Code transcripts under ~/.claude/projects/: 0 dotted
+        `type` values out of 82,444 typed lines. The 17 distinct values are
+        all bare words (`user`, `assistant`, `attachment`,
+        `queue-operation`, `file-history-snapshot`, ...).
+      - 21 real VS Code transcripts: 2,573 typed lines, 100% dotted, 0 bare.
+
+    Returns FORMAT_UNKNOWN when the file yields no typed lines at all, or
+    when it yields BOTH shapes (which no corpus produces and which would
+    mean something is writing into a transcript that is not one). Callers
+    must treat FORMAT_UNKNOWN as loud -- guessing a format for a file that
+    matches neither is how "reviewed half a conversation" happens quietly.
+    """
+    claude_hits = 0
+    vscode_hits = 0
+    seen = 0
+    for event in _iter_events(path):
+        if seen >= max_lines:
+            break
+        if not isinstance(event, dict):
+            continue
+        event_type = event.get("type")
+        if not isinstance(event_type, str) or not event_type:
+            continue
+        seen += 1
+        if "." in event_type:
+            vscode_hits += 1
+        else:
+            claude_hits += 1
+    if vscode_hits and not claude_hits:
+        return FORMAT_VSCODE
+    if claude_hits and not vscode_hits:
+        return FORMAT_CLAUDE
+    return FORMAT_UNKNOWN
+
+
+def build_vscode_session_digest(
+    transcript_path: str,
+    max_chars: int = MAX_DIGEST_CHARS,
+) -> TranscriptResult:
+    """Resolve + extract + redact for a VS Code Copilot Chat transcript_path.
+
+    Same TranscriptResult contract as the other two builders, and the same
+    deliberate omission as the Claude one: it NEVER returns
+    OUTCOME_NO_CONVERSATION. Copilot CLI needs that class because
+    `sessionEnd` fires for sessions that never took a turn and the
+    session-state dir exists regardless; VS Code hands over a path to a file
+    it has already written, and the spike measured the file present on 11/11
+    invocations -- including for an ask-only turn with no tool use, which
+    still produced a transcript. There is no measured benign
+    zero-message VS Code transcript, so inventing a benign class for one
+    would be inventing an excuse for a condition that has never been benign.
+    A transcript that parses to nothing stays loud.
+    """
+    if not transcript_path:
+        return TranscriptResult(
+            "", "unavailable (no transcript_path in Stop hook payload)", OUTCOME_FAILURE
+        )
+
+    path = Path(transcript_path)
+    if not path.is_file():
+        return TranscriptResult(
+            "", f"unavailable (transcript file not found: {path})", OUTCOME_FAILURE
+        )
+
+    messages, total, unknown = summarize_events(path)
+    drift = _drift_line(unknown, len(messages))
+    if not messages:
+        if total == 0:
+            return TranscriptResult(
+                "", f"empty (0 parseable events in {path})", OUTCOME_FAILURE, drift
+            )
+        return TranscriptResult(
+            "",
+            f"has no user/assistant messages ({total} other event(s) in {path})",
+            OUTCOME_FAILURE,
+            drift,
+        )
+
+    digest = build_digest(messages, max_chars=max_chars)
+    return TranscriptResult(redact_secrets(digest), "", OUTCOME_OK, drift)
+
+
+def build_path_session_digest(
+    transcript_path: str,
+    max_chars: int = MAX_DIGEST_CHARS,
+) -> TranscriptResult:
+    """Dispatch a transcript PATH to the builder its content calls for.
+
+    This is what `--harness auto` runs, and what session-review.sh uses, so
+    that a VS Code transcript arriving through the ~/.claude/settings.json
+    hook source (see detect_transcript_format) is parsed as what it is
+    instead of producing an empty review and a persist-failures.log line on
+    every VS Code turn.
+
+    An unrecognised format is a NAMED failure, never a fallback guess: it
+    reports the file and both shapes it failed to match, so the log line
+    says what actually happened rather than "no user/assistant text
+    content", which is what a wrong-parser run looks like.
+    """
+    if not transcript_path:
+        return TranscriptResult(
+            "", "unavailable (no transcript_path in Stop hook payload)", OUTCOME_FAILURE
+        )
+
+    path = Path(transcript_path)
+    if not path.is_file():
+        return TranscriptResult(
+            "", f"unavailable (transcript file not found: {path})", OUTCOME_FAILURE
+        )
+
+    detected = detect_transcript_format(path)
+    if detected == FORMAT_VSCODE:
+        return build_vscode_session_digest(transcript_path, max_chars=max_chars)
+    if detected == FORMAT_CLAUDE:
+        return build_claude_session_digest(transcript_path, max_chars=max_chars)
+    return TranscriptResult(
+        "",
+        f"unrecognised format ({path} matches neither Claude Code's "
+        "bare-word `type` schema nor VS Code's dotted-event schema)",
+        OUTCOME_FAILURE,
+    )
 
 
 def _log_failure(log_file: "str | None", component: str, reason: str) -> None:
@@ -573,6 +893,26 @@ def _log_failure(log_file: "str | None", component: str, reason: str) -> None:
         # persist-failures.log itself being unwritable is a separate,
         # already-fatal problem for the whole pipeline; nothing useful to
         # do here besides not crashing the transcript step over it.
+        pass
+
+
+def _log_drift(log_file: "str | None", component: str, drift: str) -> None:
+    """Append a schema-drift line to persist-failures.log.
+
+    Same file, same leading-ISO-timestamp shape as _log_failure, because
+    doctor.sh section 5 parses the first field of the last line as a
+    timestamp and flips STATUS on ANY non-empty content -- which is exactly
+    the outcome wanted here. It is deliberately NOT routed through
+    _log_failure: the session did not fail, and the line must not read as
+    though it did.
+    """
+    if not log_file:
+        return
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(f"{ts} {component}: {drift}\n")
+    except OSError:
         pass
 
 
@@ -617,13 +957,29 @@ def main(argv: "list[str] | None" = None) -> int:
         "identifier",
         nargs="?",
         default="",
-        help="Copilot: sessionId. Claude: transcript_path (from the Stop hook payload).",
+        help=(
+            "Copilot: sessionId. Claude/VS Code/auto: transcript_path (from "
+            "the Stop hook payload)."
+        ),
     )
     parser.add_argument(
         "--harness",
-        choices=("copilot", "claude"),
+        choices=("copilot", "claude", "vscode", "auto"),
         default="copilot",
-        help="which harness's schema to parse (default: copilot, for backward compatibility)",
+        help=(
+            "which harness's schema to parse (default: copilot, for backward "
+            "compatibility). `auto` takes a PATH and sniffs Claude vs VS Code "
+            "from the file's own `type` values -- see detect_transcript_format"
+        ),
+    )
+    parser.add_argument(
+        "--component",
+        default=None,
+        help=(
+            "name to attribute log lines to (default: derived from --harness). "
+            "Set it when the calling script's name does not match the parser "
+            "it asked for -- e.g. vscode-session-review.sh using --harness auto"
+        ),
     )
     parser.add_argument("--home", default=None, help="override for SL_COPILOT_HOME (Copilot only, testing)")
     parser.add_argument("--max-chars", type=int, default=MAX_DIGEST_CHARS)
@@ -643,10 +999,26 @@ def main(argv: "list[str] | None" = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    component = "session-review" if args.harness == "claude" else "copilot-session-review"
+    # The component name is what shows up in persist-failures.log, so it must
+    # name the hook script a human would go and look at -- not the parsing
+    # mode. That distinction only became necessary with `auto`, which BOTH
+    # session-review.sh and vscode-session-review.sh use: deriving the name
+    # from --harness would have every VS Code failure blame session-review.sh
+    # and send a reader to the wrong file. --harness picks the parser,
+    # --component names the caller, and the default keeps every existing
+    # call site's log lines byte-identical.
+    component = args.component or {
+        "claude": "session-review",
+        "auto": "session-review",
+        "vscode": "vscode-session-review",
+    }.get(args.harness, "copilot-session-review")
 
     try:
-        if args.harness == "claude":
+        if args.harness == "auto":
+            result = build_path_session_digest(args.identifier, max_chars=args.max_chars)
+        elif args.harness == "vscode":
+            result = build_vscode_session_digest(args.identifier, max_chars=args.max_chars)
+        elif args.harness == "claude":
             result = build_claude_session_digest(args.identifier, max_chars=args.max_chars)
         else:
             env = dict(os.environ)
@@ -658,6 +1030,13 @@ def main(argv: "list[str] | None" = None) -> int:
     except (RuntimeError, OSError) as exc:
         _log_failure(args.log_file, component, f"unavailable ({exc})")
         return 0
+
+    # Drift is reported FIRST and independently of the outcome, so it is
+    # recorded even when the same run also has something else to say. It
+    # never changes the exit code and never suppresses the digest: a changed
+    # transcript format must be seen, but must not break the session.
+    if result.drift:
+        _log_drift(args.log_file, component, result.drift)
 
     if result.outcome == OUTCOME_NO_CONVERSATION:
         _log_notice(args.notice_log, component, result.reason)

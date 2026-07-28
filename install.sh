@@ -144,6 +144,47 @@ if [[ -z "$SL_HOME" || -z "$SL_SCRIPTS" ]]; then
     exit 1
 fi
 
+# --- The ONE hook-template render, used by all five sites below ---
+#
+# Every hook template carries `__SL_SCRIPTS_DIR__` where $SL_SCRIPTS belongs,
+# and this file renders that in five places: writing the Copilot hook file,
+# comparing against the on-disk one to decide "up to date", printing the
+# ACTION REQUIRED block, and rendering the VS Code and Claude Code JSON.
+# README.md documents a sixth for users rendering by hand.
+#
+# That used to be five copies of
+# `sed "s|__SL_SCRIPTS_DIR__|${SL_SCRIPTS}|g"`, which interpolates the store
+# path UNESCAPED into sed's expression language. Measured end to end through
+# this script: a store under `/home/u/R&D/...` rendered
+# `/home/u/R__SL_SCRIPTS_DIR__D/...` and exited 0; `c\d` rendered as `cd` and
+# exited 0; `a|b` closed sed's own delimiter and aborted the install
+# half-done. The first two are the signature defect this project exists to
+# eliminate -- a hook file that is valid JSON, names a path that does not
+# exist, and is reported as installed.
+#
+# lib/render-template.py is a literal (metacharacter-free) replacement and
+# carries the full rationale. One definition, not five, so a sixth site
+# cannot drift: see tests/test-hook-template-render.sh.
+RENDER_TEMPLATE_PY="${SCRIPT_DIR}/scripts/lib/render-template.py"
+if [[ ! -f "$RENDER_TEMPLATE_PY" ]]; then
+    echo "Error: ${RENDER_TEMPLATE_PY} not found" >&2
+    exit 1
+fi
+
+# $SL_SCRIPTS goes in on STDIN, never as an argument. python3 is a NATIVE
+# Windows binary under Git Bash (sed was an MSYS one), so MSYS auto-converts
+# POSIX-looking argv values crossing into it: passing it as argv rewrote
+# `/c/Users/.../scripts` to `C:/Users/.../scripts` in the rendered hook file.
+# Both name the same directory, but sl_check_hook_fresh() in lib/config.sh
+# compares that command TEXTUALLY against the resolved scripts dir, so the
+# changed spelling makes a correctly-installed hook look stale forever.
+# Caught by windows-latest CI, on tests/test-install-paths.sh. An env var
+# would be converted too; see render-template.py for why the per-process
+# suppression switches are not an option either.
+render_hook_template() {
+    printf '%s' "$SL_SCRIPTS" | python3 "$RENDER_TEMPLATE_PY" "$1"
+}
+
 echo "Install target (resolved by paths.py): ${SL_HOME}"
 echo ""
 
@@ -210,6 +251,7 @@ SCRIPTS=(
     "curator-run.sh"
     "self-learning-health.sh"
     "copilot-session-review.sh"
+    "vscode-session-review.sh"
     "inject-agents-md.py"
     "coach-rules-eval.py"
     "coach-export-read.py"
@@ -361,8 +403,17 @@ if [[ -d "${HOME}/.copilot" ]]; then
     #   not ours     -- never mentions our script. Do NOT overwrite someone
     #                   else's hook file; warn loudly, twice (here and in the
     #                   final summary), with the exact content to merge.
+    # Rendered to a temporary file and moved into place, never straight into
+    # $COPILOT_HOOK_DST: a redirect truncates the destination BEFORE the
+    # renderer runs, so a render that fails left a zero-byte hook file behind
+    # -- and the "up to date" comparison below then matched empty against
+    # empty and reported it as current on every subsequent install. Observed
+    # while writing tests/test-hook-template-render.sh, with the `a|b` store
+    # path that made sed exit non-zero.
     _render_copilot_hook() {
-        sed "s|__SL_SCRIPTS_DIR__|${SL_SCRIPTS}|g" "$COPILOT_HOOK_SRC" > "$COPILOT_HOOK_DST"
+        local tmp="${COPILOT_HOOK_DST}.tmp.$$"
+        render_hook_template "$COPILOT_HOOK_SRC" > "$tmp"
+        mv "$tmp" "$COPILOT_HOOK_DST"
     }
     # Replace any absolute path immediately preceding one of our script names
     # with the template's placeholder. Basic (not -E) sed for portability
@@ -378,7 +429,7 @@ if [[ -d "${HOME}/.copilot" ]]; then
             _render_copilot_hook
             echo "  Rendered: copilot-hooks.json -> $COPILOT_HOOK_DST"
         fi
-    elif [[ "$(sed "s|__SL_SCRIPTS_DIR__|${SL_SCRIPTS}|g" "$COPILOT_HOOK_SRC")" == "$(cat "$COPILOT_HOOK_DST")" ]]; then
+    elif [[ "$(render_hook_template "$COPILOT_HOOK_SRC")" == "$(cat "$COPILOT_HOOK_DST")" ]]; then
         echo "  Up to date: $COPILOT_HOOK_DST (already points at ${SL_SCRIPTS})"
     elif [[ "$(_normalize_copilot_hook "$COPILOT_HOOK_DST")" == "$(cat "$COPILOT_HOOK_SRC")" ]]; then
         OLD_HOOK_PATH="$(sed -n 's#.*"bash": "bash \(.*\)/copilot-session-review\.sh".*#\1#p' "$COPILOT_HOOK_DST" | head -n 1)"
@@ -409,11 +460,56 @@ if [[ -d "${HOME}/.copilot" ]]; then
         echo "  !!! overwrite someone else's hook file. Copilot CLI sessions will"
         echo "  !!! NOT be reviewed until you merge this in by hand:"
         echo "  !!!"
-        sed "s|__SL_SCRIPTS_DIR__|${SL_SCRIPTS}|g" "$COPILOT_HOOK_SRC" | sed 's/^/  !!!   /'
+        render_hook_template "$COPILOT_HOOK_SRC" | sed 's/^/  !!!   /'
         echo "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
     fi
 else
     echo "  ~/.copilot not found — Copilot CLI not installed; skipping (re-run install.sh after installing it)"
+fi
+
+echo ""
+echo "Step 4c: VS Code Copilot Chat adapter (optional)..."
+
+# Rendered and written into the store, then printed -- exactly like the
+# Claude Code template in Step 7, and for the same reason: there is no file
+# this installer may safely write to register a VS Code hook. VS Code's hook
+# sources come from the `chat.hookFilesLocations` SETTING, and editing a
+# user's settings.json by hand from an installer is not something this
+# project does. So: render it, put it somewhere permanent, and print the one
+# setting the user has to add.
+VSCODE_HOOK_SRC="${SCRIPT_DIR}/config/vscode-hooks.json"
+VSCODE_HOOK_DST="${SL_HOME}/vscode-hooks.json"
+
+if [[ ! -f "$VSCODE_HOOK_SRC" ]]; then
+    # Loud, not silent -- same rule as the Claude template below: printing
+    # nothing here would read as "no VS Code step needed".
+    echo "  ACTION REQUIRED -- cannot render the VS Code hook JSON:"
+    echo "    missing template ${VSCODE_HOOK_SRC}"
+    echo "    VS Code Copilot Chat sessions will NOT be reviewed."
+else
+    VSCODE_HOOK_JSON="$(render_hook_template "$VSCODE_HOOK_SRC")"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo "[DRY RUN] render ${VSCODE_HOOK_SRC} -> ${VSCODE_HOOK_DST} (__SL_SCRIPTS_DIR__ -> ${SL_SCRIPTS})"
+    else
+        printf '%s\n' "$VSCODE_HOOK_JSON" > "$VSCODE_HOOK_DST"
+        chmod 644 "$VSCODE_HOOK_DST"
+        echo "  Rendered: vscode-hooks.json -> $VSCODE_HOOK_DST"
+    fi
+    echo ""
+    echo "  To review VS Code Copilot Chat sessions, add this to VS Code's"
+    echo "  settings.json (Preferences: Open User Settings (JSON)):"
+    echo ""
+    echo "      \"chat.hookFilesLocations\": {"
+    echo "        \"${VSCODE_HOOK_DST}\": true"
+    echo "      }"
+    echo ""
+    echo "  NOTE: VS Code ALSO reads ~/.claude/settings.json as a hook source by"
+    echo "  default, so once you complete the Claude Code step below, VS Code will"
+    echo "  run session-review.sh too. That is handled -- the review scripts detect"
+    echo "  which transcript format they were handed and parse it correctly -- but"
+    echo "  registering BOTH means two reviews per VS Code turn. Pick one:"
+    echo "    * Claude Code hooks only (nothing more to do; VS Code reuses them), or"
+    echo "    * this file, plus \"~/.claude/settings.json\": false in the same setting."
 fi
 
 echo ""
@@ -491,31 +587,37 @@ echo ""
 echo "NEXT STEP (Claude Code only): Register hooks in ~/.claude/settings.json"
 echo "This is Claude Code's own config directory (not this project's store)."
 echo ""
-echo "Add the following to your settings.json (merge with existing hooks):"
-echo ""
-echo '{'
-echo '  "hooks": {'
-echo '    "PostToolUse": ['
-echo '      {'
-echo '        "matcher": "",'
-echo "        \"command\": \"bash ${SL_SCRIPTS}/turn-counter.sh\","
-echo '        "timeout": 3000'
-echo '      }'
-echo '    ],'
-echo '    "Stop": ['
-echo '      {'
-echo '        "matcher": "",'
-echo "        \"command\": \"bash ${SL_SCRIPTS}/session-review.sh\","
-echo '        "timeout": 10000'
-echo '      },'
-echo '      {'
-echo '        "matcher": "",'
-echo "        \"command\": \"bash ${SL_SCRIPTS}/index-session.sh\","
-echo '        "timeout": 15000'
-echo '      }'
-echo '    ]'
-echo '  }'
-echo '}'
+
+# The JSON below is RENDERED from config/settings-hooks.json, never hand-rolled
+# here. A hand-rolled second copy is what produced the A1 defect: this block
+# printed the flat {matcher, command, timeout} schema that Claude Code silently
+# ignores, with millisecond timeouts in a field Claude Code reads as seconds,
+# while the template it was supposed to mirror was correct in both respects.
+# Pasting it registered nothing, and a hook that was never registered is
+# indistinguishable from a working one until sessions quietly stop being
+# reviewed. One definition, substituted -- exactly like copilot-hooks.json.
+CLAUDE_HOOK_SRC="${SCRIPT_DIR}/config/settings-hooks.json"
+CLAUDE_HOOK_DST="${SL_HOME}/settings-hooks.json"
+
+if [[ ! -f "$CLAUDE_HOOK_SRC" ]]; then
+    # Loud, not silent: without the template there is nothing correct to print,
+    # and printing nothing would read as "no Claude Code step needed".
+    echo "ACTION REQUIRED -- cannot render the Claude Code hook JSON:"
+    echo "  missing template ${CLAUDE_HOOK_SRC}"
+    echo "  Claude Code hooks are NOT registered; sessions will not be reviewed."
+else
+    CLAUDE_HOOK_JSON="$(render_hook_template "$CLAUDE_HOOK_SRC")"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo "[DRY RUN] render ${CLAUDE_HOOK_SRC} -> ${CLAUDE_HOOK_DST} (__SL_SCRIPTS_DIR__ -> ${SL_SCRIPTS})"
+    else
+        printf '%s\n' "$CLAUDE_HOOK_JSON" > "$CLAUDE_HOOK_DST"
+        chmod 644 "$CLAUDE_HOOK_DST"
+    fi
+    echo "Merge the following into your settings.json (also written to"
+    echo "${CLAUDE_HOOK_DST}, so you do not need this checkout to copy it):"
+    echo ""
+    printf '%s\n' "$CLAUDE_HOOK_JSON"
+fi
 echo ""
 echo "Optional: Add weekly curator cron job:"
 echo "  0 3 * * 0 bash ${SL_SCRIPTS}/curator-run.sh >> ${SL_LOGS}/curator/cron.log 2>&1"

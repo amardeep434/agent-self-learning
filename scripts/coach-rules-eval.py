@@ -96,6 +96,7 @@ refused by its adapter's `_pin()` check rather than silently misread.
 from __future__ import annotations
 
 import json
+import math
 import re
 import sqlite3
 import sys
@@ -183,56 +184,24 @@ UNSUPPORTED_REASONS = {
     # -- GENUINELY UNREACHABLE (1)
     "no-devcontainer": "genuinely unreachable, and the only entry in this "
         "table for which that is true. NOT because of requiresIdeContext: "
-        "because upstream's own computeDevcontainerStats opens with "
-        "sessions.filter(s => VSCODE_HARNESSES.has(asStr(s.harness))), "
-        "VSCODE_HARNESSES = {'VS Code','VS Code Insiders','Local Agent',"
-        "'Local Agent (Insiders)'} [upstream src/core/dsl/interpreter.ts:"
-        "579-583]. For a CLI harness the scored population is empty INSIDE "
+        "because VSCODE_HARNESSES = {'VS Code','VS Code Insiders','Local "
+        "Agent','Local Agent (Insiders)'} [upstream "
+        "src/core/dsl/interpreter.ts:579] and upstream's own "
+        "computeDevcontainerStats opens with sessions.filter(s => "
+        "VSCODE_HARNESSES.has(asStr(s.harness))) [:585]. For a CLI harness "
+        "-- upstream's own parsers return 'GitHub Copilot CLI' [upstream "
+        "src/core/parser-vscode-cli.ts:29] and 'Claude' [upstream "
+        "src/core/parser-claude.ts:75], neither in that set -- the scored "
+        "population is empty INSIDE "
         "UPSTREAM'S OWN FUNCTION, by a hardcoded harness gate, before any "
-        "field of ours is consulted. It additionally needs "
-        "session.hasDevcontainer and toolConfirmations[].isTerminal, which "
-        "no CLI emits",
-
-    # -- REACHABLE, NOT YET BUILT. Each names the work, not a missing input.
-    "broken-flow-state": "reachable; deferred, cost stated. Needs "
-        "flowScoreStats: a four-component weighted per-session score "
-        "(rapid-followup rate 40%, median-latency band 30%, duration band "
-        "15%, request density 15%) with hardcoded breakpoints, bucketed per "
-        "day into a lowScoreRate [upstream src/core/analyzer-flow.ts:41 "
-        "computeSessionFlowScore; ~100 of that file's 275 lines]. Every "
-        "INPUT is already captured (request timestamps, session duration, "
-        "request counts) -- this is a ~150-line analyzer port with its own "
-        "test surface, not a data gap",
-
-    "no-file-context": "reachable; deliberately not shipped under THIS rule "
-        "id. Upstream's referencedFiles here means context the HUMAN "
-        "attached to the prompt, and Copilot CLI records exactly that as "
-        "user.message.data.attachments [measured over 62 local Copilot "
-        "sessions: 5 of 156 user.message events carry attachments, so the "
-        "rule would fire]. But telemetry.py populates referencedFiles from "
-        "TOOL ARGUMENTS, mirroring upstream's own CLI parser, and four "
-        "shipped adapters depend on that definition. Answering under "
-        "upstream's rule id with a different input is exactly the drift "
-        "_pin() exists to prevent. This wants a locally-named signal with "
-        "its own suggestion text, not a redefinition of a vendored rule",
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        "field of ours is consulted. That gate is the WHOLE reason. An "
+        "earlier version of this entry padded it with two claims that are "
+        "FALSE and were removed 2026-07-26: that the rule additionally needs "
+        "toolConfirmations[].isTerminal and session.hasDevcontainer 'which "
+        "no CLI emits'. scripts/lib/telemetry.py:705 populates isTerminal, "
+        "and upstream derives hasDevcontainer from cwd, editedFiles and "
+        "referencedFiles [upstream src/core/parser-shared.ts:429-449] -- the "
+        "last two of which this project captures",
 }
 
 
@@ -266,7 +235,9 @@ def _join_continuations(text):
 # memory file, so a suggestion naming a nonexistent command or mode is not a
 # cosmetic problem -- it is wrong advice, persisted. Two vendored rules have
 # this problem, and it is the ONLY honest objection to evaluating them (the
-# reasons previously recorded were about data, and were false).
+# reasons previously recorded were about data, and were false). A third,
+# no-file-context, joined them on 2026-07-26 for the same reason: its
+# suggestion names `#file` and "the editor".
 #
 # Skipping the rules would discard a real finding to avoid a text problem.
 # Emitting upstream's text would persist bad advice. So the finding ships and
@@ -293,6 +264,11 @@ SUGGESTION_OVERRIDES = {
         "neither CLI has. These were short questions that spent a full "
         "agentic turn and produced no tool call, no code and no file access; "
         "ask them somewhere cheaper.",
+    "no-file-context":
+        "ADAPTED FOR CLI: upstream says use #file or open the file in the "
+        "editor, and neither CLI has either. Name the paths in the prompt "
+        "instead, so the agent reads them before answering rather than "
+        "guessing at code it never opened.",
 }
 
 # coach-signals.py sanitizes every suggestion to this many characters before
@@ -885,6 +861,19 @@ def _epoch_ms(value):
     return None if epoch is None else epoch * 1000
 
 
+def _js_round(value):
+    """JavaScript's `Math.round`, which is NOT Python's `round`.
+
+    Python banker-rounds to even (round(0.5) == 0, round(2.5) == 2); JS
+    rounds a half UP, toward +Infinity. Upstream's flow score is
+    `Math.round(...)` and is then compared against a hardcoded `< 50` day
+    cut, so a session scoring exactly 49.5 lands on opposite sides of that
+    cut under the two rules. Transcribing the arithmetic means transcribing
+    the tie-break.
+    """
+    return math.floor(value + 0.5)
+
+
 def _thresholds(rule, *keys):
     t = rule["thresholds"]
     for key in keys:
@@ -1171,6 +1160,84 @@ def eval_speed_accept(rule, tel):
     if not count >= t["minOccurrences"]:
         return None
     return count
+
+
+def eval_broken_flow_state(rule, tel):
+    """Transcribes computeFlowScoreStats (dsl/interpreter.ts:410).
+
+    NOT analyzer-flow.ts's computeSessionFlowScore, which the skip reason
+    previously recorded here named, along with a four-component 40/30/15/15
+    weighting it does not have. The rule's detect block calls
+    `flowScoreStats(...)`, and the interpreter binds that name to
+    computeFlowScoreStats [upstream src/core/dsl/interpreter.ts:1560-1566];
+    computeSessionFlowScore is referenced from nowhere under src/core/rules/
+    or src/core/dsl/. The real score has TWO components
+    [upstream interpreter.ts:437-445] and is ~60 lines, not ~150.
+
+    `thresholds.shallowScore: 25` is declared in the vendored frontmatter and
+    never read: the per-day cut is a hardcoded `if (avg < 50)`
+    [upstream interpreter.ts:463]. Reading the threshold instead would
+    silently change behaviour, so it is left alone -- same asymmetry
+    low-markdown-ratio documents below.
+
+    ADAPTATION, the same one speed-accept above carries: `totalElapsed` is
+    populated for Copilot CLI turns only. Claude Code's transcript records no
+    per-response wall clock, so telemetry.py leaves the field None rather
+    than 0 (scripts/lib/telemetry.py:942), requests_with() drops every Claude
+    turn, and this rule therefore answers about Copilot sessions only.
+    """
+    _pin(rule, match="requestCount >= thresholds.sessionMinReqs",
+               check="flow.lowScoreRate > thresholds.lowScoreRate AND "
+                     "flow.totalDays >= thresholds.minDays")
+    t = _thresholds(rule, "rapidFollowupSec", "sessionMinReqs", "lowScoreRate", "minDays")
+    rapid_ms = t["rapidFollowupSec"] * 1000
+    turns = _require_records(
+        telemetry.requests_with(tel.turns, "timestamp", "totalElapsed"),
+        rule["id"], "timestamp/totalElapsed")
+    day_scores = defaultdict(list)
+    for session in telemetry.build_sessions(turns):
+        timed = []
+        for record in session["requests"]:
+            start = _epoch_ms(record.get("timestamp"))
+            elapsed = record.get("totalElapsed")
+            # Upstream gates BOTH fields on `> 0`. A request with no wall
+            # clock is EXCLUDED, never scored as an instantaneous response --
+            # which is also why the selection above asks for totalElapsed
+            # rather than defaulting it.
+            if start is None or start <= 0 or not elapsed or elapsed <= 0:
+                continue
+            timed.append((start, elapsed))
+        if len(timed) < t["sessionMinReqs"]:
+            continue
+        timed.sort(key=lambda pair: pair[0])
+        gaps = []
+        for (prev_start, prev_elapsed), (next_start, _) in zip(timed, timed[1:]):
+            # Math.max(0, ...): unlike speed-accept, which DISCARDS a negative
+            # gap as bad data, this helper CLAMPS it to zero, so out-of-order
+            # timestamps read as a rapid follow-up rather than as a dropped
+            # sample. The two helpers really do differ [upstream
+            # interpreter.ts:432 clamps, :393 requires gap >= 0]; preserved.
+            gaps.append(max(0, next_start - (prev_start + prev_elapsed)))
+        if not gaps:
+            continue
+        # sorted[Math.floor(len / 2)] is the UPPER median on an even-length
+        # list, not the mean of the two middles. Transcribed, not corrected.
+        ordered = sorted(gaps)
+        median = ordered[len(ordered) // 2]
+        rapid_rate = sum(1 for gap in gaps if gap <= rapid_ms) / len(gaps)
+        latency_score = max(0, 100 - median / 1000)  # penalty per second
+        score = _js_round(rapid_rate * 60 + min(latency_score, 40))
+        # Day bucket is the FIRST timed request's UTC date, per session.
+        day = datetime.fromtimestamp(timed[0][0] / 1000, tz=timezone.utc).date()
+        day_scores[day].append(score)
+    if not day_scores:
+        return None
+    fragmented = sum(1 for scores in day_scores.values()
+                     if sum(scores) / len(scores) < 50)
+    low_score_rate = fragmented / len(day_scores)
+    if not (low_score_rate > t["lowScoreRate"] and len(day_scores) >= t["minDays"]):
+        return None
+    return fragmented
 
 
 def eval_low_markdown_ratio(rule, tel):
@@ -1963,6 +2030,37 @@ def eval_agent_mode_for_asks(rule, tel):
     return matched
 
 
+def eval_no_file_context(rule, tel):
+    """Same predicate, same fields, as the tail of agent-mode-for-asks above.
+
+    The skip reason previously recorded here said upstream's
+    `referencedFiles` means "context the HUMAN attached", so answering under
+    this rule id from tool arguments would be a redefinition. That is true of
+    upstream's IDE parser and FALSE for a CLI harness: upstream's own CLI
+    parser fills the same field from tool arguments --
+    `FILE_REF_TOOLS = new Set(['view','grep','glob','rg','show_file'])`
+    [upstream src/core/parser-vscode-cli.ts:88] and
+    `if (FILE_REF_TOOLS.has(toolName) && typeof args.path === 'string')
+     turn.referencedFiles.add(args.path)` [:244] -- which is the set and the
+    source scripts/lib/telemetry.py:314 already mirrors. Decisively, this
+    project ALREADY ships that predicate: agent-mode-for-asks's vendored
+    match ends `length(referencedFiles) == 0 AND length(editedFiles) == 0`.
+    There is no redefinition to commit.
+    """
+    _pin(rule, match="referencedFiles.length == 0 AND editedFiles.length == 0",
+               check="ratio > thresholds.maxNoContextRate AND count > thresholds.minSample")
+    t = _thresholds(rule, "maxNoContextRate", "minSample")
+    turns = _require_records(
+        telemetry.requests_with(tel.turns, "referencedFiles", "editedFiles"),
+        rule["id"], "referencedFiles/editedFiles")
+    matched = sum(1 for record in turns
+                  if not record["referencedFiles"] and not record["editedFiles"])
+    ratio = matched / len(turns)
+    if not (ratio > t["maxNoContextRate"] and matched > t["minSample"]):
+        return None
+    return matched
+
+
 def eval_no_spec_driven_development(rule, tel):
     """Seven OR branches decide whether a session opened spec-driven.
 
@@ -2059,6 +2157,8 @@ TELEMETRY_ADAPTERS = {
     "no-plan-mode": eval_no_plan_mode,
     "agent-mode-for-asks": eval_agent_mode_for_asks,
     "no-spec-driven-development": eval_no_spec_driven_development,
+    "broken-flow-state": eval_broken_flow_state,
+    "no-file-context": eval_no_file_context,
 }
 
 

@@ -1,11 +1,4 @@
 {
-  "env": {
-    "SL_MEMORY_REVIEW_INTERVAL": "10",
-    "SL_SKILL_REVIEW_INTERVAL": "10",
-    "SL_REVIEW_ENABLED": "true",
-    "SL_REVIEW_MIN_TURNS": "5",
-    "SL_REVIEW_MAX_TURNS": "16"
-  },
   "hooks": {
     "PostToolUse": [
       {
@@ -25,13 +18,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash __SL_SCRIPTS_DIR__/session-review.sh",
+            "command": "bash __SL_SCRIPTS_DIR__/vscode-session-review.sh",
             "timeout": 15
-          },
-          {
-            "type": "command",
-            "command": "bash __SL_SCRIPTS_DIR__/index-session.sh",
-            "timeout": 10
           }
         ]
       }

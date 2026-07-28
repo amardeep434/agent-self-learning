@@ -13,7 +13,7 @@ for _v in SL_HOME SL_STATE_DIR SL_SKILLS_DIR SL_MEMORY_DIR SL_LOG_DIR SL_SEARCH_
           SL_COACH_RULES_ENABLED SL_COACH_EXPORT_ENABLED SL_COACH_EXPORT_PATH \
           SL_COACH_RULES_DIR SL_MEMORY_REVIEW_INTERVAL SL_SKILL_REVIEW_INTERVAL \
           SL_REVIEW_MIN_TURNS SL_REVIEW_MAX_TURNS SL_COPILOT_REVIEW_MODEL \
-          SL_COPILOT_MAX_AI_CREDITS \
+          SL_COPILOT_MAX_AI_CREDITS SL_VSCODE_REVIEWER \
           SL_SKILLOPT_ENABLED SL_SKILLOPT_REPO SL_SKILLOPT_RUN_CONFIRMED \
           SL_REVIEW_ENABLED; do
     if [[ -n "${!_v+x}" ]]; then
@@ -144,6 +144,15 @@ SL_COPILOT_REVIEW_MODEL="${SL_COPILOT_REVIEW_MODEL:-}"
 # 30 is the minimum the CLI accepts and anything lower is rejected by
 # `copilot` itself, so this validates the value before it reaches argv.
 SL_COPILOT_MAX_AI_CREDITS="${SL_COPILOT_MAX_AI_CREDITS:-}"
+
+# Which CLI reviews a VS Code Copilot Chat session. VS Code Copilot Chat has
+# no headless CLI of its own, so the review has to run in one of the two
+# this project already drives. Empty = auto-detect, preferring `copilot`
+# (a VS Code Copilot Chat user has a Copilot entitlement by construction,
+# and the transcript being reviewed is Copilot's own) then `claude`. Only
+# those two literals are accepted; vscode-session-review.sh rejects anything
+# else with a reason on stderr rather than passing it to argv.
+SL_VSCODE_REVIEWER="${SL_VSCODE_REVIEWER:-}"
 SL_SKILLOPT_ENABLED="${SL_SKILLOPT_ENABLED:-false}"
 SL_SKILLOPT_REPO="${SL_SKILLOPT_REPO:-}"
 SL_SKILLOPT_RUN_CONFIRMED="${SL_SKILLOPT_RUN_CONFIRMED:-false}"
@@ -163,7 +172,7 @@ export SL_HOME SL_STATE_DIR SL_SKILLS_DIR SL_MEMORY_DIR SL_LOG_DIR SL_SEARCH_DB 
        SL_COACH_RULES_DIR SL_COACH_SIGNALS_FILE \
        SL_MEMORY_REVIEW_INTERVAL SL_SKILL_REVIEW_INTERVAL \
        SL_REVIEW_MIN_TURNS SL_REVIEW_MAX_TURNS SL_COPILOT_REVIEW_MODEL \
-       SL_COPILOT_MAX_AI_CREDITS \
+       SL_COPILOT_MAX_AI_CREDITS SL_VSCODE_REVIEWER \
        SL_SKILLOPT_ENABLED SL_SKILLOPT_REPO SL_SKILLOPT_RUN_CONFIRMED \
        SL_REVIEW_ENABLED
 
