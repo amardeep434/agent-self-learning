@@ -122,6 +122,16 @@ def main():
                 # Sanitized like every other field -- still untrusted input.
                 "scope": sanitize_text(sig.get("scope", "")),
                 "count": int(sig.get("count", 0) or 0),
+                # Route A counts matched records inside OUR telemetry window,
+                # which telemetry.MAX_SESSIONS caps -- there is no total the
+                # count is a fraction OF, so there is no honest denominator to
+                # publish. Emitted as 0 (the renderer's "show no prevalence"
+                # value) rather than omitted, so the key is uniform across
+                # routes exactly as `scope` already is. Never fill this in
+                # from a session count: it would invite the reviewer to
+                # compare a Route A rate against a Route B one measured over
+                # Coach's entire corpus.
+                "denominator": 0,
                 "source": sig.get("source", "unknown"),
             }
 
@@ -140,6 +150,11 @@ def main():
                 # emitted, empty, so the renderer stays uniform across routes.
                 "scope": sanitize_text(sig.get("scope", "")),
                 "count": int(sig.get("count", 0) or 0),
+                # The export's own `totals.requests` (see coach-export-read.py):
+                # the denominator `count` is a fraction of. Kept as an int and
+                # NOT passed through sanitize_text -- that returns a string,
+                # and the renderer does arithmetic on this.
+                "denominator": int(sig.get("denominator", 0) or 0),
                 "source": sig.get("source", "unknown"),
             }
 
