@@ -28,6 +28,8 @@
 # emit, and a genuine user customization that must NOT be normalized away.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib/hook-command.sh
+source "${SCRIPT_DIR}/tests/lib/hook-command.sh"
 FAILURES=0
 check() { if [[ "$2" == "$3" ]]; then echo "PASS: $1"; else echo "FAIL: $1 (expected '$2', got '$3')"; FAILURES=$((FAILURES+1)); fi; }
 
@@ -189,16 +191,18 @@ done
 hook="${TMP}/home-space/.copilot/hooks/self-learning.json"
 check "final hook parses as JSON" "yes" \
     "$(python3 -c 'import json,sys; json.load(open(sys.argv[1])); print("yes")' "$hook" 2>/dev/null || echo no)"
+# Tokenize in Python (quoting-aware), but test EXISTENCE in bash.
+#
+# MEASURED: doing the existence check in Python failed on both windows-latest
+# cells (runs 30376530556 and 30379317060) while every bash `[[ -f ]]` check in
+# this same file passed. The path is built by bash and is MSYS-form
+# (/tmp/... or /c/Users/...); python3 under Git Bash is a NATIVE Windows binary
+# and os.path.isfile() cannot resolve that spelling. Same boundary that forced
+# render-template.py to take its replacement on stdin -- see its header.
+_hook_cmd="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["hooks"]["sessionEnd"][0]["bash"])' "$hook" 2>/dev/null || true)"
+_hook_script="$(sl_hook_script_path "$_hook_cmd")"
 check "final hook names an existing script" "yes" \
-    "$(python3 - "$hook" <<'PY' 2>/dev/null || echo no
-import json, os, shlex, sys
-# shlex, not cmd[len("bash "):]: the hook command shell-quotes its path (see
-# tests/test-hook-command-quoting.sh), so the fixed-width slice used to leave
-# an apostrophe on both ends and report a correct hook as missing.
-cmd = json.load(open(sys.argv[1]))["hooks"]["sessionEnd"][0]["bash"]
-print("yes" if os.path.isfile(shlex.split(cmd, posix=True)[-1]) else "no")
-PY
-)"
+    "$([[ -n "$_hook_script" && -f "$_hook_script" ]] && echo yes || echo no)"
 
 if [[ $FAILURES -eq 0 ]]; then
     echo "RESULT: PASS"
