@@ -81,6 +81,28 @@ check "run block explains gate" "yes" "$(grep -q 'SL_SKILLOPT_RUN_CONFIRMED' "$T
 OUT=$(SL_SKILLOPT_ENABLED=true SL_SKILLOPT_REPO="$TMP/skillopt" SL_SKILLOPT_RUN_CONFIRMED=true run run)
 check "run passes when confirmed" "RUNSLEEP:run" "$OUT"
 
+# 5b) 'schedule' is gated too. Upstream's skillopt_sleep/scheduler.py installs a
+# managed crontab block (Unix) or Scheduled Task (Windows) that runs `run`
+# NIGHTLY, so it is strictly more dangerous than a single `run`. It passed
+# through ungated until 2026-07-28: `skillopt-run.sh schedule --backend claude`
+# installed a recurring paid job without SL_SKILLOPT_RUN_CONFIRMED ever being set.
+OUT=$(SL_SKILLOPT_ENABLED=true SL_SKILLOPT_REPO="$TMP/skillopt" run schedule --backend claude)
+check "schedule blocked without confirm" "" "$OUT"
+check "schedule block explains gate" "yes" \
+    "$(grep -q 'SL_SKILLOPT_RUN_CONFIRMED' "$TMP/err" && echo yes || echo no)"
+check "schedule block says it is nightly" "yes" \
+    "$(grep -qi 'nightly' "$TMP/err" && echo yes || echo no)"
+OUT=$(SL_SKILLOPT_ENABLED=true SL_SKILLOPT_REPO="$TMP/skillopt" SL_SKILLOPT_RUN_CONFIRMED=true run schedule)
+check "schedule passes when confirmed" "RUNSLEEP:schedule" "$OUT"
+
+# 5c) The cheap verbs must NOT be gated -- dry-run in particular is the command
+# the operator is told to run in order to measure cost BEFORE confirming, so
+# gating it would make the gate unsatisfiable.
+for verb in status harvest dry-run adopt; do
+    OUT=$(SL_SKILLOPT_ENABLED=true SL_SKILLOPT_REPO="$TMP/skillopt" run "$verb")
+    check "'$verb' is not gated" "RUNSLEEP:$verb" "$OUT"
+done
+
 # --- The pip route (upstream's own fallback) --------------------------------
 
 # 6) No checkout, but `skillopt-sleep` on PATH: the wrapper must USE it. Before
