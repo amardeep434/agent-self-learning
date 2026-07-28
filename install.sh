@@ -171,8 +171,18 @@ if [[ ! -f "$RENDER_TEMPLATE_PY" ]]; then
     exit 1
 fi
 
+# $SL_SCRIPTS goes in on STDIN, never as an argument. python3 is a NATIVE
+# Windows binary under Git Bash (sed was an MSYS one), so MSYS auto-converts
+# POSIX-looking argv values crossing into it: passing it as argv rewrote
+# `/c/Users/.../scripts` to `C:/Users/.../scripts` in the rendered hook file.
+# Both name the same directory, but sl_check_hook_fresh() in lib/config.sh
+# compares that command TEXTUALLY against the resolved scripts dir, so the
+# changed spelling makes a correctly-installed hook look stale forever.
+# Caught by windows-latest CI, on tests/test-install-paths.sh. An env var
+# would be converted too; see render-template.py for why the per-process
+# suppression switches are not an option either.
 render_hook_template() {
-    python3 "$RENDER_TEMPLATE_PY" "$1" "$SL_SCRIPTS"
+    printf '%s' "$SL_SCRIPTS" | python3 "$RENDER_TEMPLATE_PY" "$1"
 }
 
 echo "Install target (resolved by paths.py): ${SL_HOME}"

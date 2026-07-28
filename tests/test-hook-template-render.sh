@@ -42,7 +42,7 @@ check "renderer exists" "yes" "$([[ -f "$RENDERER" ]] && echo yes || echo no)"
 
 for tpl in "${TEMPLATES[@]}"; do
     src="${SCRIPT_DIR}/config/${tpl}"
-    out="$(python3 "$RENDERER" "$src" "$NASTY")"
+    out="$(printf '%s' "$NASTY" | python3 "$RENDERER" "$src")"
     check "render ${tpl}: no unsubstituted placeholder" "0" \
         "$(printf '%s' "$out" | grep -c '__SL_SCRIPTS_DIR__' || true)"
     # A backslash in the path is only correct if it is JSON-escaped, so the
@@ -73,7 +73,7 @@ done
 ORDINARY='/home/u/store/scripts'
 for tpl in "${TEMPLATES[@]}"; do
     src="${SCRIPT_DIR}/config/${tpl}"
-    python3 "$RENDERER" "$src" "$ORDINARY" > "${TMP}/new-${tpl}"
+    printf '%s' "$ORDINARY" | python3 "$RENDERER" "$src" > "${TMP}/new-${tpl}"
     sed "s|__SL_SCRIPTS_DIR__|${ORDINARY}|g" "$src" > "${TMP}/old-${tpl}"
     check "render ${tpl}: byte-identical to sed for an ordinary path" "yes" \
         "$(cmp -s "${TMP}/new-${tpl}" "${TMP}/old-${tpl}" && echo yes || echo no)"
@@ -84,37 +84,76 @@ done
 # Each of these would otherwise render a well-formed hook file naming a path
 # that cannot exist -- the failure mode this whole file is about.
 set +e
-python3 "$RENDERER" "${SCRIPT_DIR}/config/settings-hooks.json" "" >/dev/null 2>&1
+printf '%s' "" | python3 "$RENDERER" "${SCRIPT_DIR}/config/settings-hooks.json" >/dev/null 2>&1
 check "renderer rejects an empty scripts dir" "3" "$?"
-python3 "$RENDERER" "${TMP}/does-not-exist.json" "$ORDINARY" >/dev/null 2>&1
+printf '%s' "$ORDINARY" | python3 "$RENDERER" "${TMP}/does-not-exist.json" >/dev/null 2>&1
 check "renderer rejects a missing template" "3" "$?"
 printf '{"hooks":{}}\n' > "${TMP}/no-placeholder.json"
-python3 "$RENDERER" "${TMP}/no-placeholder.json" "$ORDINARY" >/dev/null 2>&1
+printf '%s' "$ORDINARY" | python3 "$RENDERER" "${TMP}/no-placeholder.json" >/dev/null 2>&1
 check "renderer rejects a template with no placeholder" "3" "$?"
+# The scripts dir must arrive on STDIN. Passing it as argv is what made
+# windows-latest red: python3 is a native Windows binary under Git Bash, so
+# MSYS rewrote /c/Users/... to C:/Users/... on the way in, silently changing
+# the path spelling written into the hook file. Refusing a second argument
+# means that form cannot quietly come back -- it fails the install instead.
+python3 "$RENDERER" "${SCRIPT_DIR}/config/settings-hooks.json" "$ORDINARY" </dev/null >/dev/null 2>&1
+check "renderer refuses the argv form MSYS would path-convert" "2" "$?"
 set -e
 
 # --- 4. install.sh, for real, into a store whose path carries all three ---
 #
 # The unit assertions above prove the renderer is literal; only a real install
-# proves install.sh actually USES it at every one of its five sites. Windows
-# cannot host this directory at all (`|` and `\` are reserved in NTFS names),
-# so probe rather than assume -- and say which case was skipped and why,
-# never skip silently.
-NASTY_DIR_NAME='R&D/a|b/c\d'
-PROBE="$(mktemp -d)"
-if mkdir -p "${PROBE}/${NASTY_DIR_NAME}" 2>/dev/null && [[ -d "${PROBE}/${NASTY_DIR_NAME}" ]]; then
-    CAN_MAKE_NASTY_DIR=yes
-else
-    CAN_MAKE_NASTY_DIR=no
-fi
-rm -rf "$PROBE"
+# proves install.sh actually USES it at every one of its five sites. Which
+# characters a store path can actually contain is platform-dependent, so the
+# path is assembled from the components this filesystem demonstrably supports
+# -- and every excluded one is named, with its reason, never skipped silently.
+#
+# The probe must confirm the directory it created IS the directory it asked
+# for, not merely that mkdir returned 0. First version of this file checked
+# only the exit status plus `[[ -d ]]`, and on windows-latest that passed
+# while lying: MSYS treats `\` as a SEPARATOR, so `mkdir -p 'c\d'` silently
+# created `c/d` -- two components -- and the `[[ -d 'c\d' ]]` test then went
+# through the same translation and agreed. The suite ran against a store that
+# was not where it thought, and failed. Listing the parent is what makes the
+# substitution visible.
+_component_survives() {
+    local probe created rc=0
+    probe="$(mktemp -d)"
+    if ! mkdir -p "${probe}/${1}" 2>/dev/null; then
+        rm -rf "$probe"
+        return 1
+    fi
+    # Exactly one entry, named exactly what we asked for. If `\` was eaten as
+    # a separator this reports the leading component instead.
+    created="$(ls -A "$probe")"
+    [[ "$created" == "$1" ]] || rc=1
+    rm -rf "$probe"
+    return "$rc"
+}
 
-if [[ "$CAN_MAKE_NASTY_DIR" != "yes" ]]; then
-    echo "SKIP: end-to-end install into a '${NASTY_DIR_NAME}' store — this"
-    echo "      filesystem refused to create that directory (expected on"
-    echo "      Windows: '|' and '\\' are reserved in NTFS names). The"
-    echo "      renderer assertions above still ran."
+NASTY_PARTS=()
+for _part in 'R&D' 'a|b' 'c\d'; do
+    if _component_survives "$_part"; then
+        NASTY_PARTS+=("$_part")
+    else
+        echo "SKIP-DETAIL: store path component '${_part}' — this filesystem"
+        echo "             cannot represent it (expected on Windows: '|' and"
+        echo "             '\\' are reserved / treated as a separator). It is"
+        echo "             excluded from the end-to-end store path below;"
+        echo "             the renderer assertions above still exercised it."
+    fi
+done
+# `:-` is required, not defensive noise: under `set -u`, bash 3.2 (which
+# macOS still ships, and macos-latest CI runs) treats `${arr[*]}` on an EMPTY
+# array as an unbound variable and aborts the suite.
+NASTY_DIR_NAME="$(IFS=/; printf '%s' "${NASTY_PARTS[*]:-}")"
+
+if [[ -z "$NASTY_DIR_NAME" ]]; then
+    echo "SKIP: end-to-end install into a metacharacter store — this"
+    echo "      filesystem could not represent ANY of the three characters."
+    echo "      The renderer assertions above still ran."
 else
+    echo "INFO: end-to-end store path component(s): ${NASTY_DIR_NAME}"
     TMP_HOME="${TMP}/home"
     STORE="${TMP_HOME}/${NASTY_DIR_NAME}/store"
     mkdir -p "${TMP_HOME}/.copilot"

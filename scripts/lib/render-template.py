@@ -66,8 +66,31 @@ stdout is written through sys.stdout.buffer: no encoding surprises, and no
 newline translation on Windows, so the template's own line endings pass
 through exactly as `sed` passed them through.
 
+THE SCRIPTS DIR ARRIVES ON STDIN, NEVER AS ARGV. This is load-bearing on
+Git Bash, and getting it wrong is a regression CI caught: `sed` is an MSYS
+binary, but python3 is a NATIVE Windows binary, and MSYS auto-converts any
+POSIX-looking value crossing that boundary. Passing the scripts dir as argv
+turned `/c/Users/RUNNER~1/.../store/scripts` into
+`C:/Users/RUNNER~1/.../store/scripts` -- still a real, working path, but a
+DIFFERENT SPELLING from the one sed used to write, which is what
+tests/test-install-paths.sh asserts on and, worse, what
+`sl_check_hook_fresh` in lib/config.sh matches TEXTUALLY to decide whether an
+installed hook is current. A changed spelling makes a correctly-installed
+hook look permanently stale: re-render every run, possibly a spurious
+ACTION REQUIRED.
+
+An environment variable is NOT an escape hatch -- MSYS converts those too
+(CI-confirmed for `AGENT_LEARNING_HOME`; see paths.py's `_to_cli_string`).
+`MSYS_NO_PATHCONV=1` / `MSYS2_ARG_CONV_EXCL=*` were explicitly rejected as a
+product fix in fix round D, and could not work here anyway: the template
+path argument still NEEDS conversion for a native Python to open it, so a
+blanket per-process switch would break the very argument it is meant to
+protect. stdin is a byte stream -- MSYS has no path conversion to apply to
+it -- so it is the one channel that carries the replacement through
+unaltered while argv conversion keeps working for the template path.
+
 Usage:
-    python3 render-template.py <template-file> <scripts-dir>
+    printf '%s' "$SL_SCRIPTS" | python3 render-template.py <template-file>
 
 Renders to stdout. Exits non-zero, loudly, on a missing template, an empty
 scripts dir, or a template that does not actually contain the placeholder --
@@ -94,14 +117,24 @@ def render(template_text: str, scripts_dir: str) -> str:
 
 
 def _main(argv: list[str]) -> int:
-    if len(argv) != 2:
+    # Exactly one argument, on purpose: a second (the scripts dir, as it used
+    # to be passed) must be a loud error, not a silently MSYS-converted path.
+    # See the module docstring.
+    if len(argv) != 1:
         print(
-            "usage: render-template.py <template-file> <scripts-dir>",
+            "usage: printf '%s' \"$SL_SCRIPTS\" | "
+            "render-template.py <template-file>",
             file=sys.stderr,
         )
         return 2
 
-    template_path, scripts_dir = argv
+    template_path = argv[0]
+
+    # Read as bytes: stdin carries the scripts dir exactly as bash wrote it,
+    # with no argv/env path conversion applied on any platform. The rstrip
+    # tolerates a caller using `echo` rather than `printf '%s'`, and matches
+    # the \r discipline every other bash<->python boundary here already has.
+    scripts_dir = sys.stdin.buffer.read().decode("utf-8").rstrip("\r\n")
 
     # Empty would render `bash /turn-counter.sh` -- a well-formed hook file
     # naming a path that cannot exist. Fail instead of emitting it.

@@ -99,8 +99,8 @@ never fire.
 To render it yourself without re-running the installer:
 
 ```bash
-python3 scripts/lib/render-template.py \
-    config/settings-hooks.json "$(python3 scripts/lib/paths.py get scripts)"
+printf '%s' "$(python3 scripts/lib/paths.py get scripts)" \
+    | python3 scripts/lib/render-template.py config/settings-hooks.json
 ```
 
 This is the same renderer `install.sh` calls, so you get exactly the bytes it
@@ -108,6 +108,11 @@ would have written. It replaced a `sed "s|__SL_SCRIPTS_DIR__|...|g"` one-liner
 that silently corrupted any store path containing `&`, `\` or `|` — see
 `scripts/lib/render-template.py` for what each one did. The same command
 renders `config/copilot-hooks.json` and `config/vscode-hooks.json`.
+
+The scripts directory is piped in rather than passed as an argument on
+purpose: on Git Bash, MSYS rewrites POSIX-looking *arguments* to native
+Windows form as they cross into `python3`, which would change the path
+spelling written into your hook file. Keep the pipe.
 
 `~/.claude/settings.json` is Claude Code's own config file, so *that* location
 is deliberately Claude-specific; the **script paths it invokes** are not, and
