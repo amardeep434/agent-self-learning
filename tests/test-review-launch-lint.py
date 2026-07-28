@@ -33,8 +33,24 @@ from pathlib import Path
 
 TESTS_DIR = Path(__file__).resolve().parent
 
-# A launch: `bash <something>/session-review.sh` or `.../copilot-session-review.sh`.
-LAUNCH_RE = re.compile(r"\bbash\s+\S*(?:copilot-)?session-review\.sh")
+# Every hook script that detaches a review pipeline. Named explicitly rather
+# than matched by a `(?:copilot-)?` style prefix group: that form silently
+# accepted `vscode-session-review.sh` too, which reads like a feature until
+# you notice the second half of this file -- there was nothing asserting that
+# each adapter is actually EXERCISED anywhere, so a whole suite could launch
+# through a variable, contribute zero matches, and leave the lint green.
+REVIEW_SCRIPTS = (
+    "session-review.sh",
+    "copilot-session-review.sh",
+    "vscode-session-review.sh",
+)
+
+# A launch: `bash <something>/<one of the review scripts>`. The alternation is
+# ordered longest-first so `session-review.sh` cannot claim a line that is
+# really a `vscode-session-review.sh` launch when attributing matches below.
+LAUNCH_RE = re.compile(
+    r"\bbash\s+\S*(?:" + "|".join(re.escape(s) for s in sorted(REVIEW_SCRIPTS, key=len, reverse=True)) + r")"
+)
 
 # JSON fixtures name these same scripts as hook `command` strings without ever
 # running them (settings.json / self-learning.json fixtures in the uninstall,
@@ -62,9 +78,23 @@ def launches_and_waits(lines: list[str]) -> tuple[list[int], list[int]]:
 def main() -> int:
     failures = 0
     checked = 0
+    # Per-adapter tally, so "the pattern still matches something" cannot stand
+    # in for "the pattern matches every adapter". A new review script whose
+    # suite launches it through a variable contributes zero matches; without
+    # this, the file-level `checked == 0` guard below stays satisfied by the
+    # other two adapters and the new one is silently unenforced. That is not
+    # hypothetical: it is what this file did when vscode-session-review.sh
+    # was added.
+    seen_per_script = {name: 0 for name in REVIEW_SCRIPTS}
     for path in sorted(TESTS_DIR.glob("test-*.sh")):
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         launches, waits = launches_and_waits(lines)
+        for start in launches:
+            line = lines[start]
+            for name in sorted(REVIEW_SCRIPTS, key=len, reverse=True):
+                if name in line:
+                    seen_per_script[name] += 1
+                    break
         for idx, start in enumerate(launches):
             checked += 1
             # Window: up to the next launch, or end of file. Principled rather
@@ -89,7 +119,21 @@ def main() -> int:
         print("FAIL: lint found zero review launches -- the pattern must be broken")
         return 1
 
-    print(f"Checked {checked} detached-review launch site(s) across the shell suites.")
+    for name, count in sorted(seen_per_script.items()):
+        if count == 0:
+            failures += 1
+            print(
+                f"FAIL: no shell suite launches {name} in a form this lint can "
+                f"see. Either it is untested, or its suite launches it through "
+                f"a variable (write `bash \"${{SCRIPT_DIR}}/scripts/{name}\"` in "
+                f"full so every launch site is checked)."
+            )
+
+    print(
+        "Checked "
+        + ", ".join(f"{c} x {n}" for n, c in sorted(seen_per_script.items()))
+        + f" = {checked} detached-review launch site(s) across the shell suites."
+    )
     if failures:
         print(f"FAILED: {failures} unpaired launch site(s).")
         return 1

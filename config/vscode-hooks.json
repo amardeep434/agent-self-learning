@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash __SL_SCRIPTS_DIR__/turn-counter.sh",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash __SL_SCRIPTS_DIR__/vscode-session-review.sh",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

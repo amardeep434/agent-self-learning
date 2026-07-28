@@ -1,10 +1,25 @@
 #!/usr/bin/env python3
-"""Extract a bounded, redacted conversation digest from a Copilot CLI or
-Claude Code session -- both harnesses share this module (P0b: the Claude
-Code path had the identical "reviewer sees no transcript" defect as
-Copilot's, fixed in P0; see the harness-specific sections below and each
-build_*_session_digest()'s docstring for what is shared vs. harness-specific
-and why).
+"""Extract a bounded, redacted conversation digest from a Copilot CLI,
+Claude Code, or VS Code Copilot Chat session -- all three harnesses share
+this module (P0b: the Claude Code path had the identical "reviewer sees no
+transcript" defect as Copilot's, fixed in P0; see the harness-specific
+sections below and each build_*_session_digest()'s docstring for what is
+shared vs. harness-specific and why).
+
+Three harnesses, two on-disk schemas, three resolution styles:
+
+  Copilot CLI     sessionId  -> ~/.copilot/session-state/<id>/events.jsonl
+                  parsed by summarize_events (dotted `<noun>.<verb>` types)
+  Claude Code     transcript_path handed over directly
+                  parsed by summarize_claude_events (bare-word types)
+  VS Code chat    transcript_path handed over directly
+                  parsed by summarize_events -- SAME schema as Copilot CLI
+
+The VS Code path adds no parser and no resolver: it is Claude's resolution
+paired with Copilot's parser. What it DOES add is detect_transcript_format,
+because VS Code and Claude Code share a hook-registration file and are
+therefore not separable by which config invoked the script -- see that
+function's docstring for the measurement and the trap it defuses.
 
 Copilot CLI's `sessionEnd` hook passes a JSON payload on stdin shaped like:
 
@@ -685,6 +700,188 @@ def build_claude_session_digest(
     return TranscriptResult(redact_secrets(digest), "", OUTCOME_OK, drift)
 
 
+# --- VS Code Copilot Chat path (third harness) ---------------------------
+#
+# VS Code's chat hooks hand over a `transcript_path` exactly like Claude
+# Code's Stop hook does (measured 2026-07-28, VS Code 1.130.0 /
+# GitHub.copilot-chat 0.58.0: present AND the file already existed on 11/11
+# hook invocations), but the file itself uses Copilot CLI's event
+# vocabulary, not Claude's tree shape. So the VS Code path is Claude's
+# RESOLUTION (a path, handed over, no lookup) with Copilot's PARSER
+# (summarize_events) -- which is why it needs neither a new resolver nor a
+# new parser, only the pairing.
+#
+# Measured over the 21 transcripts under
+# ~/.config/Code/User/workspaceStorage/*/GitHub.copilot-chat/transcripts/:
+# every one of the 2,573 typed lines carried one of `session.start`,
+# `user.message`, `assistant.turn_start`, `assistant.message`,
+# `assistant.turn_end`, `tool.execution_start`, `tool.execution_complete` --
+# the same `<noun>.<verb>` vocabulary summarize_events already speaks, and
+# it read them unmodified with unknown_shapes={}.
+#
+# WARNING, and it is load-bearing: VS Code documents this file as explicitly
+# NOT a stable API ("The transcript file format is not a stable hook API and
+# may change in future VS Code releases"), and the whole hook feature is
+# Preview. That is a WORSE footing than Copilot CLI's events.jsonl, which is
+# merely undocumented. summarize_events' unknown-shape canary
+# (UNKNOWN_SHAPE_THRESHOLD) is therefore not a nicety here, it is the only
+# thing standing between a format change and a silently halved digest.
+
+FORMAT_CLAUDE = "claude"
+FORMAT_VSCODE = "vscode"
+FORMAT_UNKNOWN = "unknown"
+
+# How many parseable lines detect_transcript_format() inspects before
+# deciding. Detection needs a handful of typed lines, not the whole file: a
+# 703-event transcript would otherwise be parsed twice on every hook, inside
+# a <100ms budget.
+_DETECT_MAX_LINES = 200
+
+
+def detect_transcript_format(path: Path, max_lines: int = _DETECT_MAX_LINES) -> str:
+    """Sniff whether a transcript file is Claude Code's or VS Code's shape.
+
+    Why this exists at all -- THE TRAP. VS Code's default
+    `chat.hookFilesLocations` includes `~/.claude/settings.json`
+    (<https://code.visualstudio.com/docs/copilot/customization/hooks>), which
+    is the exact file install.sh tells users to merge our Claude Code hooks
+    into. So registering the Claude Code hooks ALSO registers them inside VS
+    Code, and `session-review.sh` then receives a VS Code `transcript_path`
+    while believing it is Claude's. Measured before this function existed:
+    parsing a VS Code transcript with summarize_claude_events yields zero
+    messages, which is OUTCOME_FAILURE -- a persist-failures.log line and a
+    paid, contentless review on EVERY VS Code turn (VS Code's `Stop` fires
+    per turn, not per session). The payloads are otherwise indistinguishable
+    (same field names, same event name), so the file's own content is the
+    only available discriminator.
+
+    The discriminator is the top-level `type` containing a ".". Chosen
+    because it is perfectly separating on both real corpora on the machine
+    this was written on, not because it reads well:
+
+      - 330 real Claude Code transcripts under ~/.claude/projects/: 0 dotted
+        `type` values out of 82,444 typed lines. The 17 distinct values are
+        all bare words (`user`, `assistant`, `attachment`,
+        `queue-operation`, `file-history-snapshot`, ...).
+      - 21 real VS Code transcripts: 2,573 typed lines, 100% dotted, 0 bare.
+
+    Returns FORMAT_UNKNOWN when the file yields no typed lines at all, or
+    when it yields BOTH shapes (which no corpus produces and which would
+    mean something is writing into a transcript that is not one). Callers
+    must treat FORMAT_UNKNOWN as loud -- guessing a format for a file that
+    matches neither is how "reviewed half a conversation" happens quietly.
+    """
+    claude_hits = 0
+    vscode_hits = 0
+    seen = 0
+    for event in _iter_events(path):
+        if seen >= max_lines:
+            break
+        if not isinstance(event, dict):
+            continue
+        event_type = event.get("type")
+        if not isinstance(event_type, str) or not event_type:
+            continue
+        seen += 1
+        if "." in event_type:
+            vscode_hits += 1
+        else:
+            claude_hits += 1
+    if vscode_hits and not claude_hits:
+        return FORMAT_VSCODE
+    if claude_hits and not vscode_hits:
+        return FORMAT_CLAUDE
+    return FORMAT_UNKNOWN
+
+
+def build_vscode_session_digest(
+    transcript_path: str,
+    max_chars: int = MAX_DIGEST_CHARS,
+) -> TranscriptResult:
+    """Resolve + extract + redact for a VS Code Copilot Chat transcript_path.
+
+    Same TranscriptResult contract as the other two builders, and the same
+    deliberate omission as the Claude one: it NEVER returns
+    OUTCOME_NO_CONVERSATION. Copilot CLI needs that class because
+    `sessionEnd` fires for sessions that never took a turn and the
+    session-state dir exists regardless; VS Code hands over a path to a file
+    it has already written, and the spike measured the file present on 11/11
+    invocations -- including for an ask-only turn with no tool use, which
+    still produced a transcript. There is no measured benign
+    zero-message VS Code transcript, so inventing a benign class for one
+    would be inventing an excuse for a condition that has never been benign.
+    A transcript that parses to nothing stays loud.
+    """
+    if not transcript_path:
+        return TranscriptResult(
+            "", "unavailable (no transcript_path in Stop hook payload)", OUTCOME_FAILURE
+        )
+
+    path = Path(transcript_path)
+    if not path.is_file():
+        return TranscriptResult(
+            "", f"unavailable (transcript file not found: {path})", OUTCOME_FAILURE
+        )
+
+    messages, total, unknown = summarize_events(path)
+    drift = _drift_line(unknown, len(messages))
+    if not messages:
+        if total == 0:
+            return TranscriptResult(
+                "", f"empty (0 parseable events in {path})", OUTCOME_FAILURE, drift
+            )
+        return TranscriptResult(
+            "",
+            f"has no user/assistant messages ({total} other event(s) in {path})",
+            OUTCOME_FAILURE,
+            drift,
+        )
+
+    digest = build_digest(messages, max_chars=max_chars)
+    return TranscriptResult(redact_secrets(digest), "", OUTCOME_OK, drift)
+
+
+def build_path_session_digest(
+    transcript_path: str,
+    max_chars: int = MAX_DIGEST_CHARS,
+) -> TranscriptResult:
+    """Dispatch a transcript PATH to the builder its content calls for.
+
+    This is what `--harness auto` runs, and what session-review.sh uses, so
+    that a VS Code transcript arriving through the ~/.claude/settings.json
+    hook source (see detect_transcript_format) is parsed as what it is
+    instead of producing an empty review and a persist-failures.log line on
+    every VS Code turn.
+
+    An unrecognised format is a NAMED failure, never a fallback guess: it
+    reports the file and both shapes it failed to match, so the log line
+    says what actually happened rather than "no user/assistant text
+    content", which is what a wrong-parser run looks like.
+    """
+    if not transcript_path:
+        return TranscriptResult(
+            "", "unavailable (no transcript_path in Stop hook payload)", OUTCOME_FAILURE
+        )
+
+    path = Path(transcript_path)
+    if not path.is_file():
+        return TranscriptResult(
+            "", f"unavailable (transcript file not found: {path})", OUTCOME_FAILURE
+        )
+
+    detected = detect_transcript_format(path)
+    if detected == FORMAT_VSCODE:
+        return build_vscode_session_digest(transcript_path, max_chars=max_chars)
+    if detected == FORMAT_CLAUDE:
+        return build_claude_session_digest(transcript_path, max_chars=max_chars)
+    return TranscriptResult(
+        "",
+        f"unrecognised format ({path} matches neither Claude Code's "
+        "bare-word `type` schema nor VS Code's dotted-event schema)",
+        OUTCOME_FAILURE,
+    )
+
+
 def _log_failure(log_file: "str | None", component: str, reason: str) -> None:
     if not log_file:
         return
@@ -760,13 +957,29 @@ def main(argv: "list[str] | None" = None) -> int:
         "identifier",
         nargs="?",
         default="",
-        help="Copilot: sessionId. Claude: transcript_path (from the Stop hook payload).",
+        help=(
+            "Copilot: sessionId. Claude/VS Code/auto: transcript_path (from "
+            "the Stop hook payload)."
+        ),
     )
     parser.add_argument(
         "--harness",
-        choices=("copilot", "claude"),
+        choices=("copilot", "claude", "vscode", "auto"),
         default="copilot",
-        help="which harness's schema to parse (default: copilot, for backward compatibility)",
+        help=(
+            "which harness's schema to parse (default: copilot, for backward "
+            "compatibility). `auto` takes a PATH and sniffs Claude vs VS Code "
+            "from the file's own `type` values -- see detect_transcript_format"
+        ),
+    )
+    parser.add_argument(
+        "--component",
+        default=None,
+        help=(
+            "name to attribute log lines to (default: derived from --harness). "
+            "Set it when the calling script's name does not match the parser "
+            "it asked for -- e.g. vscode-session-review.sh using --harness auto"
+        ),
     )
     parser.add_argument("--home", default=None, help="override for SL_COPILOT_HOME (Copilot only, testing)")
     parser.add_argument("--max-chars", type=int, default=MAX_DIGEST_CHARS)
@@ -786,10 +999,26 @@ def main(argv: "list[str] | None" = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    component = "session-review" if args.harness == "claude" else "copilot-session-review"
+    # The component name is what shows up in persist-failures.log, so it must
+    # name the hook script a human would go and look at -- not the parsing
+    # mode. That distinction only became necessary with `auto`, which BOTH
+    # session-review.sh and vscode-session-review.sh use: deriving the name
+    # from --harness would have every VS Code failure blame session-review.sh
+    # and send a reader to the wrong file. --harness picks the parser,
+    # --component names the caller, and the default keeps every existing
+    # call site's log lines byte-identical.
+    component = args.component or {
+        "claude": "session-review",
+        "auto": "session-review",
+        "vscode": "vscode-session-review",
+    }.get(args.harness, "copilot-session-review")
 
     try:
-        if args.harness == "claude":
+        if args.harness == "auto":
+            result = build_path_session_digest(args.identifier, max_chars=args.max_chars)
+        elif args.harness == "vscode":
+            result = build_vscode_session_digest(args.identifier, max_chars=args.max_chars)
+        elif args.harness == "claude":
             result = build_claude_session_digest(args.identifier, max_chars=args.max_chars)
         else:
             env = dict(os.environ)

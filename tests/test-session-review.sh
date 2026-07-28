@@ -12,7 +12,7 @@ TMP=$(mktemp -d)
 # fix-p6: sl_rm_rf_retry, not a bare `rm -rf`, on this trap -- defense in
 # depth alongside sl_wait_for_review_complete used below (see
 # tests/lib/wait-for-review.sh for why both layers exist).
-trap 'sl_rm_rf_retry "$TMP"; sl_rm_rf_retry "${TMP_HOME:-}"; sl_rm_rf_retry "${FAKE_BIN:-}"; sl_rm_rf_retry "${TMP6:-}"' EXIT
+trap 'sl_rm_rf_retry "$TMP"; sl_rm_rf_retry "${TMP_HOME:-}"; sl_rm_rf_retry "${FAKE_BIN:-}"; sl_rm_rf_retry "${TMP6:-}"; sl_rm_rf_retry "${TMP8:-}"' EXIT
 export SL_HOME="$TMP" SL_STATE_DIR="$TMP/state" SL_LOG_DIR="$TMP/logs" SL_CONFIG_FILE="/nonexistent"
 export SL_COACH_SIGNALS_FILE="$TMP/state/coach-signals.json"
 mkdir -p "$TMP/state" "$TMP/bin"
@@ -221,6 +221,46 @@ echo '{"session_id":"s1","hook_event_name":"Stop"}' | bash "${SCRIPT_DIR}/script
 sl_wait_for_review_complete "$SL_LOG_DIR" || true
 check "missing transcript_path logged to persist-failures.log" "yes" \
     "$([[ -f "${TMP}/logs/persist-failures.log" ]] && grep -q 'session-review: transcript unavailable' "${TMP}/logs/persist-failures.log" && echo yes || echo no)"
+
+# 8) THE TRAP. VS Code's default `chat.hookFilesLocations` includes
+# `~/.claude/settings.json` -- the exact file install.sh tells users to merge
+# these hooks into -- so VS Code Copilot Chat runs THIS script with a VS Code
+# transcript_path. The payloads are indistinguishable (same field names, same
+# "Stop" event name), so the transcript file's own content is the only
+# discriminator, and `Stop` fires PER TURN in VS Code rather than per session.
+#
+# MEASURED before the fix, against this exact fixture: summarize_claude_events
+# extracted 0 messages, so the digest was empty, one "no user/assistant text
+# content" line went to persist-failures.log, and the reviewer was spawned
+# anyway -- a paid model call that could not learn anything, once per VS Code
+# turn, plus a log line per turn that pushes doctor.sh permanently UNHEALTHY.
+#
+# Both halves are asserted: the digest must be REAL, and the failure log must
+# stay clean. Asserting only the first would still allow a per-turn log line.
+TMP8="$(mktemp -d)"
+echo '{"session_id":"s8","total_turns_this_session":9,"memory_turns":0,"skill_iterations":0}' \
+    > "$TMP/state/turn_counter.json"
+VSCODE_TRANSCRIPT="${TMP8}/vscode.jsonl"
+cat > "$VSCODE_TRANSCRIPT" <<'EOF'
+{"type":"session.start","data":{"sessionId":"vs8","producer":"copilot-chat","copilotVersion":"0.58.0","vscodeVersion":"1.130.0"},"id":"e0","parentId":null,"timestamp":"2026-07-28T10:00:00.000Z"}
+{"type":"user.message","data":{"content":"UNIQUE_MARKER_VSCODE_ON_CLAUDE_PATH","attachments":[]},"id":"e1","parentId":"e0","timestamp":"2026-07-28T10:00:01.000Z"}
+{"type":"assistant.turn_start","data":{"turnId":"0"},"id":"e2","parentId":"e1","timestamp":"2026-07-28T10:00:02.000Z"}
+{"type":"assistant.message","data":{"messageId":"m1","content":"UNIQUE_MARKER_VSCODE_REPLY","toolRequests":[]},"id":"e3","parentId":"e2","timestamp":"2026-07-28T10:00:03.000Z"}
+{"type":"assistant.turn_end","data":{"turnId":"0"},"id":"e4","parentId":"e3","timestamp":"2026-07-28T10:00:04.000Z"}
+EOF
+rm -f "${TMP}/logs/persist-failures.log"
+: > "$FAKE_CLAUDE_LOG"
+sl_clear_review_marker "$SL_LOG_DIR"
+echo "{\"session_id\":\"vs8\",\"hook_event_name\":\"Stop\",\"cwd\":\"/tmp/ws\",\"timestamp\":1785000000000,\"stop_hook_active\":false,\"transcript_path\":\"${VSCODE_TRANSCRIPT}\"}" \
+    | bash "${SCRIPT_DIR}/scripts/session-review.sh"
+sl_wait_for_review_complete "$SL_LOG_DIR" || true
+check "VS Code user turn reaches the prompt on the Claude path" "yes" \
+    "$(grep -q 'UNIQUE_MARKER_VSCODE_ON_CLAUDE_PATH' "$FAKE_CLAUDE_LOG" && echo yes || echo no)"
+check "VS Code assistant turn reaches the prompt on the Claude path" "yes" \
+    "$(grep -q 'UNIQUE_MARKER_VSCODE_REPLY' "$FAKE_CLAUDE_LOG" && echo yes || echo no)"
+check "a VS Code transcript writes NO persist-failures.log line" "yes" \
+    "$([[ ! -s "${TMP}/logs/persist-failures.log" ]] && echo yes || echo no)"
+sl_rm_rf_retry "$TMP8"
 
 if [[ "$FAILURES" -gt 0 ]]; then exit 1; fi
 echo "All session-review tests passed."

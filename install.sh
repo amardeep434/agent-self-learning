@@ -210,6 +210,7 @@ SCRIPTS=(
     "curator-run.sh"
     "self-learning-health.sh"
     "copilot-session-review.sh"
+    "vscode-session-review.sh"
     "inject-agents-md.py"
     "coach-rules-eval.py"
     "coach-export-read.py"
@@ -414,6 +415,51 @@ if [[ -d "${HOME}/.copilot" ]]; then
     fi
 else
     echo "  ~/.copilot not found — Copilot CLI not installed; skipping (re-run install.sh after installing it)"
+fi
+
+echo ""
+echo "Step 4c: VS Code Copilot Chat adapter (optional)..."
+
+# Rendered and written into the store, then printed -- exactly like the
+# Claude Code template in Step 7, and for the same reason: there is no file
+# this installer may safely write to register a VS Code hook. VS Code's hook
+# sources come from the `chat.hookFilesLocations` SETTING, and editing a
+# user's settings.json by hand from an installer is not something this
+# project does. So: render it, put it somewhere permanent, and print the one
+# setting the user has to add.
+VSCODE_HOOK_SRC="${SCRIPT_DIR}/config/vscode-hooks.json"
+VSCODE_HOOK_DST="${SL_HOME}/vscode-hooks.json"
+
+if [[ ! -f "$VSCODE_HOOK_SRC" ]]; then
+    # Loud, not silent -- same rule as the Claude template below: printing
+    # nothing here would read as "no VS Code step needed".
+    echo "  ACTION REQUIRED -- cannot render the VS Code hook JSON:"
+    echo "    missing template ${VSCODE_HOOK_SRC}"
+    echo "    VS Code Copilot Chat sessions will NOT be reviewed."
+else
+    VSCODE_HOOK_JSON="$(sed "s|__SL_SCRIPTS_DIR__|${SL_SCRIPTS}|g" "$VSCODE_HOOK_SRC")"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo "[DRY RUN] render ${VSCODE_HOOK_SRC} -> ${VSCODE_HOOK_DST} (__SL_SCRIPTS_DIR__ -> ${SL_SCRIPTS})"
+    else
+        printf '%s\n' "$VSCODE_HOOK_JSON" > "$VSCODE_HOOK_DST"
+        chmod 644 "$VSCODE_HOOK_DST"
+        echo "  Rendered: vscode-hooks.json -> $VSCODE_HOOK_DST"
+    fi
+    echo ""
+    echo "  To review VS Code Copilot Chat sessions, add this to VS Code's"
+    echo "  settings.json (Preferences: Open User Settings (JSON)):"
+    echo ""
+    echo "      \"chat.hookFilesLocations\": {"
+    echo "        \"${VSCODE_HOOK_DST}\": true"
+    echo "      }"
+    echo ""
+    echo "  NOTE: VS Code ALSO reads ~/.claude/settings.json as a hook source by"
+    echo "  default, so once you complete the Claude Code step below, VS Code will"
+    echo "  run session-review.sh too. That is handled -- the review scripts detect"
+    echo "  which transcript format they were handed and parse it correctly -- but"
+    echo "  registering BOTH means two reviews per VS Code turn. Pick one:"
+    echo "    * Claude Code hooks only (nothing more to do; VS Code reuses them), or"
+    echo "    * this file, plus \"~/.claude/settings.json\": false in the same setting."
 fi
 
 echo ""

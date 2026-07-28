@@ -80,6 +80,13 @@ if [[ -n "$SL_HOME" ]]; then
     # would strand a file whose every path points into the scripts dir removed
     # above -- a merge-me artifact that registers nothing.
     remove "${SL_HOME}/settings-hooks.json"
+    # The rendered VS Code hook JSON (install.sh Step 4c), for the same
+    # reason. Note this does NOT remove the `chat.hookFilesLocations` entry
+    # from the user's VS Code settings.json -- this installer never wrote
+    # it, so it does not delete it either; a location pointing at a file
+    # that no longer exists is inert. Removing the entry is a one-line
+    # manual step, printed by uninstall's summary.
+    remove "${SL_HOME}/vscode-hooks.json"
 fi
 
 # Copilot hook config — harness-owned directory, installed by this project.
@@ -152,3 +159,9 @@ else
 fi
 
 echo "Uninstall complete."
+# The one registration this uninstaller cannot undo, said out loud rather
+# than left for the user to discover: install.sh never edited VS Code's
+# settings.json (it only printed the entry to add), so there is nothing here
+# it may safely edit back out.
+echo "If you registered the VS Code adapter, remove the ${SL_HOME:-<store>}/vscode-hooks.json"
+echo "entry from \"chat.hookFilesLocations\" in your VS Code settings.json."

@@ -72,6 +72,43 @@ def _realistic_session_lines():
     ]
 
 
+def _realistic_vscode_session_lines():
+    """A shape-accurate VS Code Copilot Chat transcript, content replaced.
+
+    Key shapes taken from the REAL files under
+    ~/.config/Code/User/workspaceStorage/<ws>/GitHub.copilot-chat/transcripts/
+    on 2026-07-28 (VS Code 1.130.0 / GitHub.copilot-chat 0.58.0): every line
+    carries top-level `data`/`id`/`parentId`/`timestamp`/`type`, and across
+    21 real transcripts the ONLY seven `type` values observed were the ones
+    below -- `session.start`, `user.message`, `assistant.turn_start`,
+    `assistant.message`, `assistant.turn_end`, `tool.execution_start`,
+    `tool.execution_complete`.
+
+    `data.sessionId` carries a `vscodeVersion` key that Copilot CLI's
+    `session.start` does not; that is the only structural difference between
+    the two producers found, and it is inside `data`, not in the shape
+    summarize_events reads. No real conversation content is copied here.
+    """
+    return [
+        _event("session.start", {
+            "sessionId": "vs1", "version": 1, "producer": "copilot-chat",
+            "copilotVersion": "0.58.0", "vscodeVersion": "1.130.0",
+            "startTime": "2026-07-28T10:00:00Z",
+        }),
+        _event("user.message", {"content": "PLACEHOLDER_VSCODE_USER", "attachments": []}),
+        _event("assistant.turn_start", {"turnId": "0"}),
+        _event("tool.execution_start", {
+            "toolCallId": "t1", "toolName": "read_file", "arguments": {},
+        }),
+        _event("tool.execution_complete", {"toolCallId": "t1", "success": True}),
+        _event("assistant.message", {
+            "messageId": "m1", "content": "PLACEHOLDER_VSCODE_ASSISTANT",
+            "toolRequests": [],
+        }),
+        _event("assistant.turn_end", {"turnId": "0"}),
+    ]
+
+
 def _claude_line(event_type, message=None, is_sidechain=False, is_meta=False,
                   uuid="u1", parent_uuid=None, timestamp="2026-07-25T12:00:00.000Z", **extra):
     """Build one line of a Claude Code session JSONL fixture, matching the
@@ -264,6 +301,213 @@ class TestBuildClaudeSessionDigest(unittest.TestCase):
             self.assertLessEqual(len(digest), 2200)
             self.assertIn("turn 199", digest)
             self.assertNotIn("turn 0 ", digest)
+
+
+class TestVsCodeSessionDigest(unittest.TestCase):
+    """The third harness. VS Code Copilot Chat hands over a transcript_path
+    (Claude's resolution style) to a file in Copilot CLI's event vocabulary
+    (Copilot's parser), so this path adds no new parsing -- these tests exist
+    to hold that pairing in place, and to hold the failure classification,
+    which deliberately differs from Copilot's.
+    """
+
+    def test_realistic_transcript_yields_both_turns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "abc.jsonl"
+            p.write_text("\n".join(_realistic_vscode_session_lines()) + "\n",
+                         encoding="utf-8")
+            digest, reason, outcome, drift = transcript.build_vscode_session_digest(str(p))
+            self.assertEqual(reason, "")
+            self.assertEqual(outcome, transcript.OUTCOME_OK)
+            self.assertEqual(drift, "")
+            self.assertIn("User: PLACEHOLDER_VSCODE_USER", digest)
+            self.assertIn("Assistant: PLACEHOLDER_VSCODE_ASSISTANT", digest)
+
+    def test_tool_and_session_events_are_not_conversation(self):
+        # Same contract as the Copilot path: tool.* / session.* are telemetry.
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "abc.jsonl"
+            p.write_text("\n".join(_realistic_vscode_session_lines()) + "\n",
+                         encoding="utf-8")
+            messages, total, unknown = transcript.summarize_events(p)
+            self.assertEqual(len(messages), 2)
+            self.assertEqual(total, 7)
+            self.assertEqual(unknown, {})
+
+    def test_missing_file_is_a_loud_failure(self):
+        digest, reason, outcome, _ = transcript.build_vscode_session_digest(
+            "/nonexistent/vscode/t.jsonl")
+        self.assertEqual(digest, "")
+        self.assertEqual(outcome, transcript.OUTCOME_FAILURE)
+        self.assertIn("not found", reason)
+
+    def test_empty_transcript_path_is_a_loud_failure(self):
+        digest, reason, outcome, _ = transcript.build_vscode_session_digest("")
+        self.assertEqual(digest, "")
+        self.assertEqual(outcome, transcript.OUTCOME_FAILURE)
+        self.assertIn("transcript_path", reason)
+
+    def test_no_conversation_class_is_never_returned(self):
+        """Deliberate asymmetry with the Copilot path, pinned so it cannot be
+        "fixed" into symmetry by someone who has not read why. Copilot needs
+        OUTCOME_NO_CONVERSATION because sessionEnd fires for sessions that
+        never took a turn; VS Code hands over a file it has already written,
+        measured present on 11/11 invocations including an ask-only turn. A
+        VS Code transcript that parses to nothing has never been benign.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "t.jsonl"
+            p.write_text(_event("session.start", {"sessionId": "vs1"}) + "\n",
+                         encoding="utf-8")
+            _, reason, outcome, _ = transcript.build_vscode_session_digest(str(p))
+            self.assertEqual(outcome, transcript.OUTCOME_FAILURE)
+            self.assertNotEqual(outcome, transcript.OUTCOME_NO_CONVERSATION)
+            self.assertIn("no user/assistant messages", reason)
+
+    def test_secrets_are_redacted_on_this_path_too(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "t.jsonl"
+            p.write_text("\n".join([
+                _event("user.message", {"content": 'api_key: "abcdefghijklmnopqrstuvwx"'}),
+                _event("assistant.message", {"content": "ok"}),
+            ]) + "\n", encoding="utf-8")
+            digest, _, outcome, _ = transcript.build_vscode_session_digest(str(p))
+            self.assertEqual(outcome, transcript.OUTCOME_OK)
+            self.assertNotIn("abcdefghijklmnopqrstuvwx", digest)
+            self.assertIn("[REDACTED:", digest)
+
+    def test_drift_canary_covers_this_harness_from_day_one(self):
+        """VS Code documents this transcript format as explicitly unstable, so
+        the C6 canary matters MORE here than for the two formats that are
+        merely undocumented. A drifted `data.content` must produce a drift
+        line without downgrading a usable digest.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "t.jsonl"
+            p.write_text("\n".join([
+                _event("user.message", {"content": "PLACEHOLDER_KEPT"}),
+                _event("assistant.message", {"content": [{"type": "text", "text": "drifted"}]}),
+            ]) + "\n", encoding="utf-8")
+            digest, _, outcome, drift = transcript.build_vscode_session_digest(str(p))
+            self.assertEqual(outcome, transcript.OUTCOME_OK)
+            self.assertIn("PLACEHOLDER_KEPT", digest)
+            self.assertIn("SCHEMA DRIFT", drift)
+            self.assertIn("data.content", drift)
+
+
+class TestDetectTranscriptFormat(unittest.TestCase):
+    """THE TRAP.
+
+    VS Code's default `chat.hookFilesLocations` includes
+    `~/.claude/settings.json` -- the file install.sh tells users to merge the
+    Claude Code hooks into -- so VS Code runs session-review.sh with a VS
+    Code transcript_path. The hook payloads are indistinguishable (same field
+    names, same "Stop" event name; 9 real VS Code payloads were checked), so
+    the file's own content is the only discriminator available.
+
+    The discriminator is a dotted top-level `type`. Measured on the machine
+    this was written on: 330 real Claude transcripts under ~/.claude/projects
+    produced 0 dotted `type` values out of 82,444 typed lines; 21 real VS
+    Code transcripts produced 2,573 typed lines, 100% dotted. Perfect
+    separation both ways.
+    """
+
+    def _write(self, tmp, lines, name="t.jsonl"):
+        p = Path(tmp) / name
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return p
+
+    def test_vscode_transcript_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write(tmp, _realistic_vscode_session_lines())
+            self.assertEqual(transcript.detect_transcript_format(p),
+                             transcript.FORMAT_VSCODE)
+
+    def test_claude_transcript_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write(tmp, _realistic_claude_session_lines())
+            self.assertEqual(transcript.detect_transcript_format(p),
+                             transcript.FORMAT_CLAUDE)
+
+    def test_copilot_events_file_reads_as_the_event_schema(self):
+        # Same vocabulary as VS Code by construction; asserted so a future
+        # discriminator change cannot quietly start calling it "claude".
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write(tmp, _realistic_session_lines())
+            self.assertEqual(transcript.detect_transcript_format(p),
+                             transcript.FORMAT_VSCODE)
+
+    def test_a_file_matching_neither_is_unknown_not_a_guess(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write(tmp, [json.dumps({"nope": 1}), "not json at all"])
+            self.assertEqual(transcript.detect_transcript_format(p),
+                             transcript.FORMAT_UNKNOWN)
+
+    def test_a_file_containing_both_shapes_is_unknown(self):
+        # No corpus produces this. Guessing a winner here would be exactly
+        # the "parsed half a conversation and said nothing" failure.
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write(tmp, [
+                _event("user.message", {"content": "a"}),
+                _claude_line("user", {"role": "user", "content": "b"}),
+            ])
+            self.assertEqual(transcript.detect_transcript_format(p),
+                             transcript.FORMAT_UNKNOWN)
+
+    def test_auto_parses_a_vscode_transcript_that_arrives_on_the_claude_path(self):
+        """The trap, end to end at the library level. Before detection, this
+        exact input produced ZERO messages through summarize_claude_events
+        (i.e. OUTCOME_FAILURE) -- a persist-failures.log line and a paid,
+        contentless review on every VS Code turn.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write(tmp, _realistic_vscode_session_lines())
+
+            # The "before": the Claude parser on a VS Code file.
+            _, _, wrong_outcome, _ = transcript.build_claude_session_digest(str(p))
+            self.assertEqual(wrong_outcome, transcript.OUTCOME_FAILURE)
+
+            # The "after".
+            digest, reason, outcome, _ = transcript.build_path_session_digest(str(p))
+            self.assertEqual(reason, "")
+            self.assertEqual(outcome, transcript.OUTCOME_OK)
+            self.assertIn("PLACEHOLDER_VSCODE_USER", digest)
+            self.assertIn("PLACEHOLDER_VSCODE_ASSISTANT", digest)
+
+    def test_auto_still_parses_a_claude_transcript_identically(self):
+        # The trap fix must not change what the Claude path already did.
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write(tmp, _realistic_claude_session_lines())
+            direct = transcript.build_claude_session_digest(str(p))
+            through_auto = transcript.build_path_session_digest(str(p))
+            self.assertEqual(direct, through_auto)
+
+    def test_auto_names_the_format_problem_rather_than_blaming_the_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write(tmp, [json.dumps({"nope": 1})])
+            _, reason, outcome, _ = transcript.build_path_session_digest(str(p))
+            self.assertEqual(outcome, transcript.OUTCOME_FAILURE)
+            self.assertIn("unrecognised format", reason)
+
+    def test_auto_reports_a_missing_file_as_missing(self):
+        _, reason, outcome, _ = transcript.build_path_session_digest("/nonexistent/x.jsonl")
+        self.assertEqual(outcome, transcript.OUTCOME_FAILURE)
+        self.assertIn("not found", reason)
+
+    def test_detection_stops_after_max_lines(self):
+        # Bounded work: this runs inside a hook with a <100ms budget, and a
+        # 703-event transcript must not be parsed twice.
+        with tempfile.TemporaryDirectory() as tmp:
+            lines = [_event("user.message", {"content": "x"})] * 50
+            lines += [_claude_line("user", {"role": "user", "content": "y"})] * 50
+            p = self._write(tmp, lines)
+            # Only the first 10 lines are inspected, so the claude-shaped
+            # tail is never seen and the answer is unambiguous.
+            self.assertEqual(transcript.detect_transcript_format(p, max_lines=10),
+                             transcript.FORMAT_VSCODE)
+            # With the full window both shapes are visible => refuse to guess.
+            self.assertEqual(transcript.detect_transcript_format(p),
+                             transcript.FORMAT_UNKNOWN)
 
 
 class TestHarnessParity(unittest.TestCase):
@@ -984,6 +1228,62 @@ class TestCli(unittest.TestCase):
             self.assertIn("SCHEMA DRIFT", line)
             self.assertIn("session-review:", line)
             self.assertNotIn("copilot-session-review:", line)
+
+    def test_vscode_harness_prints_the_digest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "t.jsonl"
+            p.write_text("\n".join(_realistic_vscode_session_lines()) + "\n",
+                         encoding="utf-8")
+            result = self._run(["--harness", "vscode", str(p)])
+            self.assertEqual(result.returncode, 0)
+            self.assertIn("PLACEHOLDER_VSCODE_USER", result.stdout)
+            self.assertIn("PLACEHOLDER_VSCODE_ASSISTANT", result.stdout)
+
+    def test_vscode_failures_are_attributed_to_the_vscode_hook_script(self):
+        # persist-failures.log has to name the script a human would go read.
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = Path(tmp) / "persist-failures.log"
+            result = self._run(["--harness", "vscode", "/nonexistent/x.jsonl",
+                                "--log-file", str(log_file)])
+            self.assertEqual(result.returncode, 0)
+            self.assertIn("vscode-session-review:", log_file.read_text())
+
+    def test_auto_harness_handles_a_vscode_transcript_with_no_failure_line(self):
+        """THE TRAP through the CLI, which is exactly how session-review.sh
+        calls this. Before the fix this same invocation (as `--harness
+        claude`) wrote a persist-failures.log line and printed nothing.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "t.jsonl"
+            p.write_text("\n".join(_realistic_vscode_session_lines()) + "\n",
+                         encoding="utf-8")
+            log_file = Path(tmp) / "persist-failures.log"
+
+            before = self._run(["--harness", "claude", str(p),
+                                "--log-file", str(log_file)])
+            self.assertEqual(before.stdout, "")
+            self.assertIn("no user/assistant text content", log_file.read_text())
+
+            log_file.unlink()
+            after = self._run(["--harness", "auto", str(p),
+                               "--log-file", str(log_file)])
+            self.assertEqual(after.returncode, 0)
+            self.assertIn("PLACEHOLDER_VSCODE_USER", after.stdout)
+            self.assertFalse(log_file.exists(),
+                             "a correctly-parsed VS Code transcript must not "
+                             "write to persist-failures.log -- Stop fires per "
+                             "turn, so one line here is one line per turn")
+
+    def test_auto_harness_is_attributed_to_session_review(self):
+        # `auto` is what session-review.sh runs, so its log lines must keep
+        # naming session-review whichever harness actually invoked it.
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = Path(tmp) / "persist-failures.log"
+            self._run(["--harness", "auto", "/nonexistent/x.jsonl",
+                       "--log-file", str(log_file)])
+            self.assertIn("session-review:", log_file.read_text())
+            self.assertNotIn("copilot-session-review:", log_file.read_text())
+            self.assertNotIn("vscode-session-review:", log_file.read_text())
 
     def test_default_harness_is_copilot_unaffected_by_claude_addition(self):
         # Backward compatibility: existing copilot-session-review.sh callers

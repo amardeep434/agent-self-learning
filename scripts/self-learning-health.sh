@@ -106,6 +106,7 @@ REQUIRED_SCRIPTS=(
     "persist-proposal.py"
     "lib/proposal_schema.py"
     "copilot-session-review.sh"
+    "vscode-session-review.sh"
     "doctor.sh"
 )
 
