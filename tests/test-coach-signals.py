@@ -12,6 +12,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 READER = REPO / "scripts" / "coach-export-read.py"
 MERGER = REPO / "scripts" / "coach-signals.py"
+# A real Coach export, normalized. The reader's own contract against it lives
+# in tests/test-coach-export-read.py; what is asserted here is the merger half
+# -- that a realistic payload survives merge/sanitize into the signals file.
+FIXTURE = REPO / "tests" / "fixtures" / "coach-export-v1.json"
 
 EXPORT = {
     "antiPatterns": {
@@ -139,6 +143,54 @@ class CoachSignalsTest(unittest.TestCase):
         self.assertNotIn("`", sug)
         self.assertNotIn("~", sug)
         self.assertLessEqual(len(sug), 240)
+
+
+class RealExportPayloadTest(unittest.TestCase):
+    """The merger against a real-shaped export rather than the two-pattern dict
+    above. Route B produced its first real bytes on 2026-07-28; before that,
+    every claim here rested on an invented payload."""
+
+    def _run(self):
+        e = Env()
+        e.export.write_text(FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
+        proc = e.run(rules_on=False, export_on=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return json.loads(e.signals.read_text())
+
+    def test_all_ten_patterns_reach_the_signals_file(self):
+        data = self._run()
+        expected = [p["id"] for p in
+                    json.loads(FIXTURE.read_text(encoding="utf-8"))["antiPatterns"]["topPatterns"]]
+        self.assertEqual({s["id"] for s in data["signals"]}, set(expected))
+
+    def test_per_pattern_counts_survive_the_merge(self):
+        """Upstream calls it `occurrences`, the reader renames it to `count`,
+        and the merger copies it again. Three hops, each a place a per-pattern
+        number can silently become 0 -- so assert all ten against the payload,
+        not that "a count field exists"."""
+        report = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        expected = {p["id"]: p["occurrences"]
+                    for p in report["antiPatterns"]["topPatterns"]}
+        actual = {s["id"]: s["count"] for s in self._run()["signals"]}
+        self.assertEqual(actual, expected)
+
+    def test_severities_survive_the_merge(self):
+        sev = {s["id"]: s["severity"] for s in self._run()["signals"]}
+        self.assertEqual(sev["low-context-provision-claude"], "high")
+        self.assertEqual(sev["late-night-coding"], "low")
+
+    def test_missing_antipatterns_contributes_nothing_but_says_so(self):
+        """A broken export must not merge as "no problems found" without a
+        word: the route is non-fatal by design, so stderr is the only place
+        an operator can learn Route B produced nothing today."""
+        e = Env()
+        report = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        del report["antiPatterns"]
+        e.export.write_text(json.dumps(report))
+        proc = e.run(rules_on=False, export_on=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(json.loads(e.signals.read_text())["signals"], [])
+        self.assertIn("unreadable export", proc.stderr)
 
 
 if __name__ == "__main__":

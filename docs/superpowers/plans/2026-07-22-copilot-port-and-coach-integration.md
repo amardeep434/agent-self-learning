@@ -1537,6 +1537,17 @@ git commit -m "feat: Route A coach rule evaluator (documented detect-DSL subset;
 - Consumes: Route A output (Task 11); Route B export file — Coach `SummaryExportReport` JSON with `antiPatterns.topPatterns[]` items `{id, name, severity, group, occurrences, description, suggestion}`.
 - Produces:
   - `coach-export-read.py <export_json_path>`: prints JSON array `{"id", "severity", "suggestion", "count", "source": "export"}` (count = `occurrences`); `[]` if file missing/unparseable (stderr note).
+
+    > **SUPERSEDED 2026-07-28 — the two cases are no longer the same.** `[]` + exit 0 for
+    > *both* "file missing" and "file unparseable" made a corrupt export indistinguishable
+    > from "Coach isn't installed", i.e. it degraded to a silent zero. The tree now splits
+    > them: an ABSENT export is still `[]` + exit 0 (Coach not installed is normal), while a
+    > present-but-unreadable one exits **1** with a diagnostic naming the path and the
+    > exception type. `coach-signals.py` already treats non-zero as "no signals from this
+    > route" and passes the stderr through, so a review is still non-fatal — it just stops
+    > being invisible. A non-list `topPatterns` is also rejected now: it used to iterate as
+    > its keys, fail the per-row `isinstance(p, dict)` filter, and yield a silent zero.
+    > See `tests/test-coach-export-read.py`.
   - `coach-signals.py`: orchestrator. Reads env flags `SL_COACH_RULES_ENABLED` / `SL_COACH_EXPORT_ENABLED` plus `SL_COACH_RULES_DIR`, `SL_SEARCH_DB`, `SL_COACH_EXPORT_PATH`, `SL_COACH_SIGNALS_FILE`. Runs whichever routes are enabled, merges (dedupe by `id`, `source:"export"` wins), and atomically writes `{"generated_at": "<iso8601>", "signals": [...]}` to `SL_COACH_SIGNALS_FILE`. Both flags false → **deletes** any existing signals file and exits 0 (feature fully off).
 
 - [ ] **Step 1: Write the failing test**

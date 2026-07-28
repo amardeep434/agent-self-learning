@@ -4,7 +4,24 @@ emit normalized signals.
 
 Usage: python3 coach-export-read.py <export_json_path>
 Output: JSON array [{"id", "severity", "suggestion", "count", "source": "export"}]
-Missing or unparseable file -> [] on stdout (note on stderr), exit 0.
+
+Two absences that look identical on stdout are deliberately NOT identical on
+the exit code:
+
+  no file at all      -> [] on stdout, note on stderr, exit 0. Coach is simply
+                         not installed, or has never been asked to export.
+                         Route B has nothing to say and that is normal.
+  file present, but
+  not a readable
+  SummaryExportReport -> [] on stdout, diagnostic on stderr, exit 1. Something
+                         DID write an export and we cannot read it -- truncated
+                         write, or upstream renamed/moved `antiPatterns`. Both
+                         are defects, and reporting them as "no signals today"
+                         is precisely the silent-success failure this project
+                         exists to eliminate.
+
+The caller (coach-signals.py) treats a non-zero route as contributing no
+signals, so this stays non-fatal to a review; it just stops being invisible.
 """
 
 import json
@@ -26,10 +43,19 @@ def main():
     try:
         report = json.loads(path.read_text(encoding="utf-8", errors="replace"))
         patterns = report["antiPatterns"]["topPatterns"]
+        # A non-list here would iterate as something else entirely (a dict
+        # yields its keys, a string its characters), every element would fail
+        # the isinstance filter below, and the run would look like a clean
+        # "no anti-patterns found". Same silent-zero as a missing key, so it
+        # takes the same loud path.
+        if not isinstance(patterns, list):
+            raise TypeError("antiPatterns.topPatterns is {}, not a list".format(
+                type(patterns).__name__))
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
-        print("coach-export-read: unparseable export ({})".format(exc), file=sys.stderr)
+        print("coach-export-read: unreadable export at {} ({}: {})".format(
+            path, type(exc).__name__, exc), file=sys.stderr)
         print("[]")
-        return 0
+        return 1
 
     signals = []
     for p in patterns:
