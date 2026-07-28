@@ -1,6 +1,9 @@
-# VS Code Copilot Chat adapter — feasibility findings and spike protocol
+# VS Code Copilot Chat adapter — feasibility findings and spike results
 
-**Status: feasible, no VS Code extension required. Blocked on one human-run spike.**
+**Status: SPIKE PASSED 2026-07-28 on VS Code 1.130.0 / GitHub.copilot-chat 0.58.0
+(Linux). No VS Code extension required, no new parsing required, no fallback
+required. Ready to implement.** Results in §3.
+
 Written 2026-07-28. This file is the tracker for the third-peer adapter that
 `README.md` and `CLAUDE.md` declare as "(planned)" and the 2026-07-25 plan deferred
 under "Out of Scope (**subsequent plans**)". Until this file existed, that work was
@@ -48,11 +51,29 @@ on it would inherit an unverified hand-maintained fork to solve what a JSON file
 natively. (Separately: `README.md` points Route B at `<org>/ai-engineering-coach-fork`,
 which does not resolve. The real fork is the one named above.)
 
-## 3. The spike — what a human must run
+## 3. The spike — RUN, and what it measured
 
-Everything about hook *execution* below is currently read from docs and shipped bytes.
-**Nobody has observed a VS Code hook fire.** These checks are ordered so each one's
-failure makes the later ones moot.
+Run 2026-07-28 on VS Code 1.130.0 / `GitHub.copilot-chat` 0.58.0, Linux, in a scratch
+`/tmp/vsspike` workspace using `.github/hooks/` (deliberately **not**
+`~/.claude/settings.json`, so a probe could not leak into the real Claude Code config).
+Two runs: three prompts in one agent-mode session, then one prompt in a brand-new
+ask-only session.
+
+| # | Question | Result | Consequence |
+|---|---|---|---|
+| 1 | Do hooks fire? | **YES** — 9 invocations in run 1, 2 in run 2 | The route is live |
+| 2 | stdin or argv? | **stdin JSON on 11/11; argv empty on 11/11** | `scripts/lib/hook-input.sh` works unchanged |
+| 3 | `Stop` per turn or per session? | **PER TURN** — 3 prompts produced 3 `Stop`s. Order was `UserPromptSubmit → PostToolUse → Stop` per turn | Needs the same turn-count gate Claude Code uses; `session-review.sh` already has it (`SL_REVIEW_MIN_TURNS`) |
+| 4 | Is `transcript_path` present, and does the file exist yet? | **Present and EXISTS on 11/11.** It also grows between hooks in the same turn (524 → 1159 bytes) | No path discovery, no wait-for-file race |
+| 5 | Does our parser read a LIVE file? | **YES, unmodified.** Run 1: 28 events → 8 messages. Run 2: 5 events → 2 messages. `unknown_shapes={}` both times | `summarize_events` is the whole session source; the C6 drift canary is clean on real VS Code data |
+| 6 | Do ask-only sessions produce a transcript? | **YES.** A brand-new session with one no-tool prompt created a new transcript file (20 → 21) and fired `UserPromptSubmit → Stop` with **no** `PostToolUse` | **The `chatSessions/*.jsonl` fallback is NOT needed.** This was the main risk and it is retired |
+
+Run-1 event mix in the produced transcript: `session.start` 1, `user.message` 3,
+`assistant.turn_start`/`assistant.message`/`assistant.turn_end` 6 each,
+`tool.execution_start`/`tool.execution_complete` 3 each — i.e. the same Copilot-CLI
+event vocabulary `transcript.py` already speaks.
+
+The original protocol, kept because it is the procedure to re-run on another platform:
 
 Generate the probe kit and open the scratch workspace:
 
@@ -106,14 +127,11 @@ what that design was for.
 - Tests — mirrors of `test-claude-hooks-json.sh`, a fixture in `test-transcript.py`, and
   `test-vscode-session-review.sh`. `tests/run-all.sh` globs, so no count to update.
 
-## 5. Open questions — do not treat these as settled
+## 5. Open questions — what the spike did NOT settle
 
-- Whether `Stop` fires per turn or per session. Docs say "Agent session ends"; the
-  shipped UI string is "When agent execution stops" and the call site is
-  `ToolCallingLoop.executeStopHook`. **Inferred, not measured** — spike check 3.
-- Whether ask-mode / no-tool turns produce a transcript. Transcript writing is gated on
-  `hasHooksEnabled` inside `ToolCallingLoop`; whether a non-tool turn reaches it is
-  unknown — spike check 6.
+Answered by the spike and no longer open: `Stop` cadence (per turn), ask-only transcripts
+(they exist), stdin delivery, `transcript_path` availability, and whether our parser
+copes (it does, unmodified). What remains:
 - Windows and macOS: zero evidence for either hook registration or `transcript_path`
   form. This is precisely where the Copilot CLI adapter broke before (MSYS path forms).
 - VS Code Server / remote and Insiders layouts: untested; upstream handles
