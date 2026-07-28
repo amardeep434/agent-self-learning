@@ -26,7 +26,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FAILURES=0
 check() { if [[ "$2" == "$3" ]]; then echo "PASS: $1"; else echo "FAIL: $1 (expected '$2', got '$3')"; FAILURES=$((FAILURES+1)); fi; }
 
+# shellcheck source=tests/lib/path-compare.sh
+source "${SCRIPT_DIR}/tests/lib/path-compare.sh"
+
 RENDERER="${SCRIPT_DIR}/scripts/lib/render-template.py"
+PATHS_PY="${SCRIPT_DIR}/scripts/lib/paths.py"
 TEMPLATES=(settings-hooks.json copilot-hooks.json vscode-hooks.json)
 
 # Every metacharacter in one string, so a fix that handles only the one a
@@ -125,8 +129,30 @@ _component_survives() {
     fi
     # Exactly one entry, named exactly what we asked for. If `\` was eaten as
     # a separator this reports the leading component instead.
-    created="$(ls -A "$probe")"
-    [[ "$created" == "$1" ]] || rc=1
+    created="$(ls -A "$probe" 2>/dev/null)"
+    if [[ "$created" != "$1" ]]; then
+        rm -rf "$probe"
+        return 1
+    fi
+    # ...and then prove a NATIVE binary can actually USE it. An MSYS-side
+    # check cannot certify a path native tools will later have to open: `|`
+    # is reserved in NTFS, yet MSYS's mkdir/ls/[[ -d ]] all accept it and
+    # agree with each other, while jq and python3 fail with `Invalid
+    # argument`. That is precisely how windows CI ended up running the whole
+    # end-to-end install against a store no native tool could read.
+    # python3 and jq are both native under Git Bash and are the two binaries
+    # this suite actually uses to read rendered hook files -- so exercise
+    # both, rather than hardcoding NTFS's reserved-character list (which
+    # would be a platform assumption, not a measurement).
+    if ! printf '%s' '{"probe":1}' > "${probe}/${1}/probe.json" 2>/dev/null; then
+        rm -rf "$probe"
+        return 1
+    fi
+    python3 -c 'import sys; open(sys.argv[1], "rb").read()' \
+        "${probe}/${1}/probe.json" >/dev/null 2>&1 || rc=1
+    if [[ "$rc" -eq 0 ]]; then
+        jq -e . "${probe}/${1}/probe.json" >/dev/null 2>&1 || rc=1
+    fi
     rm -rf "$probe"
     return "$rc"
 }
@@ -136,11 +162,14 @@ for _part in 'R&D' 'a|b' 'c\d'; do
     if _component_survives "$_part"; then
         NASTY_PARTS+=("$_part")
     else
-        echo "SKIP-DETAIL: store path component '${_part}' — this filesystem"
-        echo "             cannot represent it (expected on Windows: '|' and"
-        echo "             '\\' are reserved / treated as a separator). It is"
-        echo "             excluded from the end-to-end store path below;"
-        echo "             the renderer assertions above still exercised it."
+        echo "SKIP-DETAIL: store path component '${_part}' — this platform"
+        echo "             could not create it AND read it back with a native"
+        echo "             python3/jq (expected on Windows, where '\\' is a"
+        echo "             separator and '|' is reserved in NTFS: MSYS creates"
+        echo "             it, native tools then fail with Invalid argument)."
+        echo "             Excluded from the end-to-end store path below; the"
+        echo "             renderer assertions above still exercised it as a"
+        echo "             string, on every platform."
     fi
 done
 # `:-` is required, not defensive noise: under `set -u`, bash 3.2 (which
@@ -192,7 +221,21 @@ else
         echo "-----------------------------------------"
     fi
 
-    SCRIPTS_DIR="${STORE}/scripts"
+    # DERIVED through the same resolver install.sh used, not hand-built from
+    # $STORE. The assertions below are textual (`grep -F` against a rendered
+    # hook command), and a bash-built "${STORE}/scripts" never crossed a
+    # python3 subprocess boundary while the rendered value did -- on Git Bash
+    # those spell the same directory as `/tmp/...` and `/c/Users/...`
+    # respectively. Deriving it is what tests/lib/path-compare.sh calls the
+    # fixture-building case: the expected string comes out byte-identical to
+    # what the product will emit, on every platform.
+    SCRIPTS_DIR="$(sl_resolve_path "$PATHS_PY" scripts \
+        HOME="$TMP_HOME" PATH="$MINIMAL_PATH" AGENT_LEARNING_HOME="$STORE" \
+        ${PYENV_ROOT:+PYENV_ROOT="$PYENV_ROOT"})"
+    check "resolver produced a scripts dir for the metacharacter store" "yes" \
+        "$([[ -n "$SCRIPTS_DIR" ]] && echo yes || echo no)"
+    sl_check_same_path "derived scripts dir is the store's scripts dir" \
+        "${STORE}/scripts" "$SCRIPTS_DIR"
 
     # The single assertion that matters: every path a rendered hook file names
     # must be a file this very install created. A mis-rendered path is still
@@ -281,7 +324,13 @@ else
     # expected value spelling it out in full reads as a detached-review launch
     # site to tests/test-review-launch-lint.py, which would then (correctly,
     # by its own rules) demand a wait for a process this test never starts.
-    check "ACTION REQUIRED block names the literal scripts dir" \
+    #
+    # sl_check_same_path, not string equality: the printed command is a path
+    # install.sh resolved through python3 (MSYS form, `/c/Users/...` on Git
+    # Bash) while $CONFLICT_STORE was built by hand in bash (`/tmp/...`).
+    # Those are the same directory spelled two ways -- comparing them as
+    # strings failed on windows CI while the product was entirely correct.
+    sl_check_same_path "ACTION REQUIRED block names the literal scripts dir" \
         "${CONFLICT_STORE}/scripts/copilot-session-review.sh" "${CONFLICT_CMD#bash }"
     check "ACTION REQUIRED block leaks no placeholder" "0" \
         "$(printf '%s' "$CONFLICT_BLOCK" | grep -c '__SL_SCRIPTS_DIR__' || true)"
