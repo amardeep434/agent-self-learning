@@ -539,7 +539,7 @@ by default. Environment variables with the same names override the file.
 | `SL_COPILOT_REVIEW_MODEL` | (CLI default) | Model for Copilot reviews; use the cheapest available. Must match `^[A-Za-z0-9._-]+$` |
 | `SL_COPILOT_MAX_AI_CREDITS` | (empty — off) | Optional cost ceiling for Copilot reviews (`--max-ai-credits`). Integer, minimum 30; anything else is dropped with a reason on stderr. See note below |
 | `SL_SKILLOPT_ENABLED` | `false` | Route C: SkillOpt skill optimization (opt-in) |
-| `SL_SKILLOPT_REPO` | (empty) | path to a microsoft/SkillOpt checkout |
+| `SL_SKILLOPT_REPO` | (empty) | path to a microsoft/SkillOpt checkout. **Optional** when the `skillopt-sleep` CLI is on `PATH` (`pip install skillopt` / `uv tool install skillopt`): `scripts/skillopt-run.sh` prefers a checkout when one is set and usable, and otherwise falls back to that CLI — upstream's own precedence. A checkout is still worth setting, because a clone of `main` can be ahead of the published package |
 | `SL_SKILLOPT_RUN_CONFIRMED` | `false` | safety gate; the expensive `run` verb refuses until set true after a dry-run cost review |
 
 ### Bounding reviewer cost

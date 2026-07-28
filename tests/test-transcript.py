@@ -132,7 +132,7 @@ class TestSummarizeClaudeEvents(unittest.TestCase):
     def test_realistic_session_yields_only_real_conversation_text(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write(tmp, _realistic_claude_session_lines())
-            messages, total = transcript.summarize_claude_events(path)
+            messages, total, _ = transcript.summarize_claude_events(path)
             self.assertEqual(total, 5)
             self.assertEqual(
                 messages,
@@ -142,7 +142,7 @@ class TestSummarizeClaudeEvents(unittest.TestCase):
     def test_thinking_and_tool_use_blocks_excluded(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write(tmp, _realistic_claude_session_lines())
-            messages, _ = transcript.summarize_claude_events(path)
+            messages, _, _ = transcript.summarize_claude_events(path)
             joined = " ".join(c for _, c in messages)
             self.assertNotIn("internal reasoning", joined)
             self.assertNotIn("Read", joined)
@@ -150,14 +150,14 @@ class TestSummarizeClaudeEvents(unittest.TestCase):
     def test_tool_result_user_turn_excluded(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write(tmp, _realistic_claude_session_lines())
-            messages, _ = transcript.summarize_claude_events(path)
+            messages, _, _ = transcript.summarize_claude_events(path)
             joined = " ".join(c for _, c in messages)
             self.assertNotIn("file contents here", joined)
 
     def test_is_meta_turn_excluded(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write(tmp, _realistic_claude_session_lines())
-            messages, _ = transcript.summarize_claude_events(path)
+            messages, _, _ = transcript.summarize_claude_events(path)
             joined = " ".join(c for _, c in messages)
             self.assertNotIn("Continue from where you left off", joined)
 
@@ -168,28 +168,28 @@ class TestSummarizeClaudeEvents(unittest.TestCase):
                 _claude_line("user", {"role": "user", "content": "MAIN_CONTENT"}),
             ]
             path = self._write(tmp, lines)
-            messages, total = transcript.summarize_claude_events(path)
+            messages, total, _ = transcript.summarize_claude_events(path)
             self.assertEqual(total, 2)
             self.assertEqual(messages, [("User", "MAIN_CONTENT")])
 
     def test_empty_file_yields_no_messages_and_zero_total(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write(tmp, [])
-            messages, total = transcript.summarize_claude_events(path)
+            messages, total, _ = transcript.summarize_claude_events(path)
             self.assertEqual(messages, [])
             self.assertEqual(total, 0)
 
     def test_system_only_events_yield_no_messages_but_nonzero_total(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write(tmp, [_claude_line("system", extra={"subtype": "x"})])
-            messages, total = transcript.summarize_claude_events(path)
+            messages, total, _ = transcript.summarize_claude_events(path)
             self.assertEqual(messages, [])
             self.assertEqual(total, 1)
 
     def test_malformed_json_lines_are_skipped_not_counted(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write(tmp, ["not json", _claude_line("user", {"role": "user", "content": "hi"})])
-            messages, total = transcript.summarize_claude_events(path)
+            messages, total, _ = transcript.summarize_claude_events(path)
             self.assertEqual(total, 1)
             self.assertEqual(messages, [("User", "hi")])
 
@@ -201,19 +201,19 @@ class TestSummarizeClaudeEvents(unittest.TestCase):
                 _claude_line("user", {"role": "user", "content": "real"}),
             ]
             path = self._write(tmp, lines)
-            messages, total = transcript.summarize_claude_events(path)
+            messages, total, _ = transcript.summarize_claude_events(path)
             self.assertEqual(total, 3)
             self.assertEqual(messages, [("User", "real")])
 
 
 class TestBuildClaudeSessionDigest(unittest.TestCase):
     def test_no_transcript_path(self):
-        digest, reason, _ = transcript.build_claude_session_digest("")
+        digest, reason, _, _ = transcript.build_claude_session_digest("")
         self.assertEqual(digest, "")
         self.assertIn("no transcript_path", reason)
 
     def test_missing_file(self):
-        digest, reason, _ = transcript.build_claude_session_digest("/nonexistent/does-not-exist.jsonl")
+        digest, reason, _, _ = transcript.build_claude_session_digest("/nonexistent/does-not-exist.jsonl")
         self.assertEqual(digest, "")
         self.assertIn("not found", reason)
 
@@ -221,7 +221,7 @@ class TestBuildClaudeSessionDigest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "t.jsonl"
             p.write_text("", encoding="utf-8")
-            digest, reason, _ = transcript.build_claude_session_digest(str(p))
+            digest, reason, _, _ = transcript.build_claude_session_digest(str(p))
             self.assertEqual(digest, "")
             self.assertIn("empty", reason)
 
@@ -229,7 +229,7 @@ class TestBuildClaudeSessionDigest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "t.jsonl"
             p.write_text(_claude_line("system", extra={"subtype": "x"}) + "\n", encoding="utf-8")
-            digest, reason, _ = transcript.build_claude_session_digest(str(p))
+            digest, reason, _, _ = transcript.build_claude_session_digest(str(p))
             self.assertEqual(digest, "")
             self.assertIn("no user/assistant text content", reason)
 
@@ -237,7 +237,7 @@ class TestBuildClaudeSessionDigest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "t.jsonl"
             p.write_text("\n".join(_realistic_claude_session_lines()) + "\n", encoding="utf-8")
-            digest, reason, _ = transcript.build_claude_session_digest(str(p))
+            digest, reason, _, _ = transcript.build_claude_session_digest(str(p))
             self.assertEqual(reason, "")
             self.assertIn("PLACEHOLDER_USER_TEXT", digest)
             self.assertIn("PLACEHOLDER_ASSISTANT_TEXT", digest)
@@ -247,7 +247,7 @@ class TestBuildClaudeSessionDigest(unittest.TestCase):
             p = Path(tmp) / "t.jsonl"
             lines = [_claude_line("user", {"role": "user", "content": 'api_key: "abcdefghijklmnopqrstuvwx"'})]
             p.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            digest, reason, _ = transcript.build_claude_session_digest(str(p))
+            digest, reason, _, _ = transcript.build_claude_session_digest(str(p))
             self.assertEqual(reason, "")
             self.assertNotIn("abcdefghijklmnopqrstuvwx", digest)
 
@@ -259,7 +259,7 @@ class TestBuildClaudeSessionDigest(unittest.TestCase):
                 for i in range(200)
             ]
             p.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            digest, reason, _ = transcript.build_claude_session_digest(str(p), max_chars=2000)
+            digest, reason, _, _ = transcript.build_claude_session_digest(str(p), max_chars=2000)
             self.assertEqual(reason, "")
             self.assertLessEqual(len(digest), 2200)
             self.assertIn("turn 199", digest)
@@ -294,10 +294,10 @@ class TestHarnessParity(unittest.TestCase):
             ]
             claude_path.write_text("\n".join(claude_lines) + "\n", encoding="utf-8")
 
-            copilot_digest, copilot_reason, _ = transcript.build_copilot_session_digest(
+            copilot_digest, copilot_reason, _, _ = transcript.build_copilot_session_digest(
                 "s1", {"SL_COPILOT_HOME": tmp}
             )
-            claude_digest, claude_reason, _ = transcript.build_claude_session_digest(str(claude_path))
+            claude_digest, claude_reason, _, _ = transcript.build_claude_session_digest(str(claude_path))
 
             self.assertEqual(copilot_reason, "")
             self.assertEqual(claude_reason, "")
@@ -338,10 +338,10 @@ class TestHarnessParity(unittest.TestCase):
             ]
             claude_path.write_text("\n".join(claude_lines) + "\n", encoding="utf-8")
 
-            copilot_digest, copilot_reason, _ = transcript.build_copilot_session_digest(
+            copilot_digest, copilot_reason, _, _ = transcript.build_copilot_session_digest(
                 "s1", {"SL_COPILOT_HOME": tmp}, max_chars=cap
             )
-            claude_digest, claude_reason, _ = transcript.build_claude_session_digest(
+            claude_digest, claude_reason, _, _ = transcript.build_claude_session_digest(
                 str(claude_path), max_chars=cap
             )
 
@@ -361,14 +361,14 @@ class TestSummarizeEvents(unittest.TestCase):
     def test_realistic_session_yields_one_user_one_assistant_message(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write(tmp, _realistic_session_lines())
-            messages, total = transcript.summarize_events(path)
+            messages, total, _ = transcript.summarize_events(path)
             self.assertEqual(total, 13)
             self.assertEqual(messages, [("User", "Say only: PLACEHOLDER"), ("Assistant", "PLACEHOLDER")])
 
     def test_empty_file_yields_no_messages_and_zero_total(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write(tmp, [])
-            messages, total = transcript.summarize_events(path)
+            messages, total, _ = transcript.summarize_events(path)
             self.assertEqual(messages, [])
             self.assertEqual(total, 0)
 
@@ -378,28 +378,31 @@ class TestSummarizeEvents(unittest.TestCase):
                 _event("session.start", {"sessionId": "s1"}),
                 _event("session.shutdown", {"shutdownType": "complete"}),
             ])
-            messages, total = transcript.summarize_events(path)
+            messages, total, _ = transcript.summarize_events(path)
             self.assertEqual(messages, [])
             self.assertEqual(total, 2)
 
     def test_malformed_json_lines_are_skipped_not_counted(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write(tmp, ["not json", "{broken", _event("user.message", {"content": "hi"})])
-            messages, total = transcript.summarize_events(path)
+            messages, total, _ = transcript.summarize_events(path)
             self.assertEqual(total, 1)
             self.assertEqual(messages, [("User", "hi")])
 
     def test_non_string_content_is_ignored(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write(tmp, [_event("user.message", {"content": {"weird": "shape"}})])
-            messages, total = transcript.summarize_events(path)
+            messages, total, unknown = transcript.summarize_events(path)
             self.assertEqual(messages, [])
             self.assertEqual(total, 1)
+            # Ignored for extraction, but NOT ignored entirely -- see
+            # TestSchemaDrift.
+            self.assertEqual(unknown, {"data.content": 1})
 
     def test_empty_string_content_is_ignored(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write(tmp, [_event("user.message", {"content": ""})])
-            messages, total = transcript.summarize_events(path)
+            messages, total, _ = transcript.summarize_events(path)
             self.assertEqual(messages, [])
 
 
@@ -498,7 +501,7 @@ class TestFindEventsFile(unittest.TestCase):
 
 class TestBuildCopilotSessionDigest(unittest.TestCase):
     def test_no_session_id(self):
-        digest, reason, _ = transcript.build_copilot_session_digest("", {"SL_COPILOT_HOME": "/tmp/x"})
+        digest, reason, _, _ = transcript.build_copilot_session_digest("", {"SL_COPILOT_HOME": "/tmp/x"})
         self.assertEqual(digest, "")
         self.assertIn("no sessionId", reason)
 
@@ -508,7 +511,7 @@ class TestBuildCopilotSessionDigest(unittest.TestCase):
         # its absence means a wrong state root or an externally deleted
         # session -- exactly what persist-failures.log is for.
         with tempfile.TemporaryDirectory() as tmp:
-            digest, reason, outcome = transcript.build_copilot_session_digest(
+            digest, reason, outcome, _ = transcript.build_copilot_session_digest(
                 "nope", {"SL_COPILOT_HOME": tmp}
             )
             self.assertEqual(digest, "")
@@ -520,7 +523,7 @@ class TestBuildCopilotSessionDigest(unittest.TestCase):
             d = Path(tmp) / "session-state" / "s1"
             d.mkdir(parents=True)
             (d / "events.jsonl").write_text("", encoding="utf-8")
-            digest, reason, _ = transcript.build_copilot_session_digest("s1", {"SL_COPILOT_HOME": tmp})
+            digest, reason, _, _ = transcript.build_copilot_session_digest("s1", {"SL_COPILOT_HOME": tmp})
             self.assertEqual(digest, "")
             self.assertIn("empty", reason)
 
@@ -529,7 +532,7 @@ class TestBuildCopilotSessionDigest(unittest.TestCase):
             d = Path(tmp) / "session-state" / "s1"
             d.mkdir(parents=True)
             (d / "events.jsonl").write_text(_event("session.start", {}) + "\n", encoding="utf-8")
-            digest, reason, _ = transcript.build_copilot_session_digest("s1", {"SL_COPILOT_HOME": tmp})
+            digest, reason, _, _ = transcript.build_copilot_session_digest("s1", {"SL_COPILOT_HOME": tmp})
             self.assertEqual(digest, "")
             self.assertIn("no user/assistant messages", reason)
 
@@ -539,7 +542,7 @@ class TestBuildCopilotSessionDigest(unittest.TestCase):
             d.mkdir(parents=True)
             lines = _realistic_session_lines()
             (d / "events.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
-            digest, reason, _ = transcript.build_copilot_session_digest("s1", {"SL_COPILOT_HOME": tmp})
+            digest, reason, _, _ = transcript.build_copilot_session_digest("s1", {"SL_COPILOT_HOME": tmp})
             self.assertEqual(reason, "")
             self.assertIn("PLACEHOLDER", digest)
 
@@ -576,7 +579,7 @@ class TestEmptySessionClassification(unittest.TestCase):
     def test_started_but_silent_session_is_not_a_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             _make_started_but_silent_session(Path(tmp))
-            digest, reason, outcome = transcript.build_copilot_session_digest(
+            digest, reason, outcome, _ = transcript.build_copilot_session_digest(
                 "s1", {"SL_COPILOT_HOME": tmp}
             )
             self.assertEqual(digest, "")
@@ -591,7 +594,7 @@ class TestEmptySessionClassification(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             d = _make_started_but_silent_session(Path(tmp))
             (d / "session.db").write_bytes(b"SQLite format 3\x00")
-            digest, reason, outcome = transcript.build_copilot_session_digest(
+            digest, reason, outcome, _ = transcript.build_copilot_session_digest(
                 "s1", {"SL_COPILOT_HOME": tmp}
             )
             self.assertEqual(digest, "")
@@ -603,7 +606,7 @@ class TestEmptySessionClassification(unittest.TestCase):
             d = _make_started_but_silent_session(Path(tmp))
             (d / "session.db").write_bytes(b"SQLite format 3\x00")
             (d / "events.jsonl").write_text("not json at all\n{{{\n", encoding="utf-8")
-            _, _, outcome = transcript.build_copilot_session_digest(
+            _, _, outcome, _ = transcript.build_copilot_session_digest(
                 "s1", {"SL_COPILOT_HOME": tmp}
             )
             self.assertEqual(outcome, transcript.OUTCOME_FAILURE)
@@ -625,8 +628,183 @@ class TestEmptySessionClassification(unittest.TestCase):
             p = Path(tmp) / "t.jsonl"
             p.write_text("", encoding="utf-8")
             for identifier in ("", "/nonexistent/ghost.jsonl", str(p)):
-                _, _, outcome = transcript.build_claude_session_digest(identifier)
+                _, _, outcome, _ = transcript.build_claude_session_digest(identifier)
                 self.assertEqual(outcome, transcript.OUTCOME_FAILURE, identifier)
+
+
+class TestSchemaDrift(unittest.TestCase):
+    """C6. Total breakage of either on-disk format is already loud (zero
+    messages -> OUTCOME_FAILURE -> persist-failures.log -> doctor UNHEALTHY).
+    PARTIAL drift was not: a session whose assistant turns alone change shape
+    loses every one of them while the exit code, persist.log and
+    persist-failures.log stay byte-identical to a healthy run.
+
+    The two properties asserted here pull in opposite directions and both
+    matter: drift must be LOUD, and a healthy session must never trip it.
+    The second is the harder one -- half of all real Copilot conversation
+    events carry an empty string, and a detector that treated that as drift
+    would fire on almost every session and be switched off within a week.
+    """
+
+    def test_healthy_copilot_session_has_no_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "session-state" / "s1"
+            d.mkdir(parents=True)
+            (d / "events.jsonl").write_text(
+                "\n".join(_realistic_session_lines()) + "\n", encoding="utf-8"
+            )
+            _, _, outcome, drift = transcript.build_copilot_session_digest(
+                "s1", {"SL_COPILOT_HOME": tmp}
+            )
+            self.assertEqual(outcome, transcript.OUTCOME_OK)
+            self.assertEqual(drift, "")
+
+    def test_empty_assistant_turns_are_normal_not_drift(self):
+        # 1,265 of the 2,729 conversation events in the local Copilot corpus
+        # carry content "" -- an assistant turn that only called tools says
+        # nothing. Flagging that would be a ~46% false-positive rate.
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "session-state" / "s1"
+            d.mkdir(parents=True)
+            lines = [_event("user.message", {"content": "real question"})]
+            for _ in range(20):
+                lines.append(_event("assistant.message", {"content": ""}))
+            lines.append(_event("assistant.message", {"content": "real answer"}))
+            (d / "events.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+            _, _, outcome, drift = transcript.build_copilot_session_digest(
+                "s1", {"SL_COPILOT_HOME": tmp}
+            )
+            self.assertEqual(outcome, transcript.OUTCOME_OK)
+            self.assertEqual(drift, "", "an empty assistant turn is ordinary, not drift")
+
+    def test_missing_content_key_is_not_drift(self):
+        # Absent is not the same as wrongly-shaped; only a present value of
+        # an unrecognised type counts.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "events.jsonl"
+            path.write_text(
+                _event("assistant.message", {"messageId": "m1"}) + "\n", encoding="utf-8"
+            )
+            _, _, unknown = transcript.summarize_events(path)
+            self.assertEqual(unknown, {})
+
+    def test_partial_copilot_drift_is_loud_but_does_not_break_the_session(self):
+        # The exact reproduction: ONLY assistant.message content moves from a
+        # plain string to a block list. Every assistant turn is lost.
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "session-state" / "s1"
+            d.mkdir(parents=True)
+            lines = []
+            for i in range(5):
+                lines.append(_event("user.message", {"content": f"user turn {i}"}))
+                lines.append(_event("assistant.message", {
+                    "content": [{"type": "text", "text": f"assistant turn {i}"}],
+                }))
+            (d / "events.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+            digest, reason, outcome, drift = transcript.build_copilot_session_digest(
+                "s1", {"SL_COPILOT_HOME": tmp}
+            )
+            # Not broken: the surviving half is still returned, still OK.
+            self.assertEqual(outcome, transcript.OUTCOME_OK)
+            self.assertEqual(reason, "")
+            self.assertIn("user turn 4", digest)
+            # But loud, and specific enough to act on.
+            self.assertIn("SCHEMA DRIFT", drift)
+            self.assertIn("5", drift)               # the count
+            self.assertIn("data.content", drift)    # the path
+            self.assertIn("5 message(s)", drift)    # what still came through
+
+    def test_one_drifted_value_is_enough(self):
+        # Threshold is 1, deliberately: the shapes are 2729/2729 and
+        # 58124/58124 stable in the corpora, so a single exception is not
+        # noise. A threshold of 2 would let a small-session drift through.
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "session-state" / "s1"
+            d.mkdir(parents=True)
+            lines = [
+                _event("user.message", {"content": "still fine"}),
+                _event("assistant.message", {"content": ["drifted"]}),
+            ]
+            (d / "events.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+            _, _, outcome, drift = transcript.build_copilot_session_digest(
+                "s1", {"SL_COPILOT_HOME": tmp}
+            )
+            self.assertEqual(outcome, transcript.OUTCOME_OK)
+            self.assertIn("SCHEMA DRIFT", drift)
+
+    def test_healthy_claude_session_has_no_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "t.jsonl"
+            p.write_text("\n".join(_realistic_claude_session_lines()) + "\n", encoding="utf-8")
+            _, _, outcome, drift = transcript.build_claude_session_digest(str(p))
+            self.assertEqual(outcome, transcript.OUTCOME_OK)
+            self.assertEqual(drift, "")
+
+    def test_unknown_claude_block_types_are_not_drift(self):
+        # `fallback` (x26) and `image` (x2) already occur legitimately in the
+        # local corpus and carry no prose. Flagging unknown block TYPES has a
+        # demonstrated false-positive rate; only container SHAPES are closed.
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "t.jsonl"
+            lines = [_claude_line("assistant", {
+                "role": "assistant",
+                "content": [
+                    {"type": "fallback", "raw": "..."},
+                    {"type": "image", "source": {}},
+                    {"type": "text", "text": "PLACEHOLDER_ASSISTANT_TEXT"},
+                ],
+            })]
+            p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            digest, _, outcome, drift = transcript.build_claude_session_digest(str(p))
+            self.assertEqual(outcome, transcript.OUTCOME_OK)
+            self.assertIn("PLACEHOLDER_ASSISTANT_TEXT", digest)
+            self.assertEqual(drift, "", "an unfamiliar block type is not drift")
+
+    def test_claude_scalar_content_is_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "t.jsonl"
+            lines = [
+                _claude_line("user", {"role": "user", "content": "still fine"}),
+                _claude_line("assistant", {"role": "assistant", "content": {"text": "drifted"}},
+                             uuid="u2"),
+            ]
+            p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            _, _, outcome, drift = transcript.build_claude_session_digest(str(p))
+            self.assertEqual(outcome, transcript.OUTCOME_OK)
+            self.assertIn("SCHEMA DRIFT", drift)
+            self.assertIn("message.content", drift)
+
+    def test_claude_non_dict_block_is_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "t.jsonl"
+            lines = [
+                _claude_line("user", {"role": "user", "content": "still fine"}),
+                _claude_line("assistant",
+                             {"role": "assistant", "content": ["a bare string block"]}, uuid="u2"),
+            ]
+            p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            _, _, outcome, drift = transcript.build_claude_session_digest(str(p))
+            self.assertEqual(outcome, transcript.OUTCOME_OK)
+            self.assertIn("message.content[]", drift)
+
+    def test_drift_is_reported_even_when_the_session_also_fails(self):
+        # Total drift: nothing survives. The failure must stay loud AND the
+        # cause must be named, rather than the drift being lost because the
+        # outcome branch got there first.
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "session-state" / "s1"
+            d.mkdir(parents=True)
+            lines = [_event("user.message", {"content": [{"type": "text", "text": "x"}]})]
+            (d / "events.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+            _, reason, outcome, drift = transcript.build_copilot_session_digest(
+                "s1", {"SL_COPILOT_HOME": tmp}
+            )
+            self.assertEqual(outcome, transcript.OUTCOME_FAILURE)
+            self.assertIn("no user/assistant messages", reason)
+            self.assertIn("SCHEMA DRIFT", drift)
+
+    def test_describe_drift_is_empty_when_nothing_drifted(self):
+        self.assertEqual(transcript.describe_drift({}, 7), "")
 
 
 class TestCli(unittest.TestCase):
@@ -744,6 +922,68 @@ class TestCli(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
             self.assertIn("events.jsonl not found", log_file.read_text())
             self.assertFalse(notice.exists())
+
+    def test_partial_drift_reaches_the_failure_log_without_breaking_the_run(self):
+        # C6 end-to-end, through main(): this is the assertion that the fix
+        # actually reaches doctor.sh. doctor.sh section 5 flips STATUS on ANY
+        # non-empty persist-failures.log, so a line here IS an UNHEALTHY
+        # verdict -- and the timestamp must lead, because section 5 parses
+        # the last line's first field as one.
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "session-state" / "s1"
+            d.mkdir(parents=True)
+            lines = []
+            for i in range(5):
+                lines.append(_event("user.message", {"content": f"user turn {i}"}))
+                lines.append(_event("assistant.message", {
+                    "content": [{"type": "text", "text": f"assistant turn {i}"}],
+                }))
+            (d / "events.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+            log_file = Path(tmp) / "persist-failures.log"
+            result = self._run(["s1", "--home", tmp, "--log-file", str(log_file)])
+
+            # The session is NOT broken by the drift.
+            self.assertEqual(result.returncode, 0)
+            self.assertIn("user turn 4", result.stdout)
+
+            # ...but it is no longer silent.
+            self.assertTrue(log_file.is_file(), "partial drift must not be silent")
+            line = log_file.read_text().strip()
+            self.assertIn("SCHEMA DRIFT", line)
+            self.assertIn("data.content", line)
+            self.assertIn("copilot-session-review:", line)
+            self.assertRegex(line, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z ")
+
+    def test_healthy_session_writes_no_drift_line(self):
+        # The other half of the canary: it must be capable of NOT firing.
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "session-state" / "s1"
+            d.mkdir(parents=True)
+            (d / "events.jsonl").write_text(
+                "\n".join(_realistic_session_lines()) + "\n", encoding="utf-8"
+            )
+            log_file = Path(tmp) / "persist-failures.log"
+            result = self._run(["s1", "--home", tmp, "--log-file", str(log_file)])
+            self.assertEqual(result.returncode, 0)
+            self.assertFalse(log_file.exists())
+
+    def test_claude_partial_drift_reaches_the_failure_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "t.jsonl"
+            lines = [
+                _claude_line("user", {"role": "user", "content": "PLACEHOLDER_USER_TEXT"}),
+                _claude_line("assistant", {"role": "assistant", "content": {"text": "drifted"}},
+                             uuid="u2"),
+            ]
+            p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            log_file = Path(tmp) / "persist-failures.log"
+            result = self._run(["--harness", "claude", str(p), "--log-file", str(log_file)])
+            self.assertEqual(result.returncode, 0)
+            self.assertIn("PLACEHOLDER_USER_TEXT", result.stdout)
+            line = log_file.read_text().strip()
+            self.assertIn("SCHEMA DRIFT", line)
+            self.assertIn("session-review:", line)
+            self.assertNotIn("copilot-session-review:", line)
 
     def test_default_harness_is_copilot_unaffected_by_claude_addition(self):
         # Backward compatibility: existing copilot-session-review.sh callers
