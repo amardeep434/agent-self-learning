@@ -460,7 +460,7 @@ re-vendor changes it. Re-vendor rules with
 | 2 | Background Review (review prompts, memory/skill writes) | Done — reviewer proposes JSON on stdout, `scripts/persist-proposal.py` validates and writes, confined to the resolved store |
 | 3 | Skill Lifecycle (telemetry, state machine, authoring standards) | Done |
 | 4 | Curator + Session Search (consolidation, FTS5 index) | Done |
-| 5 | Integration + Polish (config, caching, install, health check) | Done for Claude Code + Copilot CLI; VS Code Copilot Chat adapter not started (tracked separately). For CI status run `gh run list --branch main` — no run id is recorded here, deliberately; see "Agent compatibility" above for the Windows skip caveat |
+| 5 | Integration + Polish (config, caching, install, health check) | Done for Claude Code + Copilot CLI; VS Code Copilot Chat adapter **not started and not tracked anywhere** — a declared peer (see the top of this file) deferred by the 2026-07-25 plan under "Out of Scope (subsequent plans)", i.e. owed later. Verified 2026-07-28: no GitHub issue and no plan file exists; the previous "tracked separately" wording described a tracker that does not exist. For CI status run `gh run list --branch main` — no run id is recorded here, deliberately; see "Agent compatibility" above for the Windows skip caveat |
 
 See "Storage locations" above for the harness-neutral persistence work that
 followed the original 5-phase plan: a shared, vendor-neutral store plus a

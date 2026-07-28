@@ -274,7 +274,26 @@ Sources: <https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-
 **E9 — the VS Code Copilot Chat adapter.** Named in the plan's own out-of-scope list
 (`2026-07-25-…​.md:1681`), and both `README.md:448` and `CLAUDE.md:88` say "not started
 (tracked separately)". There is no half-built adapter in the tree, no dead config, no
-test asserting a capability that does not exist. This is real exclusion, not debt. One
+test asserting a capability that does not exist.
+
+> **Corrected 2026-07-28. This section previously said "real exclusion, not debt", and
+> that was wrong twice over.**
+>
+> 1. **It is in project scope.** `README.md:3` and `CLAUDE.md:82` both state the system
+>    "serves Claude Code, GitHub Copilot CLI, and (planned) VS Code Copilot Chat as
+>    peers". VS Code is a declared peer, not a non-goal.
+> 2. **The plan deferred it, it did not exclude it.** The heading is
+>    `## Out of Scope (subsequent plans)` — "subsequent plans" means owed later. The
+>    entry reads "VS Code hook spike and adapter".
+>
+> And the claim that it is "tracked separately" is **false**: `gh issue list --state all`
+> returns zero issues (issues are enabled on the repo), and `docs/superpowers/plans/`
+> contains only the two completed plans. Nothing anywhere tracks this work. A phrase that
+> implies a backlog item which does not exist is the documentation form of this project's
+> signature defect — it reads as handled while nothing is.
+>
+> Correct status: **deferred to a subsequent plan, in scope, and currently untracked.**
+> Closing that needs either a GitHub issue or a plan file; neither exists yet. One
 caveat worth knowing: `README.md:311` documents Coach **Route B**
 (`SL_COACH_EXPORT_ENABLED=true`) as requiring "our maintained fork's `.vsix` installed in
 VS Code". That fork is an external dependency this repository does not contain, does not
