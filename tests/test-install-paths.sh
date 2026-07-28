@@ -12,6 +12,8 @@ FAILURES=0
 check() { if [[ "$2" == "$3" ]]; then echo "PASS: $1"; else echo "FAIL: $1 (expected '$2', got '$3')"; FAILURES=$((FAILURES+1)); fi; }
 # shellcheck source=tests/lib/path-compare.sh
 source "${SCRIPT_DIR}/tests/lib/path-compare.sh"
+# shellcheck source=tests/lib/hook-command.sh
+source "${SCRIPT_DIR}/tests/lib/hook-command.sh"
 
 TMP_HOME="$(mktemp -d)"
 trap 'rm -rf "$TMP_HOME"' EXIT
@@ -199,7 +201,10 @@ if [[ -f "$COPILOT_HOOK" ]]; then
     # The path named in the hook config must point at a file that actually
     # exists — a correctly-formed but wrong substitution must fail this.
     HOOK_BASH_CMD="$(jq -r '.hooks.sessionEnd[0].bash' "$COPILOT_HOOK")"
-    HOOK_SCRIPT_PATH="${HOOK_BASH_CMD#bash }"
+    # Tokenized, not prefix-stripped: the hook command shell-quotes its
+    # path (see tests/test-hook-command-quoting.sh), so `${cmd#bash }`
+    # would leave the quotes on and report a correct hook as missing.
+    HOOK_SCRIPT_PATH="$(sl_hook_script_path "$HOOK_BASH_CMD")"
     check "hook-config script path exists on disk" "yes" \
         "$([[ -f "$HOOK_SCRIPT_PATH" ]] && echo yes || echo no)"
     check "hook-config script path equals installed copilot-session-review.sh" \
@@ -240,7 +245,7 @@ if [[ -f "$CLAUDE_HOOK_RENDERED" ]]; then
         # of it that is still unexplained. Strip confirmed necessary: without
         # it these three probes fail on both windows-latest cells.
         cmd="${cmd%$'\r'}"
-        hook_script="${cmd#bash }"
+        hook_script="$(sl_hook_script_path "$cmd")"
         if [[ -f "$hook_script" ]]; then
             echo "PASS: rendered hook path exists on disk: $(basename "$hook_script")"
         else
@@ -358,12 +363,21 @@ rm -rf "$MISSING_SCRIPT_SRC" "$MISSING_TMP_HOME"
 # constructed, so nothing here has to know which form is in use.
 COPILOT_HOOK="${TMP_HOME}/.copilot/hooks/self-learning.json"
 
-# Rewrite whatever directory currently precedes our script name to $1.
-# Same basic-sed normalization install.sh itself uses, for the same
-# portability reasons (GNU/BSD/MSYS).
+# Point the hook at directory $1, by RENDERING the template there -- the
+# same call install.sh makes, so the fixture is a genuine "ours, installed
+# somewhere else" file whatever shape the template currently has.
+#
+# This used to rewrite the existing file with
+# `sed "s#[^\" ]*/copilot-session-review\.sh#...#g"`, which is the very
+# character class e7163b6 removed from install.sh: it excludes the space, and
+# once the hook command gained shell quoting it also ate the opening quote
+# (leaving `bash /legacy/...sh'`), so the fixture was no longer anything
+# install.sh could classify and U1 failed against correct code. A test helper
+# that reimplements the thing under test is a second place for the same bug
+# to live.
 repoint_hook_to() {
-    sed "s#[^\" ]*/copilot-session-review\.sh#$1/copilot-session-review.sh#g" \
-        "$COPILOT_HOOK" > "${COPILOT_HOOK}.new"
+    printf '%s' "$1" | python3 "${SCRIPT_DIR}/scripts/lib/render-template.py" \
+        "${SCRIPT_DIR}/config/copilot-hooks.json" > "${COPILOT_HOOK}.new"
     mv "${COPILOT_HOOK}.new" "$COPILOT_HOOK"
 }
 LEGACY_DIR="${TMP_HOME}/.claude/scripts/self-learning"

@@ -69,6 +69,45 @@ windows MSYS form|  "bash": "bash /c/Users/u/store/scripts/copilot-session-revie
 windows native drive form, powershell value|  "powershell": "bash -lc \"C:/Users/u/My Store/scripts/copilot-session-review.sh\"",|  "powershell": "bash -lc \"__SL_SCRIPTS_DIR__/copilot-session-review.sh\"",
 CASES
 
+# The SHIPPING shape: the hook command shell-quotes its path, so the scan's
+# left boundary is now an apostrophe rather than a space or a `\"`. The cases
+# above are kept, unquoted, on purpose -- that is exactly what is on disk for
+# anyone upgrading from a pre-quoting install, and install.sh has to keep
+# classifying those as "ours, relocated" rather than spraying a .bak.
+while IFS='|' read -r label input expected; do
+    [[ -z "$label" ]] && continue
+    check "normalize: ${label}" "$expected" "$(norm_line "$input")"
+done <<'QUOTED_CASES'
+quoted bash value, no space|  "bash": "bash '/home/u/store/scripts/copilot-session-review.sh'",|  "bash": "bash '__SL_SCRIPTS_DIR__/copilot-session-review.sh'",
+quoted bash value, space in path|  "bash": "bash '/home/u/My Store/scripts/copilot-session-review.sh'",|  "bash": "bash '__SL_SCRIPTS_DIR__/copilot-session-review.sh'",
+quoted powershell value, no space|  "powershell": "bash -lc \"'/home/u/store/scripts/copilot-session-review.sh'\"",|  "powershell": "bash -lc \"'__SL_SCRIPTS_DIR__/copilot-session-review.sh'\"",
+quoted powershell value, space in path|  "powershell": "bash -lc \"'/home/u/My Store/scripts/copilot-session-review.sh'\"",|  "powershell": "bash -lc \"'__SL_SCRIPTS_DIR__/copilot-session-review.sh'\"",
+quoted bash value, windows native drive form|  "bash": "bash 'C:/Users/u/My Store/scripts/copilot-session-review.sh'",|  "bash": "bash '__SL_SCRIPTS_DIR__/copilot-session-review.sh'",
+QUOTED_CASES
+
+# --- 1b. --print-path: the same scan, asked for the directory ---
+#
+# install.sh's "UPDATED (was stale)" branch prints where the hook used to
+# point, and used to recover that with a sed expression of its own. That
+# expression anchored on `.sh"` and silently degraded to `<unknown>` the
+# moment the value gained quoting -- a success message that had stopped
+# saying what changed. It is now the same scan as the rewrite above.
+print_path() {
+    printf '%s\n' "$1" > "${TMP}/pp.json"
+    python3 "$NORMALIZER" --print-path "${TMP}/pp.json" "$SCRIPT_NAME"
+}
+check "print-path: quoted bash value with a space" "/home/u/My Store/scripts" \
+    "$(print_path '  "bash": "bash '"'"'/home/u/My Store/scripts/copilot-session-review.sh'"'"'",')"
+check "print-path: unquoted bash value (pre-quoting install)" "/home/u/store/scripts" \
+    "$(print_path '  "bash": "bash /home/u/store/scripts/copilot-session-review.sh",')"
+check "print-path: windows native drive form" "C:/Users/u/My Store/scripts" \
+    "$(print_path '  "bash": "bash '"'"'C:/Users/u/My Store/scripts/copilot-session-review.sh'"'"'",')"
+# Already normalized: no install path to report. Must print NOTHING and exit
+# 0, so install.sh's `${OLD_HOOK_PATH:-<unknown>}` is what fills the gap
+# rather than a stray placeholder appearing in the message.
+check "print-path: prints nothing when there is no install path" "" \
+    "$(print_path '  "bash": "bash '"'"'__SL_SCRIPTS_DIR__/copilot-session-review.sh'"'"'",')"
+
 # --- 2. What must NOT be normalized ---
 #
 # Normalizing too much is the mirror-image defect: it makes a user's edit look
@@ -152,9 +191,12 @@ check "final hook parses as JSON" "yes" \
     "$(python3 -c 'import json,sys; json.load(open(sys.argv[1])); print("yes")' "$hook" 2>/dev/null || echo no)"
 check "final hook names an existing script" "yes" \
     "$(python3 - "$hook" <<'PY' 2>/dev/null || echo no
-import json, os, sys
+import json, os, shlex, sys
+# shlex, not cmd[len("bash "):]: the hook command shell-quotes its path (see
+# tests/test-hook-command-quoting.sh), so the fixed-width slice used to leave
+# an apostrophe on both ends and report a correct hook as missing.
 cmd = json.load(open(sys.argv[1]))["hooks"]["sessionEnd"][0]["bash"]
-print("yes" if os.path.isfile(cmd[len("bash "):]) else "no")
+print("yes" if os.path.isfile(shlex.split(cmd, posix=True)[-1]) else "no")
 PY
 )"
 

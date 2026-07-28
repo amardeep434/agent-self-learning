@@ -144,16 +144,29 @@ def _path_start(text: str, end: int) -> int | None:
     return None
 
 
+def _spans(text: str, script_name: str):
+    """Yield (match_start, path_start_or_None) for each `/<script_name>`.
+
+    The single place the scan above is driven from. `normalize` and
+    `find_paths` are two readings of the same answer, so a path either tool
+    can find is a path the other agrees about by construction.
+    """
+    needle = "/" + script_name
+    cursor = 0
+    while True:
+        i = text.find(needle, cursor)
+        if i < 0:
+            return
+        yield i, _path_start(text, i)
+        cursor = i + len(needle)
+
+
 def normalize(text: str, script_name: str) -> str:
     """Replace every install path in front of `script_name` with PLACEHOLDER."""
     needle = "/" + script_name
     out = []
     cursor = 0
-    while True:
-        i = text.find(needle, cursor)
-        if i < 0:
-            break
-        start = _path_start(text, i)
+    for i, start in _spans(text, script_name):
         if start is None:
             # Leave it exactly as found: already normalized, or relative.
             out.append(text[cursor : i + len(needle)])
@@ -166,10 +179,37 @@ def normalize(text: str, script_name: str) -> str:
     return "".join(out)
 
 
+def find_paths(text: str, script_name: str) -> list[str]:
+    """Every DIRECTORY that `script_name` is invoked from, in file order.
+
+    install.sh's "UPDATED (was stale)" branch prints where the hook used to
+    point, and that message is the only record a user gets of what changed.
+    It used to recover the directory with a sed expression of its own --
+    `s#.*"bash": "bash \\(.*\\)/copilot-session-review\\.sh".*#\\1#p` -- which
+    is a SECOND hand-rolled answer to "where does the path begin", the exact
+    question this module exists because a character class cannot answer. It
+    duly broke the moment the hook command gained shell quoting: the trailing
+    `.sh"` no longer matched `.sh'"`, so the branch printed `<unknown>` while
+    still claiming success. Same scan, one definition, so the message cannot
+    drift from the rewrite again.
+    """
+    return [
+        text[start:i]
+        for i, start in _spans(text, script_name)
+        if start is not None
+    ]
+
+
 def _main(argv: list[str]) -> int:
+    print_path = False
+    if argv and argv[0] == "--print-path":
+        print_path = True
+        argv = argv[1:]
+
     if len(argv) != 2:
         print(
-            "usage: normalize-hook-path.py <hook-file> <script-basename>",
+            "usage: normalize-hook-path.py [--print-path] <hook-file> "
+            "<script-basename>",
             file=sys.stderr,
         )
         return 2
@@ -196,7 +236,16 @@ def _main(argv: list[str]) -> int:
         )
         return 3
 
-    sys.stdout.buffer.write(normalize(text, script_name).encode("utf-8"))
+    if print_path:
+        # One directory per line, LF-terminated regardless of the file's own
+        # line endings: this output is read by `$( ... )` in install.sh, not
+        # diffed against bytes, and a CR riding along would land in the middle
+        # of the "previously ..." message. Prints nothing at all (exit 0) when
+        # no path was found, so the caller's `${VAR:-<unknown>}` still fires.
+        out = "".join(p + "\n" for p in find_paths(text, script_name))
+    else:
+        out = normalize(text, script_name)
+    sys.stdout.buffer.write(out.encode("utf-8"))
     sys.stdout.buffer.flush()
     return 0
 

@@ -28,6 +28,8 @@ check() { if [[ "$2" == "$3" ]]; then echo "PASS: $1"; else echo "FAIL: $1 (expe
 
 # shellcheck source=tests/lib/path-compare.sh
 source "${SCRIPT_DIR}/tests/lib/path-compare.sh"
+# shellcheck source=tests/lib/hook-command.sh
+source "${SCRIPT_DIR}/tests/lib/hook-command.sh"
 
 RENDERER="${SCRIPT_DIR}/scripts/lib/render-template.py"
 PATHS_PY="${SCRIPT_DIR}/scripts/lib/paths.py"
@@ -250,7 +252,8 @@ else
         while IFS= read -r cmd; do
             # See tests/test-install-paths.sh for why the \r strip is here.
             cmd="${cmd%$'\r'}"
-            script="${cmd#bash }"
+            # Tokenized: the command shell-quotes its path.
+            script="$(sl_hook_script_path "$cmd")"
             count=$((count+1))
             [[ -f "$script" ]] || { missing=$((missing+1)); echo "    missing: $script"; }
         done < <(jq -r "$filter" "$file")
@@ -331,7 +334,8 @@ else
     # Those are the same directory spelled two ways -- comparing them as
     # strings failed on windows CI while the product was entirely correct.
     sl_check_same_path "ACTION REQUIRED block names the literal scripts dir" \
-        "${CONFLICT_STORE}/scripts/copilot-session-review.sh" "${CONFLICT_CMD#bash }"
+        "${CONFLICT_STORE}/scripts/copilot-session-review.sh" \
+        "$(sl_hook_script_path "$CONFLICT_CMD")"
     check "ACTION REQUIRED block leaks no placeholder" "0" \
         "$(printf '%s' "$CONFLICT_BLOCK" | grep -c '__SL_SCRIPTS_DIR__' || true)"
 fi

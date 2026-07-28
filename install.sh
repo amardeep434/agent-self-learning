@@ -196,8 +196,11 @@ if [[ ! -f "$NORMALIZE_HOOK_PY" ]]; then
     echo "Error: ${NORMALIZE_HOOK_PY} not found" >&2
     exit 1
 fi
+# "$@", not "$1" "$2": the stale branch below calls this with a leading
+# --print-path to ask the same scan for the directory it would have rewritten,
+# rather than matching the path a second time with an expression of its own.
 normalize_hook_path() {
-    python3 "$NORMALIZE_HOOK_PY" "$1" "$2"
+    python3 "$NORMALIZE_HOOK_PY" "$@"
 }
 
 echo "Install target (resolved by paths.py): ${SL_HOME}"
@@ -455,7 +458,14 @@ if [[ -d "${HOME}/.copilot" ]]; then
     elif [[ "$(render_hook_template "$COPILOT_HOOK_SRC")" == "$(cat "$COPILOT_HOOK_DST")" ]]; then
         echo "  Up to date: $COPILOT_HOOK_DST (already points at ${SL_SCRIPTS})"
     elif [[ "$(_normalize_copilot_hook "$COPILOT_HOOK_DST")" == "$(cat "$COPILOT_HOOK_SRC")" ]]; then
-        OLD_HOOK_PATH="$(sed -n 's#.*"bash": "bash \(.*\)/copilot-session-review\.sh".*#\1#p' "$COPILOT_HOOK_DST" | head -n 1)"
+        # Same scan that decided this file was ours, asked for the directory
+        # instead of the rewrite. This used to be a sed expression of its own
+        # -- a second hand-rolled answer to "where does the path begin" -- and
+        # it broke the moment the hook command gained shell quoting around the
+        # path: the trailing `.sh"` stopped matching `.sh'"`, so this branch
+        # printed `<unknown>` while still reporting success. See
+        # lib/normalize-hook-path.py's find_paths().
+        OLD_HOOK_PATH="$(normalize_hook_path --print-path "$COPILOT_HOOK_DST" copilot-session-review.sh | head -n 1)"
         if [[ "$DRY_RUN" == "true" ]]; then
             echo "[DRY RUN] re-render STALE hook ${COPILOT_HOOK_DST}: ${OLD_HOOK_PATH:-<unknown>} -> ${SL_SCRIPTS}"
         else

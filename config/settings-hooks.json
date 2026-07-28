@@ -13,7 +13,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash __SL_SCRIPTS_DIR__/turn-counter.sh",
+            "command": "bash '__SL_SCRIPTS_DIR__/turn-counter.sh'",
             "timeout": 3
           }
         ]
@@ -25,12 +25,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash __SL_SCRIPTS_DIR__/session-review.sh",
+            "command": "bash '__SL_SCRIPTS_DIR__/session-review.sh'",
             "timeout": 15
           },
           {
             "type": "command",
-            "command": "bash __SL_SCRIPTS_DIR__/index-session.sh",
+            "command": "bash '__SL_SCRIPTS_DIR__/index-session.sh'",
             "timeout": 10
           }
         ]
