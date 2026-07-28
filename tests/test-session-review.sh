@@ -52,6 +52,12 @@ echo '{"session_id":"s1","total_turns_this_session":9,"memory_turns":0,"skill_it
 sl_clear_review_marker "$SL_LOG_DIR"
 echo '{"session_id":"s1","hook_event_name":"Stop"}' | bash "${SCRIPT_DIR}/scripts/session-review.sh"
 sl_wait_for_review_complete "$SL_LOG_DIR" || true
+# The marker itself, asserted rather than merely waited on -- see
+# sl_assert_review_marker_or_abort's header for why every wait below is
+# `|| true` and what that used to hide (this suite: exit 0 in 186s with the
+# marker write deleted). Placed on the first case that expects a review, so
+# a broken marker costs one wait budget rather than seven.
+sl_assert_review_marker_or_abort "$SL_LOG_DIR"
 check "claude was invoked" "yes" "$([[ -s "$FAKE_CLAUDE_LOG" ]] && echo yes || echo no)"
 check "guard env set for reviewer" "1" "$(grep -m1 '^GUARD:' "$FAKE_CLAUDE_LOG" | cut -d: -f2)"
 

@@ -84,16 +84,13 @@ sl_clear_review_marker "$SL_LOG_DIR"
 vscode_stop_payload "$VSCODE_TRANSCRIPT" | bash "${SCRIPT_DIR}/scripts/vscode-session-review.sh"
 sl_wait_for_review_complete "$SL_LOG_DIR" || true
 check "a reviewer was invoked" "yes" "$([[ -s "$FAKE_REVIEWER_LOG" ]] && echo yes || echo no)"
-# The completion marker itself, asserted rather than merely waited on. Every
-# `sl_wait_for_review_complete` call in the suites ends in `|| true`, and
-# every `sl_expect_no_review_spawned` is satisfied by a marker that never
-# arrives -- so deleting the marker from the shared launcher produces ZERO
-# failures across the whole suite (measured: 0 in this file, 0 in
-# tests/test-session-review.sh). That is a guard nothing was guarding. This
-# is the one assertion that fails if the marker stops being written, which
-# matters because the marker is what stops teardown racing a live writer.
-check "the detached pipeline wrote its completion marker" "yes" \
-    "$([[ -f "${SL_LOG_DIR}/.review-complete" ]] && echo yes || echo no)"
+# The completion marker itself, asserted rather than merely waited on -- the
+# assertion this file added inline, now the shared
+# sl_assert_review_marker_or_abort so all three review suites use one idiom
+# (see its header). It also aborts: a missing marker makes every later wait
+# in this file time out identically, and the marker is what stops teardown
+# racing a live writer, so there is nothing left to learn from continuing.
+sl_assert_review_marker_or_abort "$SL_LOG_DIR"
 check "recursion guard set for the reviewer" "1" \
     "$(grep -m1 '^GUARD:' "$FAKE_REVIEWER_LOG" | cut -d: -f2)"
 check "VS Code user turn reached the prompt" "yes" \

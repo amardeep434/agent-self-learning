@@ -239,7 +239,12 @@ Say these plainly rather than letting the green matrix imply otherwise.
   - **`CLAUDE.md` has been updated to reflect Run 2.** The remaining residual is only that no
     *human, multi-turn, TUI* Copilot session has yet fired the hook; ensure other docs do not
     repeat the older “transcript reaching the prompt is unexercised” wording.
-- **Route C (SkillOpt) has never run end-to-end** — needs a `microsoft/SkillOpt` checkout.
+- **Route C (SkillOpt): the cheap verbs have now run end-to-end** (2026-07-28, against a
+  `microsoft/SkillOpt` checkout at `374c832`, upstream's default `mock` backend, zero
+  cost). `status`, `harvest` and `dry-run` all passed through and returned honest empty
+  results against an empty sandbox HOME. **The `run` verb has never been executed on any
+  backend**, and nothing in this repo consumes SkillOpt's output — verified, zero hits for
+  `best_skill|skillopt` across `scripts/*.py`. Route C is a launcher, not an integration.
 - **Route B (Coach export) has never run here** — needs a fork `.vsix` this repo does not
   contain.
 - **Live telemetry/transcript extraction is never exercised in CI on any platform** — no

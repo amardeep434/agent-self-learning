@@ -44,6 +44,12 @@ export PATH="$TMP/bin:$PATH" FAKE_COPILOT_LOG="$TMP/copilot-calls.log"
 sl_clear_review_marker "$SL_LOG_DIR"
 bash "${SCRIPT_DIR}/scripts/copilot-session-review.sh" </dev/null
 sl_wait_for_review_complete "$SL_LOG_DIR" || true
+# The marker itself, asserted rather than merely waited on -- see
+# sl_assert_review_marker_or_abort's header for why every wait below is
+# `|| true` and what that used to hide (this suite: exit 0 in 372s with the
+# marker write deleted). Placed on the first case that expects a review, so
+# a broken marker costs one wait budget rather than eleven.
+sl_assert_review_marker_or_abort "$SL_LOG_DIR"
 check "copilot invoked" "yes" "$([[ -s "$FAKE_COPILOT_LOG" ]] && echo yes || echo no)"
 check "guard env set" "1" "$(grep -m1 '^GUARD:' "$FAKE_COPILOT_LOG" | cut -d: -f2)"
 check "headless flags present" "yes" "$(grep -m1 '^ARGS:' "$FAKE_COPILOT_LOG" | grep -q -- '-p ' && echo yes || echo no)"

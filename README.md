@@ -524,7 +524,38 @@ Route A's `detect` parser is a deliberately narrow subset of upstream's DSL
 each adapter pins the exact predicate it implements and refuses to run if a
 re-vendor changes it. Re-vendor rules with
 `bash scripts/sync-coach-rules.sh`. The fork lives at
-`<org>/ai-engineering-coach-fork` (see its FORK-NOTES.md for the sync protocol).
+[`amardeep434/AI-Engineering-Coach`](https://github.com/amardeep434/AI-Engineering-Coach),
+branch `feature/auto-export` (see its `FORK-NOTES.md` for the sync protocol and
+`scripts/sync-upstream.sh` for the rebase-and-rebuild run). Verified 2026-07-28:
+pushed and current with itself, 2 commits ahead of `microsoft/AI-Engineering-Coach`
+and 6 behind — a sync is due. An earlier version of this line named
+`<org>/ai-engineering-coach-fork`, which is not a repository that exists.
+
+### Route C — SkillOpt (optional, manual, and wired into nothing)
+
+`scripts/skillopt-run.sh` is a thin opt-in wrapper around
+[microsoft/SkillOpt](https://github.com/microsoft/SkillOpt)'s Sleep CLI. It is
+installed into the store's `scripts/` directory, but **no hook, cron job or
+curator step invokes it** — you run it yourself:
+
+```bash
+SL_SKILLOPT_ENABLED=true SL_SKILLOPT_REPO=/path/to/SkillOpt \
+  <store>/scripts/skillopt-run.sh status    # or harvest | dry-run | adopt
+```
+
+It resolves SkillOpt in upstream's own precedence order: a source checkout
+(`$SL_SKILLOPT_REPO/plugins/run-sleep.sh`) first, then a `skillopt-sleep` on
+`PATH` (`pip install skillopt`). With neither, it explains which one is missing
+and exits 0. The expensive `run` verb additionally requires
+`SL_SKILLOPT_RUN_CONFIRMED=true`.
+
+**Nothing reads SkillOpt's output back into this system.** Importing a resulting
+`best_skill.md` into the skill store, with provenance, and any automatic
+scheduling are both deferred. Status as of 2026-07-28: `status`, `harvest` and
+`dry-run` have been exercised end to end against a real checkout on upstream's
+default `mock` backend at zero cost; the `run` verb has never been executed on
+any backend, and SkillOpt has never harvested a non-empty session store, so the
+data contract between it and our store is still unproven.
 
 ## Roadmap
 
