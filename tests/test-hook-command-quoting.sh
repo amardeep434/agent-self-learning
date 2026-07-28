@@ -178,10 +178,23 @@ _expected_script_name() {
 # second store would end up asserting less than the first.
 execution_pass() {
     local prefix="$1" tpl rendered cmd name seen copilot copilot_bash copilot_ps ps_inner ps_out ps_status
+    # `slug` is the label with glob metacharacters removed, and it is what goes
+    # into FILENAMES. The label itself keeps its brackets for readability in
+    # the check text.
+    #
+    # MEASURED: with the label used directly, every jq read of a rendered file
+    # failed on both windows-latest cells with "Could not open file
+    # /tmp/.../[space]-settings-hooks.json: No such file or directory" (run
+    # 30386807304), while jq read MSYS paths perfectly well elsewhere in the
+    # same run. `[...]` is a glob range, and MSYS's argv path conversion for
+    # native binaries does not recognise such a token as a path, so native jq
+    # received an unconverted MSYS path it cannot open. Do not put glob
+    # metacharacters in filenames.
+    local slug="${prefix//[^A-Za-z0-9]/}"
 
     # Claude Code and VS Code: the nested schema, `.command` on each entry.
     for tpl in settings-hooks vscode-hooks; do
-        rendered="${TMP}/${prefix}-${tpl}.json"
+        rendered="${TMP}/${slug}-${tpl}.json"
         render "${tpl}.json" > "$rendered"
         check "${prefix} ${tpl}: rendered output parses as JSON" "yes" \
             "$(jq -e . "$rendered" >/dev/null 2>&1 && echo yes || echo no)"
@@ -199,7 +212,7 @@ execution_pass() {
     done
 
     # Copilot CLI: the `bash` field, same shell, different schema.
-    copilot="${TMP}/${prefix}-copilot-hooks.json"
+    copilot="${TMP}/${slug}-copilot-hooks.json"
     render copilot-hooks.json > "$copilot"
     check "${prefix} copilot-hooks: rendered output parses as JSON" "yes" \
         "$(jq -e . "$copilot" >/dev/null 2>&1 && echo yes || echo no)"
