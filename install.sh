@@ -185,6 +185,21 @@ render_hook_template() {
     printf '%s' "$SL_SCRIPTS" | python3 "$RENDER_TEMPLATE_PY" "$1"
 }
 
+# The inverse: strip whatever install location a rendered hook file names back
+# to the template's placeholder, so Step 4b can tell "ours, installed
+# elsewhere" from "ours, edited". See lib/normalize-hook-path.py for why this
+# is a scan and not a sed character class, and tests/test-copilot-hook-normalize.sh
+# for the cases that pinned it. Only the file path crosses into python3 here;
+# the script name is a bare basename, so MSYS has nothing to convert.
+NORMALIZE_HOOK_PY="${SCRIPT_DIR}/scripts/lib/normalize-hook-path.py"
+if [[ ! -f "$NORMALIZE_HOOK_PY" ]]; then
+    echo "Error: ${NORMALIZE_HOOK_PY} not found" >&2
+    exit 1
+fi
+normalize_hook_path() {
+    python3 "$NORMALIZE_HOOK_PY" "$1" "$2"
+}
+
 echo "Install target (resolved by paths.py): ${SL_HOME}"
 echo ""
 
@@ -416,10 +431,18 @@ if [[ -d "${HOME}/.copilot" ]]; then
         mv "$tmp" "$COPILOT_HOOK_DST"
     }
     # Replace any absolute path immediately preceding one of our script names
-    # with the template's placeholder. Basic (not -E) sed for portability
-    # across GNU, BSD/macOS and MSYS.
+    # with the template's placeholder. This used to be a sed character class,
+    # `[^" ]*`, which excludes the space -- so a store under `.../My Store/`
+    # normalized to `/home/u/My __SL_SCRIPTS_DIR__/...`, never equalled the
+    # template, and relocating such a store took the "had local modifications"
+    # branch below: a spurious .bak and a false claim the user had edited the
+    # file, on a path where the space-free equivalent correctly reported
+    # "was stale". Widening the class cannot fix it -- `[^"]*` eats the `bash`
+    # interpreter out of the bash value, `bash [^"]*` misses the powershell
+    # value entirely -- because the boundary is "where does the path begin",
+    # not a character. lib/normalize-hook-path.py scans for it.
     _normalize_copilot_hook() {
-        sed 's#[^" ]*/copilot-session-review\.sh#__SL_SCRIPTS_DIR__/copilot-session-review.sh#g' "$1"
+        normalize_hook_path "$1" copilot-session-review.sh
     }
 
     if [[ ! -f "$COPILOT_HOOK_DST" ]]; then
