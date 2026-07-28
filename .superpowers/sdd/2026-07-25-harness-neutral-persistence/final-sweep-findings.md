@@ -292,8 +292,26 @@ test asserting a capability that does not exist.
 > implies a backlog item which does not exist is the documentation form of this project's
 > signature defect — it reads as handled while nothing is.
 >
-> Correct status: **deferred to a subsequent plan, in scope, and currently untracked.**
-> Closing that needs either a GitHub issue or a plan file; neither exists yet. One
+> Correct status: **deferred to a subsequent plan, in scope, and now tracked** in
+> `docs/superpowers/vscode-adapter-spike.md` (created 2026-07-28).
+>
+> **Update, 2026-07-28 — feasibility is established and it is smaller than assumed.**
+> VS Code Copilot Chat ships a hook system that runs `command` hooks with **no
+> extension of ours**, and `transcript.summarize_events` already reads its stored
+> transcripts unmodified (measured: 17 of 19 local files yielded messages, largest
+> 703 events to 94 messages). The extension route is worse, not better — there is no
+> public API to observe Copilot Chat's conversation lifecycle.
+>
+> **The finding that matters most is not about scope.** VS Code's default
+> `chat.hookFilesLocations` includes `~/.claude/settings.json` — the file `install.sh`
+> tells users to merge our hooks into. So item D7 (registering the Claude Code hooks)
+> silently also registers them inside VS Code. Nothing is live on this machine today
+> (checked: zero mentions of ours in that file), but that must be a decision, not a
+> side effect.
+>
+> Still unobserved: nobody has watched a VS Code hook actually fire. Whether `Stop`
+> is per-turn or per-session, and whether ask-mode turns produce a transcript at all,
+> are inferred from docs and shipped bytes. The spike protocol is in the tracker. One
 caveat worth knowing: `README.md:311` documents Coach **Route B**
 (`SL_COACH_EXPORT_ENABLED=true`) as requiring "our maintained fork's `.vsix` installed in
 VS Code". That fork is an external dependency this repository does not contain, does not
