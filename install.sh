@@ -144,6 +144,37 @@ if [[ -z "$SL_HOME" || -z "$SL_SCRIPTS" ]]; then
     exit 1
 fi
 
+# --- The ONE hook-template render, used by all five sites below ---
+#
+# Every hook template carries `__SL_SCRIPTS_DIR__` where $SL_SCRIPTS belongs,
+# and this file renders that in five places: writing the Copilot hook file,
+# comparing against the on-disk one to decide "up to date", printing the
+# ACTION REQUIRED block, and rendering the VS Code and Claude Code JSON.
+# README.md documents a sixth for users rendering by hand.
+#
+# That used to be five copies of
+# `sed "s|__SL_SCRIPTS_DIR__|${SL_SCRIPTS}|g"`, which interpolates the store
+# path UNESCAPED into sed's expression language. Measured end to end through
+# this script: a store under `/home/u/R&D/...` rendered
+# `/home/u/R__SL_SCRIPTS_DIR__D/...` and exited 0; `c\d` rendered as `cd` and
+# exited 0; `a|b` closed sed's own delimiter and aborted the install
+# half-done. The first two are the signature defect this project exists to
+# eliminate -- a hook file that is valid JSON, names a path that does not
+# exist, and is reported as installed.
+#
+# lib/render-template.py is a literal (metacharacter-free) replacement and
+# carries the full rationale. One definition, not five, so a sixth site
+# cannot drift: see tests/test-hook-template-render.sh.
+RENDER_TEMPLATE_PY="${SCRIPT_DIR}/scripts/lib/render-template.py"
+if [[ ! -f "$RENDER_TEMPLATE_PY" ]]; then
+    echo "Error: ${RENDER_TEMPLATE_PY} not found" >&2
+    exit 1
+fi
+
+render_hook_template() {
+    python3 "$RENDER_TEMPLATE_PY" "$1" "$SL_SCRIPTS"
+}
+
 echo "Install target (resolved by paths.py): ${SL_HOME}"
 echo ""
 
@@ -362,8 +393,17 @@ if [[ -d "${HOME}/.copilot" ]]; then
     #   not ours     -- never mentions our script. Do NOT overwrite someone
     #                   else's hook file; warn loudly, twice (here and in the
     #                   final summary), with the exact content to merge.
+    # Rendered to a temporary file and moved into place, never straight into
+    # $COPILOT_HOOK_DST: a redirect truncates the destination BEFORE the
+    # renderer runs, so a render that fails left a zero-byte hook file behind
+    # -- and the "up to date" comparison below then matched empty against
+    # empty and reported it as current on every subsequent install. Observed
+    # while writing tests/test-hook-template-render.sh, with the `a|b` store
+    # path that made sed exit non-zero.
     _render_copilot_hook() {
-        sed "s|__SL_SCRIPTS_DIR__|${SL_SCRIPTS}|g" "$COPILOT_HOOK_SRC" > "$COPILOT_HOOK_DST"
+        local tmp="${COPILOT_HOOK_DST}.tmp.$$"
+        render_hook_template "$COPILOT_HOOK_SRC" > "$tmp"
+        mv "$tmp" "$COPILOT_HOOK_DST"
     }
     # Replace any absolute path immediately preceding one of our script names
     # with the template's placeholder. Basic (not -E) sed for portability
@@ -379,7 +419,7 @@ if [[ -d "${HOME}/.copilot" ]]; then
             _render_copilot_hook
             echo "  Rendered: copilot-hooks.json -> $COPILOT_HOOK_DST"
         fi
-    elif [[ "$(sed "s|__SL_SCRIPTS_DIR__|${SL_SCRIPTS}|g" "$COPILOT_HOOK_SRC")" == "$(cat "$COPILOT_HOOK_DST")" ]]; then
+    elif [[ "$(render_hook_template "$COPILOT_HOOK_SRC")" == "$(cat "$COPILOT_HOOK_DST")" ]]; then
         echo "  Up to date: $COPILOT_HOOK_DST (already points at ${SL_SCRIPTS})"
     elif [[ "$(_normalize_copilot_hook "$COPILOT_HOOK_DST")" == "$(cat "$COPILOT_HOOK_SRC")" ]]; then
         OLD_HOOK_PATH="$(sed -n 's#.*"bash": "bash \(.*\)/copilot-session-review\.sh".*#\1#p' "$COPILOT_HOOK_DST" | head -n 1)"
@@ -410,7 +450,7 @@ if [[ -d "${HOME}/.copilot" ]]; then
         echo "  !!! overwrite someone else's hook file. Copilot CLI sessions will"
         echo "  !!! NOT be reviewed until you merge this in by hand:"
         echo "  !!!"
-        sed "s|__SL_SCRIPTS_DIR__|${SL_SCRIPTS}|g" "$COPILOT_HOOK_SRC" | sed 's/^/  !!!   /'
+        render_hook_template "$COPILOT_HOOK_SRC" | sed 's/^/  !!!   /'
         echo "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
     fi
 else
@@ -437,7 +477,7 @@ if [[ ! -f "$VSCODE_HOOK_SRC" ]]; then
     echo "    missing template ${VSCODE_HOOK_SRC}"
     echo "    VS Code Copilot Chat sessions will NOT be reviewed."
 else
-    VSCODE_HOOK_JSON="$(sed "s|__SL_SCRIPTS_DIR__|${SL_SCRIPTS}|g" "$VSCODE_HOOK_SRC")"
+    VSCODE_HOOK_JSON="$(render_hook_template "$VSCODE_HOOK_SRC")"
     if [[ "$DRY_RUN" == "true" ]]; then
         echo "[DRY RUN] render ${VSCODE_HOOK_SRC} -> ${VSCODE_HOOK_DST} (__SL_SCRIPTS_DIR__ -> ${SL_SCRIPTS})"
     else
@@ -556,7 +596,7 @@ if [[ ! -f "$CLAUDE_HOOK_SRC" ]]; then
     echo "  missing template ${CLAUDE_HOOK_SRC}"
     echo "  Claude Code hooks are NOT registered; sessions will not be reviewed."
 else
-    CLAUDE_HOOK_JSON="$(sed "s|__SL_SCRIPTS_DIR__|${SL_SCRIPTS}|g" "$CLAUDE_HOOK_SRC")"
+    CLAUDE_HOOK_JSON="$(render_hook_template "$CLAUDE_HOOK_SRC")"
     if [[ "$DRY_RUN" == "true" ]]; then
         echo "[DRY RUN] render ${CLAUDE_HOOK_SRC} -> ${CLAUDE_HOOK_DST} (__SL_SCRIPTS_DIR__ -> ${SL_SCRIPTS})"
     else

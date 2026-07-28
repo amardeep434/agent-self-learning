@@ -99,9 +99,15 @@ never fire.
 To render it yourself without re-running the installer:
 
 ```bash
-sed "s|__SL_SCRIPTS_DIR__|$(python3 scripts/lib/paths.py get scripts)|g" \
-    config/settings-hooks.json
+python3 scripts/lib/render-template.py \
+    config/settings-hooks.json "$(python3 scripts/lib/paths.py get scripts)"
 ```
+
+This is the same renderer `install.sh` calls, so you get exactly the bytes it
+would have written. It replaced a `sed "s|__SL_SCRIPTS_DIR__|...|g"` one-liner
+that silently corrupted any store path containing `&`, `\` or `|` — see
+`scripts/lib/render-template.py` for what each one did. The same command
+renders `config/copilot-hooks.json` and `config/vscode-hooks.json`.
 
 `~/.claude/settings.json` is Claude Code's own config file, so *that* location
 is deliberately Claude-specific; the **script paths it invokes** are not, and

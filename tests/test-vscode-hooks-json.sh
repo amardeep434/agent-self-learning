@@ -100,8 +100,12 @@ done < <(jq -r '.hooks[][].hooks[].command' "$HOOK")
 INSTALL="${SCRIPT_DIR}/install.sh"
 check "install.sh reads config/vscode-hooks.json" "yes" \
     "$(grep -q 'config/vscode-hooks.json' "$INSTALL" && echo yes || echo no)"
-check "install.sh substitutes the placeholder for this template" "yes" \
-    "$(grep -q 'VSCODE_HOOK_SRC' "$INSTALL" && grep -q '__SL_SCRIPTS_DIR__|\${SL_SCRIPTS}' "$INSTALL" && echo yes || echo no)"
+# Asserts that the template is RENDERED, not how. This used to grep for the
+# literal sed expression `__SL_SCRIPTS_DIR__|${SL_SCRIPTS}`, which pinned the
+# very implementation that turned out to corrupt any store path containing
+# `&`, `\` or `|`. tests/test-hook-template-render.sh owns the behaviour.
+check "install.sh renders this template through the shared renderer" "yes" \
+    "$(grep -q 'render_hook_template "$VSCODE_HOOK_SRC"' "$INSTALL" && echo yes || echo no)"
 check "install.sh writes the rendered file into the store" "yes" \
     "$(grep -q 'VSCODE_HOOK_DST' "$INSTALL" && echo yes || echo no)"
 check "install.sh tells the user which VS Code setting registers it" "yes" \
