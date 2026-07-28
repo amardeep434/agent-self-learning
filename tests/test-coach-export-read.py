@@ -140,6 +140,55 @@ class ReaderContractTest(unittest.TestCase):
         self.assertEqual(len(json.loads(proc.stdout)), 10)
 
 
+class DenominatorTest(unittest.TestCase):
+    """`count` on its own is not interpretable, so the reader also carries the
+    export's own `totals.requests` as `denominator`. These pin the two things
+    that matter: it must be the export's real total, and every way of NOT
+    having one must land on 0 -- the value the renderer treats as "show no
+    prevalence". A guessed denominator would produce a confident wrong rate,
+    which is worse than the bare count this replaces."""
+
+    def test_denominator_is_the_exports_own_request_total(self):
+        report = load_fixture()
+        signals = json.loads(run_reader(FIXTURE).stdout)
+        self.assertEqual({s["denominator"] for s in signals},
+                         {report["totals"]["requests"]})
+
+    def test_rates_reproduce_the_percentages_coach_states_itself(self):
+        """The fixture's own description strings quote percentages Coach
+        computed upstream ("83% of requests have no file references", "135
+        requests (27%)"). Recomputing count/denominator and landing on the
+        same numbers is independent evidence that totals.requests really is
+        the denominator occurrences were counted against -- not merely the
+        only total in the payload."""
+        signals = {s["id"]: s for s in json.loads(run_reader(FIXTURE).stdout)}
+        for pattern_id, coach_says in [("no-file-context", 83), ("weekend-overwork", 27)]:
+            s = signals[pattern_id]
+            self.assertEqual(round(s["count"] * 100 / s["denominator"]), coach_says,
+                             pattern_id)
+
+    def test_export_without_totals_yields_no_denominator(self):
+        report = load_fixture()
+        del report["totals"]
+        signals = json.loads(run_reader(write_tmp(report)).stdout)
+        self.assertEqual({s["denominator"] for s in signals}, {0})
+        self.assertEqual(len(signals), 10, "losing totals must not lose signals")
+
+    def test_unusable_totals_yield_no_denominator(self):
+        """Each of these would otherwise reach the renderer's arithmetic."""
+        for label, totals in [("non-numeric", {"requests": "many"}),
+                              ("null", {"requests": None}),
+                              ("negative", {"requests": -5}),
+                              ("wrong type", ["requests", 507]),
+                              ("no requests key", {"sessions": 55})]:
+            report = load_fixture()
+            report["totals"] = totals
+            proc = run_reader(write_tmp(report))
+            self.assertEqual(proc.returncode, 0, "{}: {}".format(label, proc.stderr))
+            self.assertEqual({s["denominator"] for s in json.loads(proc.stdout)}, {0},
+                             label)
+
+
 class LoudFailureTest(unittest.TestCase):
     """The reader must not report a broken export as a quiet zero. A missing
     file is the one absence that is genuinely normal (Coach not installed);

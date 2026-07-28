@@ -193,5 +193,44 @@ class RealExportPayloadTest(unittest.TestCase):
         self.assertIn("unreadable export", proc.stderr)
 
 
+class DenominatorPerRouteTest(unittest.TestCase):
+    """The merger is where the two routes' incompatible denominators meet, so
+    it is where the distinction has to hold. Route B carries the export's own
+    request total; Route A has none -- its count is matched records inside a
+    telemetry window capped at telemetry.MAX_SESSIONS, with no total to divide
+    by -- and must therefore publish 0, which the renderer reads as "show no
+    rate". Anything non-zero on a rules signal would put a Route A percentage
+    next to a Route B one in the same list."""
+
+    def test_export_signals_carry_the_exports_request_total(self):
+        e = Env()
+        e.export.write_text(FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
+        self.assertEqual(e.run(False, True).returncode, 0)
+        report = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        data = json.loads(e.signals.read_text())
+        self.assertEqual({s["denominator"] for s in data["signals"]},
+                         {report["totals"]["requests"]})
+
+    def test_rules_signals_carry_no_denominator(self):
+        e = Env()
+        self.assertEqual(e.run(True, False).returncode, 0)
+        sig = {s["id"]: s for s in json.loads(e.signals.read_text())["signals"]}
+        self.assertEqual(sig["mega-sessions"]["source"], "rules")
+        self.assertEqual(sig["mega-sessions"]["denominator"], 0)
+        self.assertGreater(sig["mega-sessions"]["count"], 0,
+                           "a zero count would make the denominator moot")
+
+    def test_denominator_stays_an_int_through_sanitization(self):
+        """Every other field the merger copies goes through sanitize_text(),
+        which returns a str. The renderer divides by this one, so a str here
+        would either format as a quoted number or break the arithmetic."""
+        e = Env()
+        e.export.write_text(FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
+        self.assertEqual(e.run(False, True).returncode, 0)
+        for s in json.loads(e.signals.read_text())["signals"]:
+            self.assertIsInstance(s["denominator"], int, s["id"])
+            self.assertNotIsInstance(s["denominator"], bool, s["id"])
+
+
 if __name__ == "__main__":
     unittest.main()
