@@ -793,5 +793,253 @@ class TestCrossReviewCaseFoldCollision(unittest.TestCase):
                 self.assertEqual(sorted(usage), ["alpha"])
 
 
+class TestAppendLineDisciplineCRLF(unittest.TestCase):
+    """The same discipline, against existing content that uses CRLF endings.
+
+    These reproduce on EVERY platform because the fixture writes "\r\n" as
+    BYTES rather than relying on the platform to produce it. That is the point:
+    the LF-only versions of these assertions passed on ubuntu and macOS while
+    both windows-latest cells failed (run 30428254427), because there the file
+    comes back with CRLF and `rstrip("\n")` leaves a bare "\r" behind -- so the
+    blank lines survived and a duplicate compared unequal. Seeding the bytes
+    moves the boundary somewhere it can be debugged without a Windows machine.
+    """
+
+    def _append(self, home, content):
+        return run(json.dumps({"version": 1,
+                               "memory": [{"file": "MEMORY.md", "mode": "append",
+                                           "content": content}]}), home)
+
+    def _seed_bytes(self, home, raw):
+        (home / "memory").mkdir(parents=True, exist_ok=True)
+        (home / "memory" / "MEMORY.md").write_bytes(raw)
+        return home / "memory" / "MEMORY.md"
+
+    def test_crlf_file_without_trailing_newline_still_gets_a_separator(self):
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            mem = self._seed_bytes(home, b"- first entry")
+            r = self._append(home, "- second entry")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            text = mem.read_text()
+            self.assertNotIn("- first entry- second entry", text)
+            self.assertIn("- second entry", text)
+
+    def test_crlf_trailing_blank_lines_collapse(self):
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            mem = self._seed_bytes(home, b"- x\r\n\r\n\r\n\r\n")
+            self.assertEqual(self._append(home, "- y").returncode, 0)
+            self.assertEqual(mem.read_text().replace("\r\n", "\n"), "- x\n- y\n")
+
+    def test_crlf_duplicate_line_is_still_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            self._seed_bytes(home, b"- already known\r\n")
+            r = self._append(home, "- already known")
+            self.assertNotEqual(r.returncode, 0,
+                                "a CRLF-stored duplicate must still be refused")
+
+
+class TestAppendLineDiscipline(unittest.TestCase):
+    """Read off the user's REAL MEMORY.md, not imagined.
+
+    `existing + content` assumed every append ends in a newline. Nothing made
+    that true, and line 19 of the live store is the result: four entries run
+    together into one 516-character line
+    (`...invented shape.- [Probe...].- Route B path: ...`). The same file also
+    holds the same lesson twice. Both paths through _write_all now share one
+    append policy (_append_data), so these run against whichever the platform
+    dispatches to.
+    """
+
+    def _append(self, home, content):
+        return run(json.dumps({"version": 1,
+                               "memory": [{"file": "MEMORY.md", "mode": "append",
+                                           "content": content}]}), home)
+
+    def _seed(self, home, text):
+        (home / "memory").mkdir(parents=True, exist_ok=True)
+        (home / "memory" / "MEMORY.md").write_text(text)
+        return home / "memory" / "MEMORY.md"
+
+    def test_append_onto_file_without_trailing_newline_starts_a_new_line(self):
+        """THE live defect: two entries must not share one line."""
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            mem = self._seed(home, "- first entry")
+            r = self._append(home, "- second entry\n")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(mem.read_text(), "- first entry\n- second entry\n")
+
+    def test_content_without_trailing_newline_leaves_the_file_appendable(self):
+        """The other half: this write must not set up the NEXT one to run on."""
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            mem = self._seed(home, "- first entry\n")
+            self.assertEqual(self._append(home, "- second entry").returncode, 0)
+            self.assertEqual(self._append(home, "- third entry").returncode, 0)
+            self.assertEqual(mem.read_text(),
+                             "- first entry\n- second entry\n- third entry\n")
+
+    def test_trailing_blank_lines_collapse_instead_of_accumulating(self):
+        """Idempotent, not additive: repeated appends never grow blank lines."""
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            mem = self._seed(home, "- x\n\n\n\n")
+            self.assertEqual(self._append(home, "\n- y\n\n").returncode, 0)
+            self.assertEqual(mem.read_text(), "- x\n- y\n")
+
+    def test_append_to_absent_file_has_no_leading_blank_line(self):
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            r = self._append(home, "- only entry\n")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual((home / "memory" / "MEMORY.md").read_text(), "- only entry\n")
+
+    def test_empty_append_does_not_grow_the_file_by_a_blank_line(self):
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            mem = self._seed(home, "- x\n")
+            self.assertEqual(self._append(home, "\n").returncode, 0)
+            self.assertEqual(mem.read_text(), "- x\n")
+
+    def test_duplicate_line_is_refused_loudly_and_writes_nothing(self):
+        """The same lesson is in the live file twice (lines 41 and 43) --
+        though NOT byte-identically, which is why the companion test below
+        records what this check does not reach.
+
+        Refused, not silently deduplicated: the fault is a reviewer that did
+        not read MEMORY.md, and a silent drop would report success for a
+        write that did not happen.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            mem = self._seed(home, "- keep this\n- dup entry\n")
+            r = self._append(home, "- new fact\n- dup entry\n")
+            self.assertEqual(r.returncode, 2, r.stdout)
+            self.assertIn("already present", r.stderr)
+            self.assertIn("- dup entry", r.stderr)
+            # All-or-nothing: the new fact is not half-applied.
+            self.assertEqual(mem.read_text(), "- keep this\n- dup entry\n")
+
+    def test_near_duplicate_is_not_refused(self):
+        """Honest scope: only EXACT lines. The live near-duplicate pair
+        differed after the em-dash, so this check would not have caught it --
+        the OUTPUT CONTRACT's read-the-file-first rule is what covers that."""
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            mem = self._seed(home, "- Wait for CI - reason one.\n")
+            r = self._append(home, "- Wait for CI - reason two.\n")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("reason two", mem.read_text())
+
+    def test_blank_lines_are_not_treated_as_duplicates(self):
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            mem = self._seed(home, "- a\n\n- b\n")
+            self.assertEqual(self._append(home, "- c\n\n").returncode, 0)
+            self.assertEqual(mem.read_text(), "- a\n\n- b\n- c\n")
+
+    def test_replace_mode_content_is_written_verbatim(self):
+        """The append policy must not leak into replace: full contents are
+        the reviewer's, byte for byte."""
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            mem = self._seed(home, "- old\n")
+            r = run(json.dumps({"version": 1,
+                                "memory": [{"file": "MEMORY.md", "mode": "replace",
+                                            "content": "- a\n- a\n\n"}]}), home)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(mem.read_text(), "- a\n- a\n\n")
+
+
+class TestAppendPolicyOnBothWritePaths(unittest.TestCase):
+    """The append policy must hold on _write_all_fd AND _write_all_path.
+
+    Only one of the two runs on any given machine (dir_fd here, the
+    path-based fallback on native Windows), so a fix applied to one and
+    missed on the other stays green on this developer's box and ships a
+    mangled MEMORY.md to the other half of the CI matrix. Forcing the flag
+    is the same seam TestTOCTOU's forced-interleaving tests already use.
+    """
+
+    def setUp(self):
+        self.mod = _load_writer_module()
+
+    def _write(self, home, existing, content):
+        (home / "memory").mkdir(parents=True, exist_ok=True)
+        (home / "memory" / "MEMORY.md").write_text(existing)
+        proposal = {"version": 1,
+                    "memory": [{"file": "MEMORY.md", "mode": "append", "content": content}],
+                    "skills": []}
+        planned = self.mod._plan(proposal, home / "memory", home / "learned-skills")
+        self.mod._write_all(planned)
+        return (home / "memory" / "MEMORY.md").read_text()
+
+    def _with_dir_fd(self, enabled):
+        prior = self.mod.DIR_FD_SUPPORTED
+        self.mod.DIR_FD_SUPPORTED = enabled
+        self.addCleanup(setattr, self.mod, "DIR_FD_SUPPORTED", prior)
+
+    def test_separator_on_the_path_writer(self):
+        self._with_dir_fd(False)
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(self._write(Path(d), "- a", "- b\n"), "- a\n- b\n")
+
+    def test_separator_on_the_dir_fd_writer(self):
+        if not self.mod.DIR_FD_SUPPORTED:
+            self.skipTest("dir_fd probed and unavailable on this runner")
+        self._with_dir_fd(True)
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(self._write(Path(d), "- a", "- b\n"), "- a\n- b\n")
+
+    def test_duplicate_refused_on_the_path_writer(self):
+        self._with_dir_fd(False)
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(self.mod.PersistError):
+                self._write(Path(d), "- a\n", "- a\n")
+
+    def test_duplicate_refused_on_the_dir_fd_writer(self):
+        if not self.mod.DIR_FD_SUPPORTED:
+            self.skipTest("dir_fd probed and unavailable on this runner")
+        self._with_dir_fd(True)
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(self.mod.PersistError):
+                self._write(Path(d), "- a\n", "- a\n")
+
+
+class TestAppendHelpersArePure(unittest.TestCase):
+    """Unit-level cover for the two helpers, including the shapes that are
+    awkward to reach through the CLI (a 1 MiB-adjacent file, an existing file
+    that is only newlines)."""
+
+    def setUp(self):
+        self.mod = _load_writer_module()
+
+    def test_join_quadrants(self):
+        join = self.mod._append_join
+        self.assertEqual(join("", "b\n"), "b\n")
+        self.assertEqual(join("\n\n", "b"), "b\n")
+        self.assertEqual(join("a", "b"), "a\nb\n")
+        self.assertEqual(join("a\n", "b\n"), "a\nb\n")
+        self.assertEqual(join("a\n", ""), "a\n")
+        # Internal newlines in the content survive untouched.
+        self.assertEqual(join("a", "b\nc"), "a\nb\nc\n")
+
+    def test_join_is_idempotent_under_repetition(self):
+        join = self.mod._append_join
+        once = join("a\n", "b\n")
+        self.assertEqual(join(once, "c\n"), "a\nb\nc\n")
+
+    def test_duplicate_check_ignores_leading_whitespace_differences(self):
+        """Whole-line equality, so an indented restatement is NOT a duplicate
+        -- stated as a test so the scope is recorded, not assumed."""
+        reject = self.mod._reject_duplicate_lines
+        reject("- a\n", "  - a\n", Path("MEMORY.md"))  # must not raise
+        with self.assertRaises(self.mod.PersistError):
+            reject("- a\n", "- a\n", Path("MEMORY.md"))
+
+
 if __name__ == "__main__":
     unittest.main()

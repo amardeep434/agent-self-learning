@@ -33,6 +33,29 @@ MAX_MEMORY_ENTRIES = len(ALLOWED_MEMORY_FILES)
 ALLOWED_MODES = frozenset({"replace", "append"})
 SKILL_NAME_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 
+# Memory is ONE flat file per name (ALLOWED_MEMORY_FILES). There is no
+# per-entry file anywhere in this project, so a memory entry that reads
+# `- [Some lesson](some-lesson.md) -- ...` is referring to a file that does
+# not and will not exist. Measured on the real store: 15 of 52 MEMORY.md
+# lines carried such a link, and of the 15 targets not one existed --
+# `msys-path-boundary.md` and `probe-key-name-before-claiming-defect.md`
+# among them. The nearest real thing on disk is a SKILL directory
+# (`learned-skills/<name>/SKILL.md`), which is not what these spell either.
+#
+# Rejected in the schema, not merely discouraged in the prompt, for the same
+# reason the one-entry-per-file rule is: this file is the contract, the
+# OUTPUT CONTRACT now states the rule to the reviewer in the same words, and
+# a rule stated only in a prompt is a suggestion. A dangling link is worse
+# than noise in a bounded file -- it invites the next agent to go read
+# something that is not there.
+#
+# Deliberately narrow: only an inline markdown link whose target ends in
+# `.md` (with optional anchor/query), which is the exact shape observed.
+# Prose that merely names a file ("see paths.py") is untouched, and skill
+# content is untouched -- SKILL.md files are real and may legitimately
+# cross-reference.
+MEMORY_FILE_LINK_RE = re.compile(r"\]\(\s*[^)\s]+\.md(?:[#?][^)]*)?\s*\)")
+
 _FENCE = "```"
 # Deferred minor (Item 3): bounds how many fenced code-block candidates
 # extract_proposal() will scan looking for a valid proposal JSON payload.
@@ -121,6 +144,11 @@ def validate_proposal(obj: object) -> dict:
         _need("\x00" not in content, "content contains NUL byte")
         _need(_size(content) <= MAX_MEMORY_BYTES,
               f"memory content exceeds {MAX_MEMORY_BYTES} bytes")
+        link = MEMORY_FILE_LINK_RE.search(content)
+        _need(link is None,
+              "memory entries must be self-contained prose: memory is one flat "
+              f"file, so the markdown file link {link.group(0) if link else ''!r} "
+              "points at a file that does not exist. Write the lesson itself.")
         total += _size(content)
         memory_out.append({"file": name, "mode": mode, "content": content})
 

@@ -1,5 +1,11 @@
 # Verification Log
 
+> **Historical record.** Each gate below is a point-in-time observation, kept as written.
+> Where a gate has since been closed or superseded, a `**STATUS (<date>)**` note is
+> appended to it rather than the original being rewritten. Paths in Gates 1–4 predate the
+> vendor-neutral store and still say `~/.claude/...`; the current layout is in the README
+> under "Where everything lives".
+
 ## Gate 1 — Claude Code hook contract (Task 8)
 - Date: 2026-07-23
 - Claude Code version: 2.1.218 (Claude Code)
@@ -66,7 +72,29 @@
 - REMAINING (needs a human in VS Code): install the .vsix, run the command, confirm no dialog and ~/.aiec/summary-latest.json is written. See fork FORK-NOTES.md.
 - Verdict: IMPLEMENTATION COMPLETE / LIVE-VERIFY PENDING
 
+**STATUS (2026-07-28): CLOSED — PASS.** The fork's `.vsix` was installed and the export run
+for the first time on any machine. `~/.aiec/summary-latest.json` was written with no dialog,
+and Route B read it end to end: **10 signals, `source=export`, counts matching the export
+exactly.** The real export carries eight top-level keys (`activity`, `antiPatterns`,
+`filter`, `flow`, `generatedAt`, `production`, `schemaVersion`, `totals`) — before this run,
+Route B had only ever been tested against an invented minimal shape.
+`tests/fixtures/coach-export-v1.json` now pins the real top-level shape, normalised and
+privacy-scanned (commit `bde021c`). The same run exposed and fixed a silent-zero defect in
+`scripts/coach-export-read.py`: absent and unparseable exports were indistinguishable. See
+[`coach-integration.md`](coach-integration.md), "Route B".
+
 ## Gate 4 — Windows Copilot hook (config/copilot-hooks.json) — PENDING MANUAL
 - The `powershell` hook command uses `bash -lc "$HOME/.claude/.../copilot-session-review.sh"` (double-quoted + $HOME, per PR review #5). This form is NOT runtime-verified: no Windows machine was available. Home-dir expansion across the PowerShell→Git-Bash boundary is environment-dependent.
 - REMAINING (needs a human on Windows): install the Copilot CLI hook, end a session, confirm ~/.claude/logs/reviews/*-copilot-session-review.log is written (i.e. the path resolved). The Copilot PR reviewer is static LLM analysis, not a Windows execution — it cannot confirm this.
 - Verdict: NEEDS WINDOWS SMOKE TEST
+
+**STATUS (2026-07-29): STILL OPEN, and superseded in form.** No Windows machine has ever
+run an install or fired a real hook; that remains true. Two things have changed since this
+gate was written, so do not act on its text directly:
+1. The hook command shape it describes is obsolete. Hook commands are now **rendered from
+   templates** with the resolved store's scripts directory substituted (and single-quoted,
+   commit `58098f7`), not built from `$HOME/.claude/...`.
+2. The verification procedure now lives in
+   [`windows-verification-runbook.md`](windows-verification-runbook.md), which is a
+   step-by-step protocol written for a Windows box **without** Claude Code. Use that, not
+   this entry.

@@ -56,6 +56,19 @@ _RC_SCRIPTS_DIR="$(cd "${_RC_LIB_DIR}/.." && pwd)"
 # machine ever ran (2026-07-28T09:07:43Z): a whole paid review discarded,
 # `persist-proposal: invalid proposal: duplicate memory file entries`.
 # tests/test-review-failure-legibility.sh pins both halves.
+#
+# The three "Memory entry rules" at the end are the same class again, this
+# time read off the user's real accumulated MEMORY.md: 15 of 52 lines carried
+# a markdown link to a per-lesson `<name>.md` file that has never existed in
+# this project (memory is ONE flat file), and the same lesson appeared twice.
+# Nothing in the contract had ever told the reviewer either thing -- and the
+# "read the existing file, do not duplicate" rule existed ONLY in
+# session-review.sh's Claude Code preamble, so the Copilot CLI and VS Code
+# reviewers were never told it at all. Stating it here states it once, for
+# all three. Both rules are enforced (proposal_schema.MEMORY_FILE_LINK_RE and
+# persist-proposal._reject_duplicate_lines), so the wording says "enforced":
+# a reviewer that ignores them loses its whole proposal, and it should know
+# that before it writes one.
 # ---------------------------------------------------------------------------
 sl_review_output_contract() {
     # TWO leading blank lines, not one, and they are load-bearing: callers
@@ -87,6 +100,16 @@ record several facts in one file, put them all in that file's single entry
 rejected in full and NOTHING is saved.
 "name" must match [A-Za-z0-9][A-Za-z0-9_-]{0,63}. Omit "memory" or "skills"
 entirely when there is nothing to record. Emit nothing after the block.
+
+Memory entry rules -- these are enforced, not advisory:
+- Each entry is ONE line of self-contained prose. State the lesson itself.
+- NO markdown file links. Memory is a single flat file; there is no
+  per-entry file, so `[Title](title.md)` is a dead link and the whole
+  proposal is rejected for it.
+- READ the existing file first. Appending a line it already contains is
+  refused, and the whole proposal is discarded with nothing saved. If a
+  fact is already recorded in different words, do not record it again --
+  spend the entry on something new, or omit "memory" entirely.
 RCEOF
 }
 

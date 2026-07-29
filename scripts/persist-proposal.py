@@ -288,6 +288,97 @@ def _read_existing(target: Path) -> str:
             os.close(fd)
 
 
+def _append_join(existing: str, content: str) -> str:
+    """Join `content` onto `existing` so it starts on a line of its own.
+
+    `existing + content` -- what both write paths did until now -- assumes the
+    file already ends with a newline. Nothing enforces that: append content
+    comes from a model, and a proposal whose content lacks a trailing newline
+    leaves the file ending mid-line, so the NEXT proposal's first entry is
+    concatenated onto it. Measured on the real store: MEMORY.md line 19 held
+    four separate entries run together as
+    `...invented shape.- [Probe...].- Route B path: ...`, which is not
+    line-separated memory any more, it is one 516-character line that no
+    reader (human or model) can treat as four facts.
+
+    Normalising, not merely inserting a separator, so the result is
+    idempotent: repeated appends can never accumulate blank lines at the end
+    of the file, and an existing file that already ends in several newlines
+    collapses to exactly one. Trailing blank lines carry no meaning in a
+    file whose entries are one-per-line by contract, so collapsing them is
+    lossless; the content's INTERNAL newlines are untouched.
+
+    Empty (or newline-only) content is a no-op rather than a bare "\\n": an
+    append of nothing must not silently grow the file by a blank line.
+    """
+    # strip/rstrip "\r\n", not "\n": on Windows the existing file is read back
+    # with CRLF endings, so stripping only "\n" leaves a bare "\r" behind --
+    # the blank lines then survive as "\r\r\r" and the join emits "\r\n".
+    # MEASURED: windows-latest failed with '- x\n\n\n\n- y\n' != '- x\n- y\n'
+    # (run 30428254427) while both POSIX cells passed. Same line-ending boundary
+    # that scripts/lib/config.sh already strips with %$'\r'.
+    body = content.strip("\r\n")
+    if not body:
+        return existing
+    prefix = existing.rstrip("\r\n")
+    if prefix:
+        prefix += "\n"
+    return prefix + body + "\n"
+
+
+def _reject_duplicate_lines(existing: str, content: str, target: Path) -> None:
+    """Refuse an append that repeats a line already present in `target`.
+
+    Memory is a single bounded file with no eviction (see
+    MAX_MEMORY_FILE_BYTES -- a hard wall, not a trim), so every duplicated
+    line permanently costs space that a real fact could have used, and
+    nothing ever evicts it.
+
+    Refused loudly (PersistError -> exit 2 -> one attributed line in
+    persist-failures.log, which doctor.sh reports) rather than silently
+    deduplicated on write. A silent drop would hide the actual fault -- a
+    reviewer that did not read MEMORY.md before proposing, which the OUTPUT
+    CONTRACT now explicitly requires -- and would leave the operator with a
+    "written" result that did not match what was proposed. This is the same
+    trade proposal_schema already makes for two entries naming one file:
+    wholesale refusal with a diagnostic the reviewer can act on.
+
+    Exact whole-line matches only. The near-duplicates in the real store
+    (the same lesson twice, with different wording after the em-dash) are
+    NOT caught here and cannot be, without the writer judging meaning; the
+    defence for those is the contract rule telling the reviewer to read the
+    file first, not this check.
+    """
+    # Blank lines are filtered on the CONTENT side only. Filtering them out of
+    # `have` as well was written first and proved inert under mutation -- with
+    # no blank line ever reaching the `in have` test, what `have` contains
+    # cannot matter -- so it was removed rather than kept as decoration.
+    # splitlines(), not split("\n"): it handles CRLF, so a duplicate is caught
+    # on Windows too. rstrip("\r") on each side for the same reason -- a line
+    # read back as "- x\r" must still equal the proposed "- x".
+    have = {line.rstrip("\r") for line in existing.splitlines()}
+    repeated = [line for line in content.splitlines()
+                if line.strip() and line.rstrip("\r") in have]
+    if repeated:
+        raise PersistError(
+            f"refusing to append a line already present in {target}: "
+            f"{repeated[0]!r} (read the file before proposing; "
+            f"{len(repeated)} duplicate line(s) in this entry)"
+        )
+
+
+def _append_data(existing: str, content: str, target: Path) -> str:
+    """The whole append policy, shared by both write paths.
+
+    Both _write_all_path and _write_all_fd used to inline `existing + content`
+    separately; a policy that lives in two places is exactly the drift this
+    project has already been bitten by four times (see lib/review-common.sh's
+    header), so it lives here once.
+    """
+    _reject_duplicate_lines(existing, content, target)
+    return _append_join(existing, content)
+
+
 def _stage(root: Path, data: str) -> str:
     """Write `data` to a fresh temp file inside `root`; return its path.
 
@@ -695,7 +786,8 @@ def _write_all_path_once(planned: list[tuple[tuple[Path, ...], Path, str, str]],
                 # successfully is not left committed while this one fails.
                 raise PersistError(f"refusing to write over existing directory: {target}")
 
-            data = _read_existing(target) + content if mode == "append" else content
+            data = (_append_data(_read_existing(target), content, target)
+                    if mode == "append" else content)
             if len(data.encode("utf-8")) > MAX_MEMORY_FILE_BYTES:
                 # proposal_schema bounds a single proposal's content; it has
                 # no notion of what's already on disk. Without this, many
@@ -973,7 +1065,8 @@ def _write_all_fd(planned: list[tuple[tuple[Path, ...], Path, str, str]]) -> tup
                     # ordering matters for the all-or-nothing guarantee.
                     raise PersistError(f"refusing to write over existing directory: {target}")
 
-            data = _read_existing_fd(stage_fd, target.name) + content if mode == "append" else content
+            data = (_append_data(_read_existing_fd(stage_fd, target.name), content, target)
+                    if mode == "append" else content)
             if len(data.encode("utf-8")) > MAX_MEMORY_FILE_BYTES:
                 raise PersistError(
                     f"{target} would exceed {MAX_MEMORY_FILE_BYTES} bytes after this write"

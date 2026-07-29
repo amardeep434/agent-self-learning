@@ -51,12 +51,21 @@ check() {
 
 # Drives one review end-to-end against a throwaway store with a fake reviewer.
 #   $1  fake `claude` script body (without the shebang)
+#   $2  optional: pre-existing memory/MEMORY.md content, seeded before the
+#       hook runs. Every call gets a FRESH store, so a case that needs the
+#       reviewer to collide with something already on disk (case J) cannot
+#       get there by running two reviews in a row -- the second one starts
+#       from an empty store. Seeding here is the only way in.
 # Exports STORE for the caller to assert against.
 run_review() {
-    local shim_body="$1" R i
+    local shim_body="$1" seed_memory="${2:-}" R i
     R="$(mktemp -d)"
     CASE_DIRS+=("$R")
     mkdir -p "$R/home" "$R/store/state" "$R/store/logs" "$R/bin"
+    if [[ -n "$seed_memory" ]]; then
+        mkdir -p "$R/store/memory"
+        printf '%s' "$seed_memory" > "$R/store/memory/MEMORY.md"
+    fi
     { echo '#!/usr/bin/env bash'; printf '%s\n' "$shim_body"; } > "$R/bin/claude"
     chmod +x "$R/bin/claude"
     printf '%s\n' \
@@ -219,6 +228,58 @@ check "D: conforming 3-fact proposal records no failure" "" "$(failure_line)"
 check "D: conforming proposal writes MEMORY.md" "- a
 - b" "$(cat "$STORE/memory/MEMORY.md" 2>/dev/null)"
 check "D: conforming proposal writes USER.md" "- c" "$(cat "$STORE/memory/USER.md" 2>/dev/null)"
+
+# ---------------------------------------------------------------------------
+# I) THE SECOND ROOT-CAUSE GUARD, read off the user's real accumulated
+# MEMORY.md rather than off a failure log. Two shapes had accumulated there
+# that the contract had never said anything about:
+#
+#   - 15 of 52 lines carried `[Title](some-lesson.md)` links. Memory is ONE
+#     flat file; no such file exists, or ever will, so every one is dead.
+#   - The same lesson appeared twice, and nothing told the Copilot CLI or
+#     VS Code reviewers to read the file before proposing (that rule lived
+#     only in session-review.sh's Claude Code preamble).
+#
+# Asserted against the recorded argv for the same reason case C is: a rule
+# that does not reach the model is not a rule.
+# ---------------------------------------------------------------------------
+run_review 'printf "%s\n" "$*" > "$FAKE_PROMPT_LOG"
+exit 0'
+PROMPT="$(cat "$PROMPT_LOG")"
+check "I: prompt forbids markdown file links in memory" "yes" \
+    "$(emits "$PROMPT" "NO markdown file links")"
+check "I: prompt says why (one flat file, no per-entry file)" "yes" \
+    "$(emits "$PROMPT" "there is no")"
+check "I: prompt requires reading the existing file first" "yes" \
+    "$(emits "$PROMPT" "READ the existing file first")"
+check "I: prompt says a repeated line is refused, not silently dropped" "yes" \
+    "$(emits "$PROMPT" "Appending a line it already contains is")"
+
+# ---------------------------------------------------------------------------
+# J) The enforcement halves, end-to-end through the real pipeline: a dangling
+# link is rejected by the schema (writer stage exit 1), and a line already in
+# MEMORY.md is refused by the writer (exit 2) with the file left untouched.
+# Both must reach persist-failures.log with a reason a human can act on --
+# the whole point of case A.
+# ---------------------------------------------------------------------------
+run_review "$(proposal_shim '{"version": 1, "memory": [{"file": "MEMORY.md", "mode": "append", "content": "- [Wait for CI](wait-for-ci.md) - dead link.\n"}]}')"
+LINE="$(failure_line)"
+check "J: a dangling memory link is rejected" "yes" "$(emits "$LINE" "writer stage exited 1")"
+check "J: the rejection says what to write instead" "yes" "$(emits "$LINE" "self-contained prose")"
+check "J: nothing is written for a rejected proposal" "no" \
+    "$([[ -e "$STORE/memory/MEMORY.md" ]] && echo yes || echo no)"
+
+run_review "$(proposal_shim '{"version": 1, "memory": [{"file": "MEMORY.md", "mode": "append", "content": "- already known\n"}]}')" \
+    '- already known
+'
+LINE="$(failure_line)"
+check "J: a duplicate line is refused loudly" "yes" "$(emits "$LINE" "already present in")"
+# Pattern kept inside the writer's own repr() quotes on purpose: `emits` runs
+# `grep -F "$2"`, and a pattern beginning with "- " is parsed as an option,
+# not as text (this check reported a false FAIL until the quotes were added).
+check "J: the refusal quotes the repeated line" "yes" "$(emits "$LINE" "'- already known'")"
+check "J: the seeded file is left exactly as it was" "- already known" \
+    "$(cat "$STORE/memory/MEMORY.md")"
 
 # ---------------------------------------------------------------------------
 # E) Both stages fail. One line, not two: doctor.sh reports the line count of
