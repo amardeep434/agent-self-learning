@@ -185,6 +185,24 @@ render_hook_template() {
     printf '%s' "$SL_SCRIPTS" | python3 "$RENDER_TEMPLATE_PY" "$1"
 }
 
+# The inverse: strip whatever install location a rendered hook file names back
+# to the template's placeholder, so Step 4b can tell "ours, installed
+# elsewhere" from "ours, edited". See lib/normalize-hook-path.py for why this
+# is a scan and not a sed character class, and tests/test-copilot-hook-normalize.sh
+# for the cases that pinned it. Only the file path crosses into python3 here;
+# the script name is a bare basename, so MSYS has nothing to convert.
+NORMALIZE_HOOK_PY="${SCRIPT_DIR}/scripts/lib/normalize-hook-path.py"
+if [[ ! -f "$NORMALIZE_HOOK_PY" ]]; then
+    echo "Error: ${NORMALIZE_HOOK_PY} not found" >&2
+    exit 1
+fi
+# "$@", not "$1" "$2": the stale branch below calls this with a leading
+# --print-path to ask the same scan for the directory it would have rewritten,
+# rather than matching the path a second time with an expression of its own.
+normalize_hook_path() {
+    python3 "$NORMALIZE_HOOK_PY" "$@"
+}
+
 echo "Install target (resolved by paths.py): ${SL_HOME}"
 echo ""
 
@@ -416,10 +434,18 @@ if [[ -d "${HOME}/.copilot" ]]; then
         mv "$tmp" "$COPILOT_HOOK_DST"
     }
     # Replace any absolute path immediately preceding one of our script names
-    # with the template's placeholder. Basic (not -E) sed for portability
-    # across GNU, BSD/macOS and MSYS.
+    # with the template's placeholder. This used to be a sed character class,
+    # `[^" ]*`, which excludes the space -- so a store under `.../My Store/`
+    # normalized to `/home/u/My __SL_SCRIPTS_DIR__/...`, never equalled the
+    # template, and relocating such a store took the "had local modifications"
+    # branch below: a spurious .bak and a false claim the user had edited the
+    # file, on a path where the space-free equivalent correctly reported
+    # "was stale". Widening the class cannot fix it -- `[^"]*` eats the `bash`
+    # interpreter out of the bash value, `bash [^"]*` misses the powershell
+    # value entirely -- because the boundary is "where does the path begin",
+    # not a character. lib/normalize-hook-path.py scans for it.
     _normalize_copilot_hook() {
-        sed 's#[^" ]*/copilot-session-review\.sh#__SL_SCRIPTS_DIR__/copilot-session-review.sh#g' "$1"
+        normalize_hook_path "$1" copilot-session-review.sh
     }
 
     if [[ ! -f "$COPILOT_HOOK_DST" ]]; then
@@ -432,7 +458,14 @@ if [[ -d "${HOME}/.copilot" ]]; then
     elif [[ "$(render_hook_template "$COPILOT_HOOK_SRC")" == "$(cat "$COPILOT_HOOK_DST")" ]]; then
         echo "  Up to date: $COPILOT_HOOK_DST (already points at ${SL_SCRIPTS})"
     elif [[ "$(_normalize_copilot_hook "$COPILOT_HOOK_DST")" == "$(cat "$COPILOT_HOOK_SRC")" ]]; then
-        OLD_HOOK_PATH="$(sed -n 's#.*"bash": "bash \(.*\)/copilot-session-review\.sh".*#\1#p' "$COPILOT_HOOK_DST" | head -n 1)"
+        # Same scan that decided this file was ours, asked for the directory
+        # instead of the rewrite. This used to be a sed expression of its own
+        # -- a second hand-rolled answer to "where does the path begin" -- and
+        # it broke the moment the hook command gained shell quoting around the
+        # path: the trailing `.sh"` stopped matching `.sh'"`, so this branch
+        # printed `<unknown>` while still reporting success. See
+        # lib/normalize-hook-path.py's find_paths().
+        OLD_HOOK_PATH="$(normalize_hook_path --print-path "$COPILOT_HOOK_DST" copilot-session-review.sh | head -n 1)"
         if [[ "$DRY_RUN" == "true" ]]; then
             echo "[DRY RUN] re-render STALE hook ${COPILOT_HOOK_DST}: ${OLD_HOOK_PATH:-<unknown>} -> ${SL_SCRIPTS}"
         else

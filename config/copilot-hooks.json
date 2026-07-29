@@ -4,8 +4,8 @@
     "sessionEnd": [
       {
         "type": "command",
-        "bash": "bash __SL_SCRIPTS_DIR__/copilot-session-review.sh",
-        "powershell": "bash -lc \"__SL_SCRIPTS_DIR__/copilot-session-review.sh\"",
+        "bash": "bash '__SL_SCRIPTS_DIR__/copilot-session-review.sh'",
+        "powershell": "bash -lc \"'__SL_SCRIPTS_DIR__/copilot-session-review.sh'\"",
         "timeoutSec": 30
       }
     ]

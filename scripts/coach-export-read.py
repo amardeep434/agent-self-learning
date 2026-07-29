@@ -3,7 +3,19 @@
 emit normalized signals.
 
 Usage: python3 coach-export-read.py <export_json_path>
-Output: JSON array [{"id", "severity", "suggestion", "count", "source": "export"}]
+Output: JSON array
+        [{"id", "severity", "suggestion", "count", "denominator", "source": "export"}]
+
+`count` alone is not interpretable. Every `topPatterns` row in a real export
+counts REQUESTS ("N requests took over 30 seconds", "83% of requests have no
+file references"), and the export states its own request total in
+`totals.requests` -- so that total is the denominator that turns a count into
+a prevalence. Without it a reader cannot tell 507 occurrences over 507
+requests (a standing configuration gap, true of every request) from 507 over
+50000 (a habit worth changing). It is emitted per signal rather than once,
+because coach-signals.py merges the two routes into a flat id-keyed map and a
+top-level field would not survive that -- the same reason `source` is
+per-signal.
 
 Two absences that look identical on stdout are deliberately NOT identical on
 the exit code:
@@ -57,6 +69,20 @@ def main():
         print("[]")
         return 1
 
+    # A missing, zero, negative or non-numeric total is NOT an error -- older
+    # or filtered exports may omit `totals` -- but it must degrade to 0, never
+    # to a guess. The renderer shows no prevalence at all for a 0 denominator,
+    # which is honest; a fabricated denominator would not be. `report` is
+    # already known to be subscriptable here (a non-dict would have raised
+    # TypeError on the `antiPatterns` lookup above).
+    totals = report.get("totals")
+    try:
+        denominator = int(totals["requests"]) if isinstance(totals, dict) else 0
+    except (KeyError, TypeError, ValueError):
+        denominator = 0
+    if denominator < 0:
+        denominator = 0
+
     signals = []
     for p in patterns:
         if not isinstance(p, dict) or "id" not in p:
@@ -66,6 +92,7 @@ def main():
             "severity": str(p.get("severity", "unknown")),
             "suggestion": str(p.get("suggestion", "")),
             "count": int(p.get("occurrences", 0) or 0),
+            "denominator": denominator,
             "source": "export",
         })
 

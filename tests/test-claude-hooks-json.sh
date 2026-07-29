@@ -16,6 +16,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FAILURES=0
 check() { if [[ "$2" == "$3" ]]; then echo "PASS: $1"; else echo "FAIL: $1 (expected '$2', got '$3')"; FAILURES=$((FAILURES+1)); fi; }
 
+# shellcheck source=tests/lib/hook-command.sh
+source "${SCRIPT_DIR}/tests/lib/hook-command.sh"
+
 HOOK="${SCRIPT_DIR}/config/settings-hooks.json"
 
 check "template exists" "yes" "$([[ -f "$HOOK" ]] && echo yes || echo no)"
@@ -68,7 +71,10 @@ while IFS= read -r cmd; do
     # mechanism is unknown. Recorded as an open question rather than dressed up
     # as understood; the strip is confirmed necessary and sufficient regardless.
     cmd="${cmd%$'\r'}"
-    script_path="${cmd#bash __SL_SCRIPTS_DIR__/}"
+    # Tokenize, then drop the placeholder directory -- see the identical
+    # note in tests/test-vscode-hooks-json.sh.
+    script_path="$(sl_hook_script_path "$cmd")"
+    script_path="${script_path#__SL_SCRIPTS_DIR__/}"
     if [[ -f "${SCRIPT_DIR}/scripts/${script_path}" ]]; then
         echo "PASS: template names a real script: ${script_path}"
     else

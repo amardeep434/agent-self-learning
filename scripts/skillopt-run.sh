@@ -88,10 +88,32 @@ if [[ -z "${RUNNER}" ]]; then
 fi
 
 SUBCMD="${1:-status}"
-if [[ "${SUBCMD}" == "run" && "${SL_SKILLOPT_RUN_CONFIRMED}" != "true" ]]; then
-    echo "skillopt: 'run' blocked — set SL_SKILLOPT_RUN_CONFIRMED=true after reviewing dry-run cost" >&2
-    exit 0
-fi
+# Gate every verb that can CAUSE a paid cycle, not only the one spelled "run".
+#
+# `schedule` is upstream's own automation: skillopt_sleep/scheduler.py installs a
+# managed crontab block on Unix or a Scheduled Task on Windows that runs `run`
+# nightly. It is therefore strictly MORE dangerous than a single `run` -- it is a
+# recurring paid job -- and until 2026-07-28 it passed through this wrapper
+# ungated, so `skillopt-run.sh schedule --backend claude` installed a nightly
+# spend without ever setting SL_SKILLOPT_RUN_CONFIRMED. Reproduced before fixing.
+#
+# Deliberately NOT gated: `dry-run`. Upstream warns it is not free on a real
+# backend ("A real-backend dry-run still incurs provider calls and spend",
+# docs/sleep/README.md), so this gate is admittedly on the wrong axis -- the
+# honest axis is --backend, since `run --backend mock` costs nothing and was
+# measured at 76ms. Gating dry-run too would block the very command the operator
+# is told to run in order to measure cost before confirming, which would make the
+# gate unsatisfiable. Recorded as a known limitation rather than silently shaped.
+case "${SUBCMD}" in
+    run|schedule)
+        if [[ "${SL_SKILLOPT_RUN_CONFIRMED}" != "true" ]]; then
+            echo "skillopt: '${SUBCMD}' blocked — set SL_SKILLOPT_RUN_CONFIRMED=true after reviewing dry-run cost" >&2
+            [[ "${SUBCMD}" == "schedule" ]] && \
+                echo "          ('schedule' installs a NIGHTLY run via cron/Scheduled Task, so it is gated too)" >&2
+            exit 0
+        fi
+        ;;
+esac
 
 if [[ -n "${RUNNER}" ]]; then
     exec bash "${RUNNER}" "$@"
