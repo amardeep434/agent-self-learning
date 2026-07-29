@@ -256,18 +256,30 @@ check "I: prompt says a repeated line is refused, not silently dropped" "yes" \
     "$(emits "$PROMPT" "Appending a line it already contains is")"
 
 # ---------------------------------------------------------------------------
-# J) The enforcement halves, end-to-end through the real pipeline: a dangling
-# link is rejected by the schema (writer stage exit 1), and a line already in
-# MEMORY.md is refused by the writer (exit 2) with the file left untouched.
-# Both must reach persist-failures.log with a reason a human can act on --
-# the whole point of case A.
+# J) The two enforcement halves end-to-end, which are deliberately DIFFERENT:
+#
+#   - a dangling markdown link is STRIPPED and the entry kept, because the
+#     visible text carries the lesson and the target carried nothing. Refusing
+#     it cost a whole paid review on 2026-07-29 (the live persist-failures.log
+#     read "'](capture-exit-code-separately.md)' points at a file that does not
+#     exist") -- memory AND skills discarded over one malformed line.
+#
+#   - a line already present in MEMORY.md is still REFUSED loudly (exit 2,
+#     file untouched), because dropping it silently would discard something a
+#     reader might have wanted and would hide a reviewer that never read the
+#     file.
+#
+# Asserting both here is the point: it pins that "be lenient" was applied to
+# the case that loses nothing, and NOT generalised to the case that does.
 # ---------------------------------------------------------------------------
 run_review "$(proposal_shim '{"version": 1, "memory": [{"file": "MEMORY.md", "mode": "append", "content": "- [Wait for CI](wait-for-ci.md) - dead link.\n"}]}')"
-LINE="$(failure_line)"
-check "J: a dangling memory link is rejected" "yes" "$(emits "$LINE" "writer stage exited 1")"
-check "J: the rejection says what to write instead" "yes" "$(emits "$LINE" "self-contained prose")"
-check "J: nothing is written for a rejected proposal" "no" \
+check "J: a dangling memory link no longer fails the review" "" "$(failure_line)"
+check "J: the entry is written, not discarded" "yes" \
     "$([[ -e "$STORE/memory/MEMORY.md" ]] && echo yes || echo no)"
+check "J: the lesson text survives the strip" "yes" \
+    "$(grep -q -- "- Wait for CI - dead link." "$STORE/memory/MEMORY.md" && echo yes || echo no)"
+check "J: the dead target is gone" "0" \
+    "$(grep -c "wait-for-ci.md" "$STORE/memory/MEMORY.md" || true)"
 
 run_review "$(proposal_shim '{"version": 1, "memory": [{"file": "MEMORY.md", "mode": "append", "content": "- already known\n"}]}')" \
     '- already known

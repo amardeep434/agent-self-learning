@@ -460,17 +460,40 @@ class TestMemoryEntriesAreSelfContained(unittest.TestCase):
         return {"version": 1,
                 "memory": [{"file": "MEMORY.md", "mode": "append", "content": content}]}
 
-    def test_dangling_md_link_rejects_the_proposal(self):
-        with self.assertRaises(ps.ValidationError) as ctx:
-            ps.validate_proposal(self._entry(
-                "- [Probe the real key name first](probe-key-name.md) - a guess is my bug.\n"))
-        # The message must tell the reviewer what to do instead, not just "no".
-        self.assertIn("self-contained prose", str(ctx.exception))
-        self.assertIn("probe-key-name.md", str(ctx.exception))
+    def test_dangling_md_link_is_stripped_and_the_lesson_kept(self):
+        """Strip, do not refuse.
 
-    def test_link_with_anchor_is_also_rejected(self):
-        with self.assertRaises(ps.ValidationError):
-            ps.validate_proposal(self._entry("- [x](docs/a.md#heading) - y\n"))
+        Refusing cost a whole paid review on 2026-07-29 -- the live
+        persist-failures.log carried "'](capture-exit-code-separately.md)'
+        points at a file that does not exist" and the entire proposal, memory
+        and skills alike, was discarded over one malformed line.
+
+        Stripping is safe HERE because nothing is lost: the visible text
+        carries the lesson and the target carried no information, since memory
+        is one flat file. That is why this may be silent while the duplicate
+        check remains a loud refusal -- a duplicate discards something a reader
+        might have wanted, a dead link discards nothing.
+        """
+        out = ps.validate_proposal(self._entry(
+            "- [Probe the real key name first](probe-key-name.md) - a guess is my bug.\n"))
+        content = out["memory"][0]["content"]
+        self.assertEqual(
+            content, "- Probe the real key name first - a guess is my bug.\n")
+        self.assertNotIn("probe-key-name.md", content)
+        self.assertNotIn("](", content)
+
+    def test_link_with_anchor_is_also_stripped(self):
+        out = ps.validate_proposal(self._entry("- [x](docs/a.md#heading) - y\n"))
+        self.assertEqual(out["memory"][0]["content"], "- x - y\n")
+
+    def test_orphaned_target_leaves_no_dangling_bracket(self):
+        """The strip runs in two passes so a target with no "[text]" before it
+        cannot survive as "](...)" -- which would be a worse artefact than the
+        link it replaced."""
+        out = ps.validate_proposal(self._entry("- orphan ](stray.md) tail\n"))
+        self.assertNotIn("](", out["memory"][0]["content"])
+        self.assertIn("orphan", out["memory"][0]["content"])
+        self.assertIn("tail", out["memory"][0]["content"])
 
     def test_prose_naming_a_file_is_untouched(self):
         """Deliberately narrow. Memory is FULL of legitimate filenames --
@@ -480,12 +503,17 @@ class TestMemoryEntriesAreSelfContained(unittest.TestCase):
                         "- run tests/run-all.sh (53 suites) before pushing\n",
                         "- persist-proposal.py owns every write (not review-common.sh)\n"):
             with self.subTest(content=content):
-                ps.validate_proposal(self._entry(content))
+                out = ps.validate_proposal(self._entry(content))
+                self.assertEqual(out["memory"][0]["content"], content,
+                                 "prose naming a file must survive byte-identical")
 
     def test_non_md_link_is_untouched(self):
         """A URL is a real, resolvable reference; only per-entry .md files
         are the invented convention."""
-        ps.validate_proposal(self._entry("- see [the run](https://github.com/x/y/actions)\n"))
+        content = "- see [the run](https://github.com/x/y/actions)\n"
+        out = ps.validate_proposal(self._entry(content))
+        self.assertEqual(out["memory"][0]["content"], content,
+                         "a URL is resolvable; only .md targets are the invented convention")
 
     def test_skill_content_may_still_link(self):
         """Skills DO live in files (learned-skills/<name>/SKILL.md), so a
