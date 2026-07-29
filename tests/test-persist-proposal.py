@@ -793,6 +793,54 @@ class TestCrossReviewCaseFoldCollision(unittest.TestCase):
                 self.assertEqual(sorted(usage), ["alpha"])
 
 
+class TestAppendLineDisciplineCRLF(unittest.TestCase):
+    """The same discipline, against existing content that uses CRLF endings.
+
+    These reproduce on EVERY platform because the fixture writes "\r\n" as
+    BYTES rather than relying on the platform to produce it. That is the point:
+    the LF-only versions of these assertions passed on ubuntu and macOS while
+    both windows-latest cells failed (run 30428254427), because there the file
+    comes back with CRLF and `rstrip("\n")` leaves a bare "\r" behind -- so the
+    blank lines survived and a duplicate compared unequal. Seeding the bytes
+    moves the boundary somewhere it can be debugged without a Windows machine.
+    """
+
+    def _append(self, home, content):
+        return run(json.dumps({"version": 1,
+                               "memory": [{"file": "MEMORY.md", "mode": "append",
+                                           "content": content}]}), home)
+
+    def _seed_bytes(self, home, raw):
+        (home / "memory").mkdir(parents=True, exist_ok=True)
+        (home / "memory" / "MEMORY.md").write_bytes(raw)
+        return home / "memory" / "MEMORY.md"
+
+    def test_crlf_file_without_trailing_newline_still_gets_a_separator(self):
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            mem = self._seed_bytes(home, b"- first entry")
+            r = self._append(home, "- second entry")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            text = mem.read_text()
+            self.assertNotIn("- first entry- second entry", text)
+            self.assertIn("- second entry", text)
+
+    def test_crlf_trailing_blank_lines_collapse(self):
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            mem = self._seed_bytes(home, b"- x\r\n\r\n\r\n\r\n")
+            self.assertEqual(self._append(home, "- y").returncode, 0)
+            self.assertEqual(mem.read_text().replace("\r\n", "\n"), "- x\n- y\n")
+
+    def test_crlf_duplicate_line_is_still_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            self._seed_bytes(home, b"- already known\r\n")
+            r = self._append(home, "- already known")
+            self.assertNotEqual(r.returncode, 0,
+                                "a CRLF-stored duplicate must still be refused")
+
+
 class TestAppendLineDiscipline(unittest.TestCase):
     """Read off the user's REAL MEMORY.md, not imagined.
 

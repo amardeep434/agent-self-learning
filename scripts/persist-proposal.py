@@ -311,10 +311,16 @@ def _append_join(existing: str, content: str) -> str:
     Empty (or newline-only) content is a no-op rather than a bare "\\n": an
     append of nothing must not silently grow the file by a blank line.
     """
-    body = content.strip("\n")
+    # strip/rstrip "\r\n", not "\n": on Windows the existing file is read back
+    # with CRLF endings, so stripping only "\n" leaves a bare "\r" behind --
+    # the blank lines then survive as "\r\r\r" and the join emits "\r\n".
+    # MEASURED: windows-latest failed with '- x\n\n\n\n- y\n' != '- x\n- y\n'
+    # (run 30428254427) while both POSIX cells passed. Same line-ending boundary
+    # that scripts/lib/config.sh already strips with %$'\r'.
+    body = content.strip("\r\n")
     if not body:
         return existing
-    prefix = existing.rstrip("\n")
+    prefix = existing.rstrip("\r\n")
     if prefix:
         prefix += "\n"
     return prefix + body + "\n"
@@ -347,9 +353,12 @@ def _reject_duplicate_lines(existing: str, content: str, target: Path) -> None:
     # `have` as well was written first and proved inert under mutation -- with
     # no blank line ever reaching the `in have` test, what `have` contains
     # cannot matter -- so it was removed rather than kept as decoration.
-    have = set(existing.split("\n"))
-    repeated = [line for line in content.split("\n")
-                if line.strip() and line in have]
+    # splitlines(), not split("\n"): it handles CRLF, so a duplicate is caught
+    # on Windows too. rstrip("\r") on each side for the same reason -- a line
+    # read back as "- x\r" must still equal the proposed "- x".
+    have = {line.rstrip("\r") for line in existing.splitlines()}
+    repeated = [line for line in content.splitlines()
+                if line.strip() and line.rstrip("\r") in have]
     if repeated:
         raise PersistError(
             f"refusing to append a line already present in {target}: "
