@@ -103,12 +103,27 @@ class TestSecurityCritical1TrailingNewline(unittest.TestCase):
 
 class TestSecurityCritical2RecursionError(unittest.TestCase):
     """CRITICAL 2: RecursionError escapes extract_proposal"""
-    def test_deeply_nested_input_returns_none(self):
-        # Adversarial input that causes RecursionError in json.loads
+    def test_deeply_nested_input_is_never_a_usable_proposal(self):
+        """Deep nesting must not crash, and must never yield a valid proposal.
+
+        This used to assert `is None`, which encoded a CPython implementation
+        detail rather than the security property. Through 3.13 `json.loads`
+        raised RecursionError on this input and extract_proposal caught it; in
+        3.14 the parser is no longer recursive, so the same payload parses in
+        ~0.02s and a dict comes back. MEASURED on 3.14.6: the old assertion
+        failed while nothing about the system's safety had changed.
+
+        What actually matters, and what is asserted here: the call does not
+        raise, and whatever it returns is rejected by validate_proposal. That
+        holds on every version, and is strictly stronger than `is None` --
+        a parser that returned None for the wrong reason would have passed the
+        old test.
+        """
         nested = '{"a":' + '['*100000 + ']'*100000 + '}'
-        # Should return None, not raise RecursionError
-        result = ps.extract_proposal(nested)
-        self.assertIsNone(result)
+        result = ps.extract_proposal(nested)   # must not raise
+        if result is not None:
+            with self.assertRaises(Exception):
+                ps.validate_proposal(result)
 
     def test_oversized_input_returns_none(self):
         # Input exceeding MAX_INPUT_BYTES should return None before regex

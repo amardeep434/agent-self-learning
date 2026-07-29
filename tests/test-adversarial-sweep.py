@@ -236,6 +236,30 @@ class TestResourceExhaustion(unittest.TestCase):
         self.assertIsNone(result, f"{label}: expected None, took {elapsed:.4f}s")
         self.assertLess(elapsed, self.TIME_BOUND, f"{label}: took {elapsed:.4f}s -- possible ReDoS/complexity regression")
 
+    def _timed_not_a_proposal(self, label, payload):
+        """For WELL-FORMED payloads that are merely hostile in shape.
+
+        `_timed_none` is right for malformed or oversized input, which is
+        rejected before parsing and still returns None on every version. It is
+        wrong for valid-but-deeply-nested JSON: through 3.13 that raised
+        RecursionError inside json.loads (hence None), but 3.14's parser is not
+        recursive, so it parses and returns a dict. MEASURED on 3.14.6 -- the
+        400kb bracket bomb and the oversized payload still return None; only
+        this one changed.
+
+        The invariant is unchanged and is what this asserts: bounded time, no
+        exception escaping, and the result never validating as a proposal.
+        """
+        attack(f"resource:{label}")
+        start = time.monotonic()
+        result = ps.extract_proposal(payload)
+        elapsed = time.monotonic() - start
+        self.assertLess(elapsed, self.TIME_BOUND,
+                        f"{label}: took {elapsed:.4f}s -- possible ReDoS/complexity regression")
+        if result is not None:
+            with self.assertRaises(Exception):
+                ps.validate_proposal(result)
+
     def test_400kb_bracket_bomb(self):
         payload = "[" * 200_000 + "]" * 200_000
         self.assertGreaterEqual(len(payload.encode()), 390_000)
@@ -243,7 +267,7 @@ class TestResourceExhaustion(unittest.TestCase):
 
     def test_100k_deep_nested_object(self):
         payload = '{"a":' * 100_000 + "1" + "}" * 100_000
-        self._timed_none("100k-deep-nesting", payload)
+        self._timed_not_a_proposal("100k-deep-nesting", payload)
 
     def test_100k_fence_openers(self):
         payload = "```json\n{" * 100_000
