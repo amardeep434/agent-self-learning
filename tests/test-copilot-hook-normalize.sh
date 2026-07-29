@@ -110,6 +110,62 @@ check "print-path: windows native drive form" "C:/Users/u/My Store/scripts" \
 check "print-path: prints nothing when there is no install path" "" \
     "$(print_path '  "bash": "bash '"'"'__SL_SCRIPTS_DIR__/copilot-session-review.sh'"'"'",')"
 
+# --- 1c. --canonical: the same normalize, plus OUR quoting removed ---
+#
+# Normalizing alone compares an installed file against ONE template generation.
+# 58098f7 changed the template's quoting, so on the next upgrade a file we had
+# rendered ourselves normalized to the PREVIOUS template and install.sh
+# reported "UPDATED (had local modifications)" with a .bak -- measured on a
+# real upgrade. Canonical form is the comparison key that makes the two
+# generations equal: both must reduce to the SAME unquoted text, and anything
+# beyond our own quoting must survive.
+canon_line() {
+    printf '%s\n' "$1" > "${TMP}/canon.json"
+    python3 "$NORMALIZER" --canonical "${TMP}/canon.json" "$SCRIPT_NAME"
+}
+while IFS='|' read -r label input expected; do
+    [[ -z "$label" ]] && continue
+    check "canonical: ${label}" "$expected" "$(canon_line "$input")"
+done <<'CANON_CASES'
+quoted bash value (current template)|  "bash": "bash '/home/u/store/scripts/copilot-session-review.sh'",|  "bash": "bash __SL_SCRIPTS_DIR__/copilot-session-review.sh",
+unquoted bash value (pre-58098f7 install)|  "bash": "bash /home/u/store/scripts/copilot-session-review.sh",|  "bash": "bash __SL_SCRIPTS_DIR__/copilot-session-review.sh",
+quoted powershell value (current template)|  "powershell": "bash -lc \"'/home/u/store/scripts/copilot-session-review.sh'\"",|  "powershell": "bash -lc __SL_SCRIPTS_DIR__/copilot-session-review.sh",
+user quotes the whole command, not just the path|  "bash": "bash '/home/u/store/scripts/copilot-session-review.sh --flag'",|  "bash": "bash '__SL_SCRIPTS_DIR__/copilot-session-review.sh --flag'",
+CANON_CASES
+
+# That last case is the one that pins BALANCE. The quote before the token is
+# ours; the one after it is not adjacent, it is at the end of the user's
+# argument list. Stripping the opening quote without checking for a closing one
+# eats the character on the right instead -- here the space in front of
+# `--flag`, joining two words of the user's command into one. Symmetric input
+# hides it (both sides lose a character in the same place), which is why the
+# assertion is on this asymmetric line rather than on the template.
+
+# The powershell expectation above is deliberately NOT hand-written a second
+# time: the two generations of that value nest their quoting differently
+# (`\"<path>\"` became `\"'<path>'\"`), so the only assertion that means
+# anything is that they land on the SAME key. Asserting a literal would just
+# re-encode whichever peeling order the implementation happens to use.
+check "canonical: both powershell generations agree" "yes" \
+    "$([[ "$(canon_line '  "powershell": "bash -lc \"'"'"'/home/u/store/scripts/copilot-session-review.sh'"'"'\"",')" \
+        == "$(canon_line '  "powershell": "bash -lc \"/home/u/store/scripts/copilot-session-review.sh\"",')" ]] \
+        && echo yes || echo no)"
+# ...and the same for the whole shipping template against its pre-quoting form,
+# which is what install.sh actually compares. Rendered, so the round trip is
+# included rather than assumed.
+printf '%s' '/home/u/store/scripts' | python3 "${SCRIPT_DIR}/scripts/lib/render-template.py" "$TEMPLATE" > "${TMP}/current.json"
+tr -d "'" < "${TMP}/current.json" > "${TMP}/pre-quoting.json"
+check "canonical: rendered template equals its pre-quoting form" \
+    "$(python3 "$NORMALIZER" --canonical "$TEMPLATE" "$SCRIPT_NAME")" \
+    "$(python3 "$NORMALIZER" --canonical "${TMP}/pre-quoting.json" "$SCRIPT_NAME")"
+# The mirror image, and the one that must NOT collapse: a real edit next to the
+# quoting still has to differ, or install.sh re-renders over it without a .bak.
+sed "s#bash '#bash /usr/bin/env bash '#" "${TMP}/current.json" > "${TMP}/edited.json"
+check "canonical: a user's wrapper still differs from the template" "differs" \
+    "$([[ "$(python3 "$NORMALIZER" --canonical "${TMP}/edited.json" "$SCRIPT_NAME")" \
+        == "$(python3 "$NORMALIZER" --canonical "$TEMPLATE" "$SCRIPT_NAME")" ]] \
+        && echo same || echo differs)"
+
 # --- 2. What must NOT be normalized ---
 #
 # Normalizing too much is the mirror-image defect: it makes a user's edit look
@@ -184,7 +240,73 @@ for suffix in nospace space; do
     # success -- the same class of silent wrongness one line further on.
     check "relocation (${suffix}): old location reported, not <unknown>" "0" \
         "$(grep -c '<unknown>' "$log" || true)"
+    check "relocation (${suffix}): the old location is actually printed" "1" \
+        "$(grep -c 'previously ' "$log" || true)"
 done
+
+# --- 3b. Upgrading ACROSS a template shape change, through install.sh ---
+#
+# The relocation cases above move the store while the template holds still.
+# This is the other axis, and the one that shipped broken: the store stays put
+# and OUR template changes shape under it. Measured on the real upgrade past
+# 58098f7 (single-quoting the rendered path), against a file the user had never
+# touched:
+#
+#   UPDATED (had local modifications): ~/.copilot/hooks/self-learning.json
+#     previous version saved to: ...bak-20260729T052022Z
+#     re-apply any customizations from that file by hand.
+#
+# A false accusation, a spurious .bak, and instructions to re-apply edits that
+# do not exist. The pre-quoting file is reconstructed by deleting the
+# apostrophes from a real render rather than by pinning a literal, so this stays
+# honest if the template moves again -- and the edited counter-case below is run
+# through the same machinery, because a fix that stops the false positive by
+# forgiving MORE than our own quoting is a silent data-loss bug.
+upgrade_home="${TMP}/home-upgrade"
+mkdir -p "${upgrade_home}/.copilot"
+sl_install_into() {
+    env -i HOME="$upgrade_home" AGENT_LEARNING_HOME="${upgrade_home}/store" PATH="$PATH" \
+        bash "${SCRIPT_DIR}/install.sh" >"$1" 2>&1
+}
+upgrade_hook="${upgrade_home}/.copilot/hooks/self-learning.json"
+sl_install_into "${TMP}/upgrade-install1.log"
+tr -d "'" < "$upgrade_hook" > "${TMP}/unquoted.json"
+cp "${TMP}/unquoted.json" "$upgrade_hook"
+sl_install_into "${TMP}/upgrade-install2.log"
+check "quoting upgrade: reported as stale, not as user-modified" "1" \
+    "$(grep -c 'UPDATED (was stale)' "${TMP}/upgrade-install2.log" || true)"
+check "quoting upgrade: no 'had local modifications'" "0" \
+    "$(grep -c 'had local modifications' "${TMP}/upgrade-install2.log" || true)"
+check "quoting upgrade: no backup file left behind" "0" \
+    "$(find "${upgrade_home}/.copilot/hooks" -name '*.bak-*' | wc -l | tr -d ' ')"
+# The store did not move, so the stale message must not claim it did. The
+# relocation wording here would read "(previously <the identical path>)" -- a
+# line that tells the user nothing changed while announcing a change.
+check "quoting upgrade: message says the location is unchanged" "1" \
+    "$(grep -c 'same location' "${TMP}/upgrade-install2.log" || true)"
+check "quoting upgrade: no 'previously <same path>' line" "0" \
+    "$(grep -c 'previously ' "${TMP}/upgrade-install2.log" || true)"
+# Idempotent: the run after the re-render has nothing left to do. A canonical
+# comparison that quietly re-rendered on every install would still pass the
+# three checks above.
+sl_install_into "${TMP}/upgrade-install3.log"
+check "quoting upgrade: next run reports up to date" "1" \
+    "$(grep -c 'Up to date' "${TMP}/upgrade-install3.log" || true)"
+
+# The counter-case. Same store, same template, one genuine edit (a changed
+# timeout -- nowhere near the path), and the classification must go the other
+# way: backed up, and the user told.
+sed 's/"timeoutSec": 30/"timeoutSec": 60/' "$upgrade_hook" > "${TMP}/edited-hook.json"
+check "edited fixture actually differs" "differs" \
+    "$([[ "$(cat "${TMP}/edited-hook.json")" == "$(cat "$upgrade_hook")" ]] && echo same || echo differs)"
+cp "${TMP}/edited-hook.json" "$upgrade_hook"
+sl_install_into "${TMP}/upgrade-install4.log"
+check "genuine edit: still reported as user-modified" "1" \
+    "$(grep -c 'had local modifications' "${TMP}/upgrade-install4.log" || true)"
+check "genuine edit: backup kept" "1" \
+    "$(find "${upgrade_home}/.copilot/hooks" -name '*.bak-*' | wc -l | tr -d ' ')"
+check "genuine edit: backup holds the user's version" "1" \
+    "$(grep -c '"timeoutSec": 60' "${upgrade_home}"/.copilot/hooks/*.bak-* || true)"
 
 # The hook actually installed at the end must still name a real, existing
 # script -- the point of all of the above.
