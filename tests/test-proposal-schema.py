@@ -432,5 +432,52 @@ class TestMemoryEntryLimitIsHonest(unittest.TestCase):
         self.assertIn(f"at most {ps.MAX_MEMORY_ENTRIES} memory entries", str(ctx.exception))
 
 
+class TestMemoryEntriesAreSelfContained(unittest.TestCase):
+    """Memory is ONE flat file, so a `[Title](title.md)` link is always dead.
+
+    Measured on the user's real MEMORY.md: 15 of 52 lines carried one, and
+    none of the 15 targets existed anywhere in the store. The OUTPUT CONTRACT
+    (lib/review-common.sh) now states the rule; this is the enforcement half,
+    exactly as the one-entry-per-file rule is stated there and enforced here.
+    """
+
+    def _entry(self, content):
+        return {"version": 1,
+                "memory": [{"file": "MEMORY.md", "mode": "append", "content": content}]}
+
+    def test_dangling_md_link_rejects_the_proposal(self):
+        with self.assertRaises(ps.ValidationError) as ctx:
+            ps.validate_proposal(self._entry(
+                "- [Probe the real key name first](probe-key-name.md) - a guess is my bug.\n"))
+        # The message must tell the reviewer what to do instead, not just "no".
+        self.assertIn("self-contained prose", str(ctx.exception))
+        self.assertIn("probe-key-name.md", str(ctx.exception))
+
+    def test_link_with_anchor_is_also_rejected(self):
+        with self.assertRaises(ps.ValidationError):
+            ps.validate_proposal(self._entry("- [x](docs/a.md#heading) - y\n"))
+
+    def test_prose_naming_a_file_is_untouched(self):
+        """Deliberately narrow. Memory is FULL of legitimate filenames --
+        `tests/run-all.sh`, `paths.py`, `see CLAUDE.md` -- and rejecting
+        those would reject nearly every real entry."""
+        for content in ("- see CLAUDE.md for the layout\n",
+                        "- run tests/run-all.sh (53 suites) before pushing\n",
+                        "- persist-proposal.py owns every write (not review-common.sh)\n"):
+            with self.subTest(content=content):
+                ps.validate_proposal(self._entry(content))
+
+    def test_non_md_link_is_untouched(self):
+        """A URL is a real, resolvable reference; only per-entry .md files
+        are the invented convention."""
+        ps.validate_proposal(self._entry("- see [the run](https://github.com/x/y/actions)\n"))
+
+    def test_skill_content_may_still_link(self):
+        """Skills DO live in files (learned-skills/<name>/SKILL.md), so a
+        cross-reference there is not dangling by construction."""
+        ps.validate_proposal({"version": 1,
+                              "skills": [{"name": "s", "content": "see [other](SKILL.md)"}]})
+
+
 if __name__ == "__main__":
     unittest.main()

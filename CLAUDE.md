@@ -36,8 +36,20 @@ Measured twice: on 2026-07-28 ad-hoc invocations of `session-review.sh` /
 `copilot-session-review.sh` / `vscode-session-review.sh` / `turn-counter.sh` left six lines
 in the live `persist-failures.log` — payloads with no `sessionId`/`transcript_path`, i.e.
 test calls, not sessions — and `doctor.sh` correctly reported UNHEALTHY on them.
-`bash tests/run-all.sh` itself is clean of live-store writes (verified across a full run);
-this is a hazard of ad-hoc commands, not of the suite.
+**`bash tests/run-all.sh` is NOT clean of live-store writes** — an earlier version of this
+paragraph claimed it was, and that claim was wrong. `tests/test-review-cli-flags.sh:120-124`
+invokes the **real installed `copilot`** (`copilot --max-ai-credits 30 -p ""`) to prove the
+CLI still accepts the flags this project passes. That starts a genuine session, which
+creates `~/.copilot/session-state/<uuid>` and fires your installed `sessionEnd` hook.
+MEASURED 2026-07-29, that one suite alone: **+697 bytes to the live `logs/persist.log`, +1
+Copilot session directory** — so it may also consume Copilot credits. No memory or skill
+content is written; the damage is log noise and a session dir, not corrupted state.
+
+The false "verified clean" claim came from a broken check: `find <store> -newermt … || echo
+none`. `find` exits 0 with empty output, so the `||` never fires, and silence was read as
+absence. That is this project's signature defect inside its own verification — when
+measuring "did anything change", compare a **byte count or checksum before and after**,
+never the emptiness of a command's output.
 
 If a live-store line does get written, **archive it before clearing**: `doctor.sh`
 distinguishes an ABSENT log ("never ran, or ran and never failed") from an EMPTY one ("ran
