@@ -54,7 +54,33 @@ SKILL_NAME_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 # Prose that merely names a file ("see paths.py") is untouched, and skill
 # content is untouched -- SKILL.md files are real and may legitimately
 # cross-reference.
-MEMORY_FILE_LINK_RE = re.compile(r"\]\(\s*[^)\s]+\.md(?:[#?][^)]*)?\s*\)")
+# The whole markdown link, with the visible text captured so it can be kept.
+# Narrow on purpose: only ".md" targets. Prose that merely names a file
+# ("see CLAUDE.md"), http(s) links, and every skill body are untouched.
+MEMORY_FILE_LINK_RE = re.compile(
+    r"\[([^\]\n]*)\]\(\s*[^)\s]+\.md(?:[#?][^)]*)?\s*\)")
+# An orphaned target with no "[text]" before it. Stripped separately so the
+# first substitution can never leave a dangling "](...)" behind.
+_MEMORY_ORPHAN_LINK_RE = re.compile(r"\]\(\s*[^)\s]+\.md(?:[#?][^)]*)?\s*\)")
+
+
+def strip_memory_file_links(content: str) -> str:
+    """Reduce "[Text](lesson.md)" to "Text" in a memory entry.
+
+    Memory is ONE flat file, so a markdown file link always points at
+    something that does not exist. The reviewer keeps emitting the form
+    anyway -- it is mimicking the real learned-skills/<name>/SKILL.md layout,
+    flattened -- and rejecting the proposal for it cost a whole paid review on
+    2026-07-29 (persist-failures.log: "'](capture-exit-code-separately.md)'
+    points at a file that does not exist").
+
+    Stripping rather than refusing is safe HERE specifically because nothing is
+    lost: the visible text carries the lesson, and the target carried no
+    information at all. That is normalisation, not a judgement about content --
+    the reason this is allowed to be silent while the duplicate-line check is
+    still a loud refusal, which discards something a reader might have wanted.
+    """
+    return _MEMORY_ORPHAN_LINK_RE.sub("", MEMORY_FILE_LINK_RE.sub(r"\1", content))
 
 _FENCE = "```"
 # Deferred minor (Item 3): bounds how many fenced code-block candidates
@@ -142,13 +168,11 @@ def validate_proposal(obj: object) -> dict:
               f"mode must be one of {sorted(ALLOWED_MODES)}")
         _need(isinstance(content, str), "memory content must be a string")
         _need("\x00" not in content, "content contains NUL byte")
+        # Strip BEFORE the size check: stripping only shrinks, and the cap must
+        # describe what actually gets stored, not what was proposed.
+        content = strip_memory_file_links(content)
         _need(_size(content) <= MAX_MEMORY_BYTES,
               f"memory content exceeds {MAX_MEMORY_BYTES} bytes")
-        link = MEMORY_FILE_LINK_RE.search(content)
-        _need(link is None,
-              "memory entries must be self-contained prose: memory is one flat "
-              f"file, so the markdown file link {link.group(0) if link else ''!r} "
-              "points at a file that does not exist. Write the lesson itself.")
         total += _size(content)
         memory_out.append({"file": name, "mode": mode, "content": content})
 
