@@ -45,8 +45,8 @@ Why this is a file and not a `sed` expression:
 Why not parse the JSON, rewrite the values and re-serialize -- which would at
 least drop the `\"` escaping from the problem:
 
-  1. install.sh compares this output against config/copilot-hooks.json BYTE FOR
-     BYTE (`[[ "$(_normalize_copilot_hook "$dst")" == "$(cat "$src")" ]]`).
+  1. install.sh compares this output against config/copilot-hooks.json (see
+     `--canonical` below; it used to be BYTE FOR BYTE against the raw file).
      `json.dumps` reproduces the template's exact formatting only by
      coincidence, and the moment it does not, every hook file classifies as
      user-edited -- the same defect being fixed. Making it robust means
@@ -89,8 +89,47 @@ never that form, and admitting `\` into the path body is precisely what stops
 the scan escaping a JSON string. Such a file classifies as "ours, edited" --
 a spurious .bak, which is the safe direction to be wrong in.
 
+`--canonical`: normalize, then drop the shell quoting around our own token.
+
+  Normalizing the path is not enough on its own, because the TEMPLATE changes
+  shape too. Commit 58098f7 wrapped the rendered path in single quotes so a
+  store path containing a space still runs. On the next upgrade the installed
+  file normalized to the PREVIOUS template, not the current one, and the only
+  difference was our own quoting. Measured, on a real upgrade:
+
+    was  "bash": "bash /home/u/store/scripts/copilot-session-review.sh"
+    now  "bash": "bash '/home/u/store/scripts/copilot-session-review.sh'"
+
+    UPDATED (had local modifications): ~/.copilot/hooks/self-learning.json
+
+  A false accusation, a spurious .bak, and instructions to re-apply edits that
+  do not exist -- the exact misclassification the normalize step exists to
+  prevent, reintroduced from the other side: "ours, changed by US" read as
+  "ours, edited by THEM".
+
+  So install.sh compares `--canonical` of the file against `--canonical` of the
+  template, and canonicalizing means stripping the quote pairs that wrap
+  `__SL_SCRIPTS_DIR__/<script-name>` -- `'...'` and `\"...\"`, the two forms our
+  templates have ever emitted -- until none is left. Both shapes above reduce to
+  `bash __SL_SCRIPTS_DIR__/copilot-session-review.sh`, so the file classifies as
+  ours-and-stale and is re-rendered without a .bak.
+
+  Deliberately narrow, and narrow in the safe direction. It forgives quoting of
+  OUR path token and nothing else: a changed timeout, an added key, a different
+  interpreter, a user's own wrapper all still differ and still keep their .bak.
+  That is what separates this from the JSON round trip rejected above, which
+  forgave every whitespace difference anywhere in the file. Only a BALANCED
+  pair immediately around the token is peeled: strip an opening quote without
+  its closing one and the character on the far side is eaten instead, which
+  silently rewrites the user's command. And a bare `"` is not in QUOTE_PAIRS at
+  all -- that character is a JSON string delimiter, and dissolving one would let
+  the comparison see across values.
+
+  The canonical form is a comparison key, never written to disk -- what lands in
+  the hook file is always a fresh render of the current template.
+
 Usage:
-    normalize-hook-path.py <hook-file> <script-basename>
+    normalize-hook-path.py [--print-path|--canonical] <hook-file> <script-basename>
 
 Writes the normalized text to stdout. Bytes in, bytes out: line endings and
 the file's final newline survive untouched, because install.sh's comparison is
@@ -110,6 +149,20 @@ BOUNDARY = (" ", "\t", '"', "'")
 # Characters that can never appear inside the path, because crossing one would
 # mean leaving the JSON string literal the path lives in.
 FORBIDDEN_IN_PATH = ('"', "\\")
+
+# Shell quoting that may wrap our token, stripped by --canonical. `'` is the
+# bash value's quoting; `\"` is the powershell value's, as it appears in the
+# undecoded JSON (backslash then quote, on BOTH sides). A bare `"` is absent on
+# purpose: it delimits the JSON string, and removing one would let the
+# comparison run past the end of the value it belongs to.
+#
+# MEASURED: dropping `\"` from this tuple still passes the 58098f7 upgrade
+# end-to-end, because both generations of the powershell value wrap the path in
+# `\"` and the difference between them is the `'` nested inside. It is here so
+# the rule is "our quoting, in either value", rather than "the one pair that
+# happened to change last time" -- a template shape change is exactly the class
+# of event this branch keeps getting wrong.
+QUOTE_PAIRS = ("'", '\\"')
 
 
 def _starts_path(text: str, p: int) -> bool:
@@ -179,6 +232,45 @@ def normalize(text: str, script_name: str) -> str:
     return "".join(out)
 
 
+def dequote(text: str, script_name: str) -> str:
+    """Strip the shell quoting wrapped around every normalized token.
+
+    Operates on NORMALIZED text, so the token it looks for is the placeholder
+    and not a path: which quoting a rendered file carries is what differs
+    between template generations, and the placeholder is the one spelling both
+    generations agree on. See `--canonical` in the header for why this is the
+    comparison key rather than the raw bytes.
+    """
+    token = PLACEHOLDER + "/" + script_name
+    out = []
+    cursor = 0
+    while True:
+        i = text.find(token, cursor)
+        if i < 0:
+            break
+        start, end = i, i + len(token)
+        # Peel pairs from the inside out: the powershell value nests `'` inside
+        # `\"`, and only the fully unwrapped forms of the two generations match.
+        while True:
+            for quote in QUOTE_PAIRS:
+                width = len(quote)
+                if (
+                    start - width >= cursor
+                    and text[start - width : start] == quote
+                    and text[end : end + width] == quote
+                ):
+                    start -= width
+                    end += width
+                    break
+            else:
+                break
+        out.append(text[cursor:start])
+        out.append(token)
+        cursor = end
+    out.append(text[cursor:])
+    return "".join(out)
+
+
 def find_paths(text: str, script_name: str) -> list[str]:
     """Every DIRECTORY that `script_name` is invoked from, in file order.
 
@@ -202,14 +294,18 @@ def find_paths(text: str, script_name: str) -> list[str]:
 
 def _main(argv: list[str]) -> int:
     print_path = False
+    canonical = False
     if argv and argv[0] == "--print-path":
         print_path = True
+        argv = argv[1:]
+    elif argv and argv[0] == "--canonical":
+        canonical = True
         argv = argv[1:]
 
     if len(argv) != 2:
         print(
-            "usage: normalize-hook-path.py [--print-path] <hook-file> "
-            "<script-basename>",
+            "usage: normalize-hook-path.py [--print-path|--canonical] "
+            "<hook-file> <script-basename>",
             file=sys.stderr,
         )
         return 2
@@ -245,6 +341,8 @@ def _main(argv: list[str]) -> int:
         out = "".join(p + "\n" for p in find_paths(text, script_name))
     else:
         out = normalize(text, script_name)
+        if canonical:
+            out = dequote(out, script_name)
     sys.stdout.buffer.write(out.encode("utf-8"))
     sys.stdout.buffer.flush()
     return 0

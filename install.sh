@@ -407,13 +407,14 @@ if [[ -d "${HOME}/.copilot" ]]; then
     #
     #   up to date   -- byte-identical to what we would render: say so, touch
     #                   nothing.
-    #   ours, stale  -- normalizing every path that sits in front of one of
-    #                   OUR script names back to the template placeholder
-    #                   reproduces the template verbatim, so the only thing
-    #                   that differs is the install location. Nothing of the
-    #                   user's is in there to lose: re-render, and print the
-    #                   before/after paths.
-    #   ours, edited -- references our script but does not normalize to the
+    #   ours, stale  -- canonicalizing the file (every path in front of one of
+    #                   OUR script names back to the template placeholder, then
+    #                   our own shell quoting off that placeholder) reproduces
+    #                   the canonicalized template, so the only things that
+    #                   differ are the install location and the quoting shape
+    #                   WE ship. Nothing of the user's is in there to lose:
+    #                   re-render, and print the before/after paths.
+    #   ours, edited -- references our script but does not canonicalize to the
     #                   template, i.e. someone changed a timeout or added a
     #                   hook. Re-render (an upgrade that leaves a broken path
     #                   in place is the defect being fixed) but keep a
@@ -444,8 +445,19 @@ if [[ -d "${HOME}/.copilot" ]]; then
     # interpreter out of the bash value, `bash [^"]*` misses the powershell
     # value entirely -- because the boundary is "where does the path begin",
     # not a character. lib/normalize-hook-path.py scans for it.
-    _normalize_copilot_hook() {
-        normalize_hook_path "$1" copilot-session-review.sh
+    #
+    # ...and then strip the shell quoting from around that placeholder, on BOTH
+    # sides of the comparison, because the template's own shape changes between
+    # releases: 58098f7 single-quoted the rendered path so a store path with a
+    # space still runs. Comparing the normalized file against the template's raw
+    # bytes made every pre-58098f7 install differ by exactly those quotes and
+    # take the "had local modifications" branch -- measured on a real upgrade,
+    # with the .bak and the instruction to re-apply edits that were never made.
+    # --canonical forgives OUR quoting of OUR path and nothing else, so a
+    # changed timeout, an added key or a user's own wrapper still classifies as
+    # edited and still keeps its backup.
+    _canonical_copilot_hook() {
+        normalize_hook_path --canonical "$1" copilot-session-review.sh
     }
 
     if [[ ! -f "$COPILOT_HOOK_DST" ]]; then
@@ -457,7 +469,7 @@ if [[ -d "${HOME}/.copilot" ]]; then
         fi
     elif [[ "$(render_hook_template "$COPILOT_HOOK_SRC")" == "$(cat "$COPILOT_HOOK_DST")" ]]; then
         echo "  Up to date: $COPILOT_HOOK_DST (already points at ${SL_SCRIPTS})"
-    elif [[ "$(_normalize_copilot_hook "$COPILOT_HOOK_DST")" == "$(cat "$COPILOT_HOOK_SRC")" ]]; then
+    elif [[ "$(_canonical_copilot_hook "$COPILOT_HOOK_DST")" == "$(_canonical_copilot_hook "$COPILOT_HOOK_SRC")" ]]; then
         # Same scan that decided this file was ours, asked for the directory
         # instead of the rewrite. This used to be a sed expression of its own
         # -- a second hand-rolled answer to "where does the path begin" -- and
@@ -472,7 +484,14 @@ if [[ -d "${HOME}/.copilot" ]]; then
             _render_copilot_hook
             echo "  UPDATED (was stale): $COPILOT_HOOK_DST"
             echo "    hook now runs ${SL_SCRIPTS}/copilot-session-review.sh"
-            echo "    (previously ${OLD_HOOK_PATH:-<unknown>}/copilot-session-review.sh)"
+            if [[ "$OLD_HOOK_PATH" == "$SL_SCRIPTS" ]]; then
+                # Same directory, so the file was stale in the OTHER dimension:
+                # the template's command shape changed under it. Saying
+                # "previously <the identical path>" would read as a no-op edit.
+                echo "    (same location; the hook command's quoting was updated)"
+            else
+                echo "    (previously ${OLD_HOOK_PATH:-<unknown>}/copilot-session-review.sh)"
+            fi
         fi
     elif grep -q 'copilot-session-review\.sh' "$COPILOT_HOOK_DST"; then
         COPILOT_HOOK_BAK="${COPILOT_HOOK_DST}.bak-$(date -u +%Y%m%dT%H%M%SZ)"
