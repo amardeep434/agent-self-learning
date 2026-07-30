@@ -163,14 +163,29 @@ check "H: no Python traceback reaches the user" "no" \
 
 # The module must also IMPORT cleanly with no home vars -- that is what actually
 # broke, and it is a different failure from main() returning 1.
-IMPORT_RC=0
-env -i PATH="$PATH" python3 -c "
+#
+# PROBED, not assumed: on Windows, `env -i` strips variables the interpreter
+# itself needs (SYSTEMROOT and friends), so a bare `python3 -c pass` under
+# `env -i PATH=...` exits nonzero for reasons that have nothing to do with this
+# module. Asserting through that would report a product bug where there is an
+# environment limitation. So the probe runs first and the skip prints its own
+# verified reason -- hard rule 3.
+ENV_I_PYTHON_OK=0
+env -i PATH="$PATH" python3 -c pass > /dev/null 2>&1 || ENV_I_PYTHON_OK=$?
+if [[ "$ENV_I_PYTHON_OK" -ne 0 ]]; then
+    echo "SKIP: H: module imports with no HOME -- probed: \`env -i PATH=... python3 -c pass\`" \
+         "itself exits ${ENV_I_PYTHON_OK} on this platform, so the interpreter cannot start" \
+         "in a stripped environment and the import cannot be isolated here."
+else
+    IMPORT_RC=0
+    env -i PATH="$PATH" python3 -c "
 import importlib.util, sys
 spec = importlib.util.spec_from_file_location('m', '${MIRROR}')
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 " > /dev/null 2>&1 || IMPORT_RC=$?
-check "H: module imports with no HOME and no USERPROFILE" "0" "$IMPORT_RC"
+    check "H: module imports with no HOME and no USERPROFILE" "0" "$IMPORT_RC"
+fi
 
 # I) HOME must WIN over USERPROFILE.
 #

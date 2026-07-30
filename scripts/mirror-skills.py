@@ -119,6 +119,25 @@ def active_roots(roots: "tuple[tuple[str, Path], ...] | None" = None) -> list[tu
     return [(name, root) for name, root in roots if root.parent.is_dir()]
 
 
+def _write_exact(path: Path, text: str) -> None:
+    """Write text with NO newline translation.
+
+    `Path.write_text()` / `open(..., "w")` translate "\n" to os.linesep on
+    Windows, so a store file with LF endings was mirrored with CRLF and the copy
+    was NOT byte-identical to its source. Caught by CI on both windows-latest
+    cells 2026-07-30 (`cmp` failed in tests/test-mirror-skills.sh case A).
+
+    That matters beyond tidiness: mirror_one() decides whether to rewrite by
+    comparing the target's text to the source's, so a translated copy differs on
+    every run -- the mirror would never report "unchanged", would rewrite all 46
+    files at every session start, and the idempotence this relies on would be
+    silently false. `newline=""` is the same fix paths.py already applies to its
+    stdout for the same reason.
+    """
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write(text)
+
+
 def _read(path: Path) -> str | None:
     try:
         return path.read_text(encoding="utf-8", errors="replace")
@@ -150,8 +169,8 @@ def mirror_one(source_md: Path, target_dir: Path) -> str:
         # Marker first. If writing SKILL.md fails afterwards, the directory is
         # still identifiably ours and so still cleanable -- the reverse order
         # could strand an unmarked directory we would then refuse to touch.
-        (target_dir / MARKER_NAME).write_text(marker_text(source_md), encoding="utf-8")
-        target_md.write_text(desired, encoding="utf-8")
+        _write_exact(target_dir / MARKER_NAME, marker_text(source_md))
+        _write_exact(target_md, desired)
     except OSError:
         return "failed"
     return "written"
