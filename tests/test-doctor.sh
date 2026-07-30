@@ -315,7 +315,194 @@ not_contains "self-learning-health: fresh hook path is not flagged STALE" "$HEAL
 contains "doctor: fresh hook path reported as registered/resolved" "$DOCTOR_OUT" "points at resolved scripts dir"
 contains "self-learning-health: fresh hook path reported as registered/resolved" "$HEALTH_OUT" "registered and points at the resolved scripts dir"
 
+rm -rf "$TMP_HOME"
+
+# ---------------------------------------------------------------------------
+# 7. The READ-BACK half: session-start-context.sh.
+#
+# doctor.sh reported only the capture hooks (turn-counter, session-review,
+# index-session). All three config/ templates also register
+# session-start-context.sh, which injects learned memory and launches Route A
+# skill mirroring -- so an install could have every capture hook green while
+# nothing learned was ever delivered back, and doctor.sh said nothing.
+#
+# The two harnesses are asserted SEPARATELY and with DIFFERENT expected
+# wording, because their registration mechanisms genuinely differ:
+#   Claude Code -- install.sh only PRINTS the block ("NEXT STEP (Claude Code
+#     only): Register hooks in ~/.claude/settings.json", install.sh:642), so an
+#     unregistered hook is a normal, recoverable state and must not be called
+#     MISSING alongside hooks install.sh writes itself.
+#   Copilot CLI -- install.sh writes ~/.copilot/hooks/self-learning.json from
+#     config/copilot-hooks.json, which carries session-start-context.sh at
+#     lines 7-8, so its absence there IS a broken install.
+# ---------------------------------------------------------------------------
+STUB_BIN="$(mktemp -d)"
+for _bin in claude copilot; do
+    cat > "${STUB_BIN}/${_bin}" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "${STUB_BIN}/${_bin}"
+done
+STUB_PATH="${STUB_BIN}:${PATH}"
+
+# 7a. Claude Code: capture hooks registered, SessionStart absent.
+TMP_HOME="$(mktemp -d)"
+STORE="${TMP_HOME}/store"
+RESOLVED_SCRIPTS="$(sl_resolve_path "${SCRIPT_DIR}/scripts/lib/paths.py" scripts \
+    HOME="$TMP_HOME" AGENT_LEARNING_HOME="$STORE" PATH="$STUB_PATH")"
+mkdir -p "${TMP_HOME}/.claude"
+cat > "${TMP_HOME}/.claude/settings.json" <<JSON
+{"hooks":{"PostToolUse":[{"command":"bash ${RESOLVED_SCRIPTS}/turn-counter.sh"}],"Stop":[{"command":"bash ${RESOLVED_SCRIPTS}/session-review.sh"},{"command":"bash ${RESOLVED_SCRIPTS}/index-session.sh"}]}}
+JSON
+OUT=$(run_doctor "$TMP_HOME" "$STORE")
+RC=$?
+contains "doctor reports the unregistered SessionStart hook at all" "$OUT" "session-start-context.sh:"
+contains "unregistered Claude SessionStart says NOT REGISTERED" "$OUT" "session-start-context.sh: NOT REGISTERED"
+contains "unregistered Claude SessionStart names the consequence" "$OUT" "learned memory is not injected"
+contains "unregistered Claude SessionStart says registration is manual" "$OUT" "MANUAL"
+# The distinction is the whole point of 7a: it must NOT borrow the word used
+# for hooks install.sh writes itself.
+case "$OUT" in
+    *"session-start-context.sh: MISSING"*)
+        echo "FAIL: Claude Code SessionStart reported as MISSING; registration there is manual, so that word is wrong"
+        FAILURES=$((FAILURES+1)) ;;
+    *) echo "PASS: Claude Code SessionStart is not mislabelled MISSING" ;;
+esac
+check "a merely-unregistered SessionStart does not flip the exit code" "0" "$RC"
+rm -rf "$TMP_HOME"
+
+# 7b. Claude Code: SessionStart registered and pointing at the resolved dir.
+TMP_HOME="$(mktemp -d)"
+STORE="${TMP_HOME}/store"
+RESOLVED_SCRIPTS="$(sl_resolve_path "${SCRIPT_DIR}/scripts/lib/paths.py" scripts \
+    HOME="$TMP_HOME" AGENT_LEARNING_HOME="$STORE" PATH="$STUB_PATH")"
+mkdir -p "${TMP_HOME}/.claude"
+cat > "${TMP_HOME}/.claude/settings.json" <<JSON
+{"hooks":{"SessionStart":[{"command":"bash ${RESOLVED_SCRIPTS}/session-start-context.sh"}],"PostToolUse":[{"command":"bash ${RESOLVED_SCRIPTS}/turn-counter.sh"}],"Stop":[{"command":"bash ${RESOLVED_SCRIPTS}/session-review.sh"},{"command":"bash ${RESOLVED_SCRIPTS}/index-session.sh"}]}}
+JSON
+OUT=$(run_doctor "$TMP_HOME" "$STORE")
+contains "registered SessionStart reported as fresh" "$OUT" \
+    "session-start-context.sh: registered, points at resolved scripts dir"
+not_contains "registered SessionStart is not reported NOT REGISTERED" "$OUT" "NOT REGISTERED"
+rm -rf "$TMP_HOME"
+
+# 7c. Claude Code: SessionStart registered but pointing somewhere else. Stale
+# is stale regardless of how registration happened -- assert the shared verdict
+# was not lost when the wording was made caller-specific.
+TMP_HOME="$(mktemp -d)"
+STORE="${TMP_HOME}/store"
+mkdir -p "${TMP_HOME}/.claude"
+cat > "${TMP_HOME}/.claude/settings.json" <<'JSON'
+{"hooks":{"SessionStart":[{"command":"bash /some/very/stale/path/session-start-context.sh"}]}}
+JSON
+OUT=$(run_doctor "$TMP_HOME" "$STORE")
+contains "stale SessionStart path is flagged STALE" "$OUT" "session-start-context.sh: STALE"
+# --strict exists to fail on staleness; a hook it does not know about cannot
+# reach it. Assert the new hook is wired into that path too.
+OUT_STRICT=$(env -i HOME="$TMP_HOME" PATH="$STUB_PATH" AGENT_LEARNING_HOME="$STORE" \
+    SL_CONFIG_FILE="/nonexistent/x.conf" bash "${SCRIPT_DIR}/scripts/doctor.sh" --strict 2>&1)
+RC_STRICT=$?
+check "--strict fails on a stale SessionStart hook" "1" "$RC_STRICT"
+rm -rf "$TMP_HOME"
+
+# 7d. Copilot: install.sh writes that file, so absence there IS "MISSING".
+TMP_HOME="$(mktemp -d)"
+STORE="${TMP_HOME}/store"
+RESOLVED_SCRIPTS="$(sl_resolve_path "${SCRIPT_DIR}/scripts/lib/paths.py" scripts \
+    HOME="$TMP_HOME" AGENT_LEARNING_HOME="$STORE" PATH="$STUB_PATH")"
+mkdir -p "${TMP_HOME}/.copilot/hooks"
+cat > "${TMP_HOME}/.copilot/hooks/self-learning.json" <<JSON
+{"hooks":{"sessionEnd":[{"bash":"bash '${RESOLVED_SCRIPTS}/copilot-session-review.sh'"}]}}
+JSON
+OUT=$(run_doctor "$TMP_HOME" "$STORE")
+COPILOT_SECTION="$(printf '%s\n' "$OUT" | sed -n '/hooks (~\/.copilot/,/^  vscode\|^  claude/p')"
+contains "Copilot SessionStart absence reported as MISSING" "$COPILOT_SECTION" \
+    "session-start-context.sh: MISSING"
 rm -rf "$TMP_HOME" "$STUB_BIN"
+
+# ---------------------------------------------------------------------------
+# 8. Route A delivery: the skill mirror.
+#
+# mirror-skills.py runs detached, --quiet, both streams to /dev/null. A mirror
+# that has never run logs nothing at all and was indistinguishable from a
+# healthy one. These cases assert doctor.sh counts what is actually on disk.
+#
+# No `claude`/`copilot` stubs here on purpose: the mirror section is about
+# DIRECTORIES (hard rule 3 -- a root is active only if its parent exists,
+# probed), not about which binaries are on PATH.
+# ---------------------------------------------------------------------------
+
+# 8a. Skills in the store, a Claude skills root that exists, nothing mirrored.
+TMP_HOME="$(mktemp -d)"
+STORE="${TMP_HOME}/store"
+mkdir -p "${STORE}/learned-skills/alpha" "${STORE}/learned-skills/beta" "${TMP_HOME}/.claude/skills"
+printf 'alpha body\n' > "${STORE}/learned-skills/alpha/SKILL.md"
+printf 'beta body\n'  > "${STORE}/learned-skills/beta/SKILL.md"
+OUT=$(env -i HOME="$TMP_HOME" PATH="$PATH" AGENT_LEARNING_HOME="$STORE" \
+      SL_CONFIG_FILE="/nonexistent/x.conf" bash "${SCRIPT_DIR}/scripts/doctor.sh" 2>&1)
+RC=$?
+contains "mirror section reports the store count" "$OUT" "store: 2 learned skill(s)"
+contains "unmirrored root reported as 0 of 2" "$OUT" "0 of 2 learned skill(s) published"
+contains "shortfall is named" "$OUT" "SHORTFALL"
+# Deliberately not fatal: see the section comment in doctor.sh. A newly
+# installed machine would otherwise be permanently UNHEALTHY.
+check "a mirror shortfall alone does not flip the exit code" "0" "$RC"
+# hard rule 3: ~/.copilot does not exist here, so Copilot must read as
+# "not installed", never as a broken mirror.
+contains "absent harness reported as not installed, not broken" "$OUT" \
+    "harness not installed"
+not_contains "absent harness is not reported as a shortfall" \
+    "$(printf '%s\n' "$OUT" | grep 'copilot:')" "SHORTFALL"
+
+# 8b. Now actually run the mirror and re-check. This is the direction that
+# proves the count is real: the same store, the same doctor, a different
+# number, driven only by files mirror-skills.py wrote.
+env -i HOME="$TMP_HOME" PATH="$PATH" AGENT_LEARNING_HOME="$STORE" \
+    SL_SKILLS_DIR="${STORE}/learned-skills" SL_LOG_DIR="${STORE}/logs" \
+    SL_CONFIG_FILE="/nonexistent/x.conf" \
+    python3 "${SCRIPT_DIR}/scripts/mirror-skills.py" --quiet
+OUT=$(env -i HOME="$TMP_HOME" PATH="$PATH" AGENT_LEARNING_HOME="$STORE" \
+      SL_CONFIG_FILE="/nonexistent/x.conf" bash "${SCRIPT_DIR}/scripts/doctor.sh" 2>&1)
+contains "mirrored root reported as 2 of 2" "$OUT" "2 of 2 learned skill(s) published"
+not_contains "a fully mirrored root reports no shortfall" \
+    "$(printf '%s\n' "$OUT" | sed -n '/skill mirror/,/^$/p')" "SHORTFALL"
+
+# 8c. The count must use mirror-skills.py's own is_ours(), which is
+# content-verified AND name-bound -- not `test -f .self-learning-managed`.
+# A copy of a mirrored skill under a DIFFERENT name carries a valid-looking
+# marker that names the original; is_ours() rejects it (that is what protects a
+# user's customised copy from being pruned), so doctor.sh must not count it
+# either, or the two tools disagree about the same directory.
+cp -r "${TMP_HOME}/.claude/skills/alpha" "${TMP_HOME}/.claude/skills/user-copy"
+OUT=$(env -i HOME="$TMP_HOME" PATH="$PATH" AGENT_LEARNING_HOME="$STORE" \
+      SL_CONFIG_FILE="/nonexistent/x.conf" bash "${SCRIPT_DIR}/scripts/doctor.sh" 2>&1)
+contains "a renamed copy carrying the original's marker is NOT counted as ours" \
+    "$OUT" "2 of 2 learned skill(s) published"
+
+# 8d. A directory we really did create, for a skill the store no longer has,
+# is still auto-loaded by the harness until the next prune -- report it.
+mkdir -p "${TMP_HOME}/.claude/skills/orphan"
+printf 'agent-self-learning:mirrored-skill\nskill: orphan\n' \
+    > "${TMP_HOME}/.claude/skills/orphan/.self-learning-managed"
+OUT=$(env -i HOME="$TMP_HOME" PATH="$PATH" AGENT_LEARNING_HOME="$STORE" \
+      SL_CONFIG_FILE="/nonexistent/x.conf" bash "${SCRIPT_DIR}/scripts/doctor.sh" 2>&1)
+contains "an orphaned mirrored skill is counted and named" "$OUT" "ORPHANS: 3 > 2"
+rm -rf "$TMP_HOME"
+
+# 8e. No harness skill root at all: correct, and must say so rather than
+# printing a bare "0 of N" that reads like breakage.
+TMP_HOME="$(mktemp -d)"
+STORE="${TMP_HOME}/store"
+mkdir -p "${STORE}/learned-skills/alpha"
+printf 'alpha body\n' > "${STORE}/learned-skills/alpha/SKILL.md"
+OUT=$(env -i HOME="$TMP_HOME" PATH="$PATH" AGENT_LEARNING_HOME="$STORE" \
+      SL_CONFIG_FILE="/nonexistent/x.conf" bash "${SCRIPT_DIR}/scripts/doctor.sh" 2>&1)
+RC=$?
+contains "no harness root at all is explained, not counted as failure" "$OUT" \
+    "no harness skill directory exists on this machine"
+check "no harness root does not flip the exit code" "0" "$RC"
+rm -rf "$TMP_HOME"
 
 # ---------------------------------------------------------------------------
 # Summary

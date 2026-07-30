@@ -69,10 +69,19 @@ class Env:
         self.export = self.tmp / "summary-latest.json"
         self.export.write_text(json.dumps(EXPORT))
         self.signals = self.tmp / "coach-signals.json"
+        # coach-signals.py's failure channel. Pinned into the temp dir for two
+        # reasons: it is what the refusal tests below read, AND without it
+        # _log_failure() falls back to paths.resolve_all()["logs"] -- the
+        # DEVELOPER'S REAL STORE (CLAUDE.md hard rule 1). One existing test in
+        # this file (test_missing_antipatterns_contributes_nothing_but_says_so)
+        # drives the refusal path, so this is load-bearing, not defensive.
+        self.log_dir = self.tmp / "logs"
+        self.failures_log = self.log_dir / "persist-failures.log"
 
     def run(self, rules_on, export_on):
         env = dict(os.environ)
         env.update({
+            "SL_LOG_DIR": str(self.log_dir),
             "SL_COACH_RULES_ENABLED": "true" if rules_on else "false",
             "SL_COACH_EXPORT_ENABLED": "true" if export_on else "false",
             "SL_COACH_RULES_DIR": str(self.rules_dir),
@@ -147,6 +156,88 @@ class CoachSignalsTest(unittest.TestCase):
         self.assertNotIn("`", sug)
         self.assertNotIn("~", sug)
         self.assertLessEqual(len(sug), 240)
+
+
+class RefusalIsDistinguishableTest(unittest.TestCase):
+    """"Coach refused our export" must not look like "Coach found none".
+
+    Before this, the two produced byte-identical downstream state: the reader
+    exits 1 and prints [], run_route() turned that into [] and main() still
+    exited 0, and scripts/lib/review-common.sh:218-219 appends the stderr to
+    reviews/coach-signals.err and `|| true`s the call. Nothing doctor.sh reads
+    changed. The signals file is identical in both cases -- an empty
+    "signals": [] -- so these tests deliberately assert on
+    persist-failures.log, the file CLAUDE.md hard rule 2 designates, and NOT
+    on the signals file, which cannot tell them apart even now.
+    """
+
+    def _lines(self, env):
+        if not env.failures_log.exists():
+            return []
+        return [ln for ln in env.failures_log.read_text(encoding="utf-8").splitlines() if ln]
+
+    def test_unreadable_export_writes_a_named_persist_failure_line(self):
+        e = Env()
+        # A v2 payload: well-formed JSON the reader refuses on purpose, so this
+        # exercises the refusal, not a parse accident.
+        e.export.write_text(json.dumps(
+            {"schemaVersion": 2, "antiPatterns": {"topPatterns": []}}))
+        proc = e.run(rules_on=False, export_on=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(json.loads(e.signals.read_text())["signals"], [])
+        lines = self._lines(e)
+        self.assertEqual(len(lines), 1, "expected exactly one failure line, got: {}".format(lines))
+        self.assertIn("coach-signals:", lines[0])
+        self.assertIn("REFUSED", lines[0])
+        self.assertIn("export", lines[0])
+        # The reason must travel with the line: a bare "REFUSED" sends the
+        # operator back to the source to find out what happened.
+        self.assertIn("schemaVersion", lines[0])
+        # doctor.sh's persist-failures section prints a `tail -n 5`; a
+        # multi-line entry would evict other failures from that window.
+        self.assertEqual(len(lines[0].splitlines()), 1)
+
+    def test_absent_export_is_silent_because_it_is_not_a_failure(self):
+        """The load-bearing negative. coach-export-read.py exits 0 with a
+        stderr note when Coach is simply not installed -- the steady state of
+        most installs. If that logged a failure, doctor.sh would be red
+        forever and the signal would be worthless. This is also why
+        reviews/coach-signals.err was rejected as the channel: it is non-empty
+        in exactly this benign case."""
+        e = Env()
+        e.export.unlink()
+        proc = e.run(rules_on=False, export_on=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("no export at", proc.stderr)  # the benign note IS emitted
+        self.assertEqual(self._lines(e), [])
+
+    def test_healthy_export_writes_no_failure_line(self):
+        e = Env()
+        proc = e.run(rules_on=False, export_on=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(json.loads(e.signals.read_text())["signals"])
+        self.assertEqual(self._lines(e), [])
+
+    def test_route_that_cannot_be_run_at_all_is_named(self):
+        """OSError/timeout path. Exercised by pointing the rules route at a
+        rules dir that does not exist? No -- coach-rules-eval.py handles that
+        itself and exits 0. The only honest way to reach the OSError branch is
+        an interpreter that is not there, so run_route is called directly."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("sl_coach_signals", MERGER)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        tmp = Path(tempfile.mkdtemp())
+        os.environ["SL_LOG_DIR"] = str(tmp)
+        try:
+            self.assertEqual(mod.run_route("rules", [str(tmp / "no-such-binary")]), [])
+        finally:
+            os.environ.pop("SL_LOG_DIR", None)
+        log = tmp / "persist-failures.log"
+        self.assertTrue(log.exists(), "no persist-failures.log written")
+        text = log.read_text(encoding="utf-8")
+        self.assertIn("could not be run", text)
+        self.assertIn("rules", text)
 
 
 class RealExportPayloadTest(unittest.TestCase):

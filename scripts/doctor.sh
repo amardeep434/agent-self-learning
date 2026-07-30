@@ -95,17 +95,31 @@ _sl_test_writable() {
 # expected to be registered in it.
 _sl_report_hooks() {
     local file="$1"; shift
-    local script_name state
+    local script_name
     for script_name in "$@"; do
-        state="$(sl_check_hook_fresh "$file" "$script_name" "$SL_SCRIPTS_DIR")"
-        case "$state" in
-            absent)  echo "    ${script_name}: not installed" ;;
-            missing) echo "    ${script_name}: MISSING -- not registered in ${file}" ;;
-            stale)   echo "    ${script_name}: STALE -- registered but does not point at ${SL_SCRIPTS_DIR}/${script_name}"
-                     STALE_HOOKS_FOUND=1 ;;
-            fresh)   echo "    ${script_name}: registered, points at resolved scripts dir" ;;
-        esac
+        _sl_report_hook_state "$file" "$script_name" \
+            "MISSING -- not registered in ${file}"
     done
+}
+
+# One hook, with a caller-chosen wording for the `missing` verdict. Split out
+# of _sl_report_hooks (whose behaviour and output are unchanged) so that a
+# hook whose registration is MANUAL can say so, instead of borrowing the
+# word MISSING from hooks install.sh writes itself.
+#
+# $1 = hook config file, $2 = script basename, $3 = text for the `missing`
+# verdict. absent/stale/fresh are identical for every caller by construction:
+# a stale or fresh path means the same thing however the hook got registered.
+_sl_report_hook_state() {
+    local file="$1" script_name="$2" missing_text="$3" state
+    state="$(sl_check_hook_fresh "$file" "$script_name" "$SL_SCRIPTS_DIR")"
+    case "$state" in
+        absent)  echo "    ${script_name}: not installed" ;;
+        missing) echo "    ${script_name}: ${missing_text}" ;;
+        stale)   echo "    ${script_name}: STALE -- registered but does not point at ${SL_SCRIPTS_DIR}/${script_name}"
+                 STALE_HOOKS_FOUND=1 ;;
+        fresh)   echo "    ${script_name}: registered, points at resolved scripts dir" ;;
+    esac
 }
 
 echo "agent-self-learning doctor"
@@ -268,6 +282,22 @@ if command -v claude >/dev/null 2>&1; then
         STATUS=1
     else
         _sl_report_hooks "$CLAUDE_SETTINGS" turn-counter.sh session-review.sh index-session.sh
+        # The READ-BACK half. config/settings-hooks.json registers
+        # session-start-context.sh as a SessionStart hook; it injects learned
+        # memory into the session and launches mirror-skills.py (Route A).
+        # Until this line, doctor.sh reported only the write half of the
+        # system: every capture hook could be green while nothing learned was
+        # ever delivered back, and nothing said so.
+        #
+        # Its `missing` verdict is deliberately NOT worded "MISSING": unlike
+        # the Copilot hook file, install.sh never edits ~/.claude/settings.json
+        # -- it PRINTS the block for the user to merge ("NEXT STEP (Claude Code
+        # only): Register hooks in ~/.claude/settings.json", install.sh:642).
+        # So an unregistered SessionStart is a real, common, recoverable state,
+        # not evidence of a corrupted install, and calling it MISSING would
+        # teach operators to ignore the word where it does mean corruption.
+        _sl_report_hook_state "$CLAUDE_SETTINGS" session-start-context.sh \
+            "NOT REGISTERED -- learned memory is not injected into Claude Code sessions and Route A skill mirroring never runs from here. Registration of ~/.claude/settings.json hooks is MANUAL; re-run install.sh to print the block to merge."
     fi
 else
     echo "  claude   absent (normal on a Copilot-only or VS-Code-only machine)"
@@ -282,7 +312,11 @@ if command -v copilot >/dev/null 2>&1; then
         echo "    Fix: install python3 so scripts/lib/paths.py (this project's sole path resolver) can run"
         STATUS=1
     else
-        _sl_report_hooks "$COPILOT_HOOKS" copilot-session-review.sh
+        # session-start-context.sh IS written into this file by install.sh
+        # (config/copilot-hooks.json:7-8 carry it, for both the `bash` and the
+        # `powershell` variant), so unlike the Claude Code case above, its
+        # absence here really is a broken install and keeps the MISSING wording.
+        _sl_report_hooks "$COPILOT_HOOKS" copilot-session-review.sh session-start-context.sh
     fi
 else
     echo "  copilot  absent (normal on a Claude-Code-only or VS-Code-only machine)"
@@ -312,6 +346,132 @@ if command -v code >/dev/null 2>&1 || [[ -d "${HOME}/.vscode" ]]; then
     fi
 else
     echo "  vscode   absent"
+fi
+echo
+
+# ---------------------------------------------------------------------------
+# 3b. Route A delivery -- is the skill mirror actually publishing?
+#
+# scripts/mirror-skills.py copies <store>/learned-skills/<name>/SKILL.md into
+# the directory each installed harness already scans. It is the ONLY way a
+# learned skill reaches a model: nothing reads the store directly. It runs
+# detached from the SessionStart hook with --quiet and both streams to
+# /dev/null (session-start-context.sh:67-70), so its tally is seen by nobody.
+# It does log named failures to persist-failures.log, which section 5 already
+# surfaces -- but a mirror that has simply NEVER RUN (SessionStart hook not
+# registered, python3 missing at the time, a harness installed after the last
+# session) logs nothing at all, and looks byte-identical to a healthy one.
+# Counting what is actually on disk is the only test that separates them.
+#
+# Two rules this section must not break:
+#   - hard rule 3: a mirror root is "active" only if its PARENT directory
+#     exists, probed here by calling mirror-skills.py's OWN active_roots(),
+#     never by guessing from a platform or harness name. A harness that is not
+#     installed is reported as such, not as a broken mirror.
+#   - the count uses mirror-skills.py's OWN is_ours(), imported, not a
+#     `test -f .self-learning-managed`. That marker is content-verified and
+#     name-bound (is_ours() docstring: "Not merely 'a file of the right name
+#     exists'"), so a re-implementation here would disagree with the tool this
+#     section reports on -- and would report a user's hand-copied directory as
+#     one of ours, which is the exact confusion is_ours() was rewritten to end.
+#
+# A shortfall is printed loudly but deliberately does NOT flip STATUS on its
+# own. mirror_one() has legitimate non-failure outcomes (a name collision with
+# the user's own skill is "skipped-not-ours", their file wins by design), and a
+# store whose skills were written since the last session start is legitimately
+# ahead of the mirror until the next one. Both already reach persist-failures.log
+# where they are real failures. Making every such install exit UNHEALTHY is the
+# same trap the legacy-store exception at the top of this file names: an exit
+# code that is red for benign reasons is an exit code operators stop reading.
+# ---------------------------------------------------------------------------
+echo "skill mirror (Route A -- scripts/mirror-skills.py publishes learned skills):"
+if [[ "${_SL_PYTHON3_AVAILABLE}" -eq 0 ]]; then
+    echo "  cannot check -- python3 not found on PATH"
+else
+    # Same argv-not-interpolated-into--c discipline as sections 2b/2c above.
+    # Emits one "root|<label>|<state>|<count>|<path>" line per candidate root,
+    # plus one "store|<count>|<path>" line. Parsed below rather than formatted
+    # in Python so all of doctor.sh's output style stays in one language.
+    MIRROR_PROBE="$(python3 -c '
+import importlib.util, sys
+from pathlib import Path
+script_dir = Path(sys.argv[1])
+sys.path.insert(0, str(script_dir / "lib"))
+import skill_layout
+spec = importlib.util.spec_from_file_location("sl_mirror", script_dir / "mirror-skills.py")
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+import os
+import paths
+# Exactly mirror-skills.main()s own resolution order, so this section cannot
+# count against a different store than the tool it reports on.
+skills_dir = Path(os.environ.get("SL_SKILLS_DIR") or paths.resolve_all()["skills"])
+names = []
+if skills_dir.is_dir():
+    names = [c.name for c in sorted(skills_dir.iterdir())
+             if c.is_dir() and not c.name.startswith(".")
+             and skill_layout.skill_md_path(skills_dir, c.name).is_file()]
+print("store|{}|{}".format(len(names), skills_dir))
+# Compared by path STRING, not object identity: active_roots() calls
+# mirror_roots() again and returns freshly constructed Path objects, so an
+# `is`/id() comparison against this loops objects is always False and every
+# root would read as not-installed.
+active = {str(root) for _, root in m.active_roots()}
+for label, root in m.mirror_roots():
+    if str(root) not in active:
+        print("root|{}|not-installed|0|{}".format(label, root))
+        continue
+    count = 0
+    if root.is_dir():
+        count = sum(1 for c in sorted(root.iterdir())
+                    if not c.is_symlink() and c.is_dir() and m.is_ours(c))
+    # Path LAST so that `read` can absorb it whole: a directory name may
+    # legally contain the "|" delimiter, and a trailing count field would then
+    # be mis-parsed.
+    print("root|{}|active|{}|{}".format(label, count, root))
+' "${SCRIPT_DIR}" 2>/dev/null)"
+    if [[ -z "$MIRROR_PROBE" ]]; then
+        echo "  could not probe (scripts/mirror-skills.py failed to import)"
+    else
+        STORE_LINE="$(printf '%s\n' "$MIRROR_PROBE" | grep '^store|' | head -n 1)"
+        STORE_COUNT="$(printf '%s' "$STORE_LINE" | cut -d'|' -f2)"
+        STORE_PATH="$(printf '%s' "$STORE_LINE" | cut -d'|' -f3-)"
+        echo "  store: ${STORE_COUNT} learned skill(s) at ${STORE_PATH}"
+        MIRROR_ACTIVE_ROOTS=0
+        while IFS='|' read -r _tag label state count root; do
+            [[ "$_tag" == "root" ]] || continue
+            if [[ "$state" == "not-installed" ]]; then
+                printf '  %-8s harness not installed (%s does not exist) -- nothing to mirror there, not a fault\n' \
+                    "${label}:" "$(dirname "$root")"
+                continue
+            fi
+            MIRROR_ACTIVE_ROOTS=$((MIRROR_ACTIVE_ROOTS + 1))
+            printf '  %-8s %s of %s learned skill(s) published to %s\n' \
+                "${label}:" "$count" "$STORE_COUNT" "$root"
+            if [[ "$STORE_COUNT" -gt 0 && "$count" -lt "$STORE_COUNT" ]]; then
+                echo "           SHORTFALL: ${count} < ${STORE_COUNT}. Learned skills exist that this"
+                echo "           harness cannot see. Causes, in order of likelihood: the SessionStart"
+                echo "           hook (session-start-context.sh) is not registered, so the mirror has"
+                echo "           never run; a name collision with your own skill (mirror-skills.py"
+                echo "           leaves yours untouched and logs it); or an unwritable root. Check the"
+                echo "           persistence-failures section below, then start one session and re-run."
+            elif [[ "$count" -gt "$STORE_COUNT" ]]; then
+                # The opposite direction, and not cosmetic: curator-run.sh
+                # archives and deletes skills from the store, and prune() only
+                # runs when the mirror runs. Until then the harness still
+                # auto-loads a skill the store has retired -- the model is
+                # acting on content nothing owns any more.
+                echo "           ORPHANS: ${count} > ${STORE_COUNT}. Directories we created remain here for"
+                echo "           skills the store no longer has (curator archived them). They are still"
+                echo "           auto-loaded by this harness. mirror-skills.py prunes them on its next"
+                echo "           run, which happens at session start."
+            fi
+        done <<< "$MIRROR_PROBE"
+        if [[ "$MIRROR_ACTIVE_ROOTS" -eq 0 ]]; then
+            echo "  no harness skill directory exists on this machine -- Route A has nowhere"
+            echo "  to publish. This is correct on a machine with neither harness installed."
+        fi
+    fi
 fi
 echo
 
