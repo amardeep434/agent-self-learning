@@ -74,8 +74,24 @@ NOPY_DIR=$(mktemp -d)
 for tool in bash grep sed dirname cd; do
     src=$(command -v "$tool" 2>/dev/null) && ln -sf "$src" "$NOPY_DIR/$tool" 2>/dev/null || true
 done
-if env -i PATH="$NOPY_DIR" command -v python3 >/dev/null 2>&1; then
+# TWO probes, because one was not enough. The stripped PATH must (a) not reach
+# python3 -- otherwise the case is meaningless -- AND (b) still reach a working
+# bash, or the wrapper never executes and its empty output gets misread as a
+# contract violation. That is exactly what happened on both windows-latest cells:
+# Git Bash's `ln -s` does not produce working symlinks without Developer Mode, so
+# NOPY_DIR had no usable bash either and case C failed with '' where it expected
+# '{}' -- reporting a product defect that was really a broken fixture.
+NOPY_HAS_PYTHON=no
+env -i PATH="$NOPY_DIR" command -v python3 >/dev/null 2>&1 && NOPY_HAS_PYTHON=yes
+NOPY_HAS_BASH=no
+env -i PATH="$NOPY_DIR" bash -c 'exit 0' >/dev/null 2>&1 && NOPY_HAS_BASH=yes
+if [[ "$NOPY_HAS_PYTHON" == "yes" ]]; then
     echo "SKIP: python3-absent case -- probed: python3 is still reachable on the stripped PATH"
+elif [[ "$NOPY_HAS_BASH" != "yes" ]]; then
+    echo "SKIP: python3-absent case -- probed: a stripped PATH with a WORKING bash could not" \
+         "be built here (\`env -i PATH=$NOPY_DIR bash -c 'exit 0'\` failed), so the wrapper" \
+         "cannot be executed to observe its stdout. Common on Git Bash, where 'ln -s' does" \
+         "not create real symlinks without Developer Mode."
 else
     H3=$(new_home)
     NOPY_OUT=$(printf '%s' "$PAYLOAD" | env -i HOME="$H3" AGENT_LEARNING_HOME="$H3/store" \
