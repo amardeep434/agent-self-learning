@@ -45,6 +45,35 @@ import skill_layout  # noqa: E402
 # real copy lives.
 MARKER_NAME = ".self-learning-managed"
 
+def resolve_home() -> Path | None:
+    """The user's home directory, or None if it cannot be determined.
+
+    `Path.home()` RAISES rather than returning None when it cannot resolve, and
+    on Windows it consults USERPROFILE before HOME. Both facts bit this file:
+    the roots below were once module-level constants built from `Path.home()`,
+    so importing the module under `env -i HOME=<tmp>` -- which every test here
+    uses, and which sets no USERPROFILE -- died at import time on both
+    windows-latest CI cells:
+
+        File "scripts/mirror-skills.py", line 56, in <module>
+        File ".../pathlib/_local.py", line 808, in expanduser
+        RuntimeError: Could not determine home directory.
+
+    HOME is checked FIRST and explicitly, because it is what the sandboxing in
+    tests/ and in CLAUDE.md's hard rule 1 actually sets; falling through to
+    USERPROFILE would have a sandboxed run mirror into the developer's REAL
+    profile on Windows.
+    """
+    for var in ("HOME", "USERPROFILE"):
+        value = os.environ.get(var)
+        if value:
+            return Path(value)
+    try:
+        return Path.home()
+    except RuntimeError:
+        return None
+
+
 # Candidate mirror roots. The PARENT of each must already exist for that root to
 # be used -- see the module docstring. VS Code Copilot Chat is deliberately not
 # a separate entry: it reads ~/.claude (its shipped default hook locations
@@ -52,10 +81,20 @@ MARKER_NAME = ".self-learning-managed"
 # is an inference from the hook-location default, NOT a measured fact about
 # skill discovery -- no real VS Code session has ever been observed loading a
 # skill from here.
-MIRROR_ROOTS = (
-    ("claude", Path.home() / ".claude" / "skills"),
-    ("copilot", Path.home() / ".copilot" / "skills"),
-)
+def mirror_roots() -> tuple[tuple[str, Path], ...]:
+    """Candidate roots, resolved lazily.
+
+    A function, not a constant: computing these at import time cannot see a HOME
+    set after import, and it makes an unresolvable home a crash instead of a
+    reportable condition.
+    """
+    home = resolve_home()
+    if home is None:
+        return ()
+    return (
+        ("claude", home / ".claude" / "skills"),
+        ("copilot", home / ".copilot" / "skills"),
+    )
 
 
 def marker_text(source: Path) -> str:
@@ -73,8 +112,10 @@ def is_ours(directory: Path) -> bool:
     return (directory / MARKER_NAME).is_file()
 
 
-def active_roots(roots=MIRROR_ROOTS) -> list[tuple[str, Path]]:
+def active_roots(roots: "tuple[tuple[str, Path], ...] | None" = None) -> list[tuple[str, Path]]:
     """Roots whose parent exists -- i.e. harnesses actually installed here."""
+    if roots is None:
+        roots = mirror_roots()
     return [(name, root) for name, root in roots if root.parent.is_dir()]
 
 
@@ -143,7 +184,12 @@ def main() -> int:
     quiet = "--quiet" in sys.argv
     try:
         skills_dir = Path(os.environ.get("SL_SKILLS_DIR") or paths.resolve_all()["skills"])
-    except (KeyError, OSError) as exc:
+    except (KeyError, OSError, RuntimeError) as exc:
+        # RuntimeError is paths.py's own: "cannot resolve a home directory ...
+        # Refusing to fall back to a path relative to the current working
+        # directory." That must be a reported failure, not an uncaught traceback
+        # -- this runs detached from a session-start hook where a traceback goes
+        # nowhere a human will read it.
         print(f"mirror-skills: cannot resolve the skills directory: {exc}", file=sys.stderr)
         return 1
 

@@ -131,6 +131,67 @@ setup
 run_mirror > /dev/null; rc=$?
 check "G: empty store exits 0" "0" "$rc"
 
+# ---------------------------------------------------------------------------
+# H) No home directory at all must be a REPORTED failure, not a traceback.
+#
+#    This is the windows-latest regression. The mirror roots were once
+#    module-level constants built from `Path.home()`, which RAISES rather than
+#    returning None -- so merely IMPORTING the module under `env -i` with no
+#    HOME and no USERPROFILE died at import time on both Windows cells:
+#
+#      File "scripts/mirror-skills.py", line 56, in <module>
+#      File ".../pathlib/_local.py", line 808, in expanduser
+#      RuntimeError: Could not determine home directory.
+#
+#    Windows is where this surfaces because Path.home() consults USERPROFILE
+#    first there, and the sandbox sets only HOME. The roots are now resolved
+#    lazily, HOME is consulted explicitly and first (so a sandboxed run can
+#    never mirror into the developer's real Windows profile), and an
+#    unresolvable home exits 1 with a reason.
+NO_HOME_OUT=$(env -i PATH="$PATH" python3 "$MIRROR" 2>&1 || true)
+# `|| NO_HOME_RC=$?` and not a bare call: this command is EXPECTED to fail, and
+# under `set -e` a bare failing command aborts the whole suite -- which it did,
+# reporting 16 passes, 0 failures and exit 1, a shape that looks like success
+# with a stray error rather than "the rest never ran".
+NO_HOME_RC=0
+env -i PATH="$PATH" python3 "$MIRROR" > /dev/null 2>&1 || NO_HOME_RC=$?
+check "H: no resolvable home exits 1, not a crash" "1" "$NO_HOME_RC"
+check "H: and says why" "yes" \
+    "$(printf '%s' "$NO_HOME_OUT" | grep -qi 'cannot resolve' && echo yes || echo no)"
+check "H: no Python traceback reaches the user" "no" \
+    "$(printf '%s' "$NO_HOME_OUT" | grep -q 'Traceback' && echo yes || echo no)"
+
+# The module must also IMPORT cleanly with no home vars -- that is what actually
+# broke, and it is a different failure from main() returning 1.
+IMPORT_RC=0
+env -i PATH="$PATH" python3 -c "
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location('m', '${MIRROR}')
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+" > /dev/null 2>&1 || IMPORT_RC=$?
+check "H: module imports with no HOME and no USERPROFILE" "0" "$IMPORT_RC"
+
+# I) HOME must WIN over USERPROFILE.
+#
+#    This is the mutation-detectable half of case H, and the one with teeth: if
+#    resolution consulted Path.home() first, then on Windows -- where
+#    Path.home() prefers USERPROFILE -- a sandboxed test or a hard-rule-1
+#    sandboxed run would mirror into the developer's REAL profile while
+#    believing it was contained. Case H alone cannot catch that on Linux,
+#    because Path.home() there falls back to the passwd entry and succeeds.
+setup
+add_skill "home-wins" "HOME must be preferred over USERPROFILE."
+DECOY=$(mktemp -d)
+mkdir -p "${DECOY}/.claude/skills"
+env -i HOME="$HOME_DIR" USERPROFILE="$DECOY" AGENT_LEARNING_HOME="$STORE" PATH="$PATH" \
+    python3 "$MIRROR" --quiet
+check "I: mirrored under HOME" "yes" \
+    "$([[ -f "${HOME_DIR}/.claude/skills/home-wins/SKILL.md" ]] && echo yes || echo no)"
+check "I: NOT mirrored under USERPROFILE" "no" \
+    "$([[ -e "${DECOY}/.claude/skills/home-wins" ]] && echo yes || echo no)"
+rm -rf "$DECOY"
+
 rm -rf "$HOME_DIR"
 if [[ "$FAILURES" -gt 0 ]]; then exit 1; fi
 echo "All mirror-skills tests passed."
