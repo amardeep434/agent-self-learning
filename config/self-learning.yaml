@@ -1,4 +1,4 @@
-# ~/.claude/self-learning.yaml
+# <store>/self-learning.yaml  (<store> resolved by scripts/lib/paths.py)
 # Self-Learning System Configuration
 # Adapted from NousResearch Hermes Agent architecture.
 # All values shown are defaults -- omit to use default.
@@ -20,7 +20,7 @@ review:
   on_stop: true                    # Run final review on session end
   min_turns_for_stop: 5            # Minimum turns before Stop hook review fires
   cooldown_secs: 60                # Minimum seconds between review cycles
-  log_dir: "~/.claude/logs/reviews"
+  log_dir: "<store>/logs/reviews"
 
 # Memory System
 memory:
@@ -33,9 +33,14 @@ memory:
 
 # Skill Library
 skills:
-  root_dir: "~/.claude/learned-skills"
-  archive_dir: "~/.claude/learned-skills/.archive"
-  usage_file: "~/.claude/learned-skills/.usage.json"
+  # Resolved by scripts/lib/paths.py, NOT hardcoded and never ~/.claude --
+  # the store is vendor-neutral. `paths.py get skills` prints the real value;
+  # it is <store>/learned-skills, where <store> defaults to
+  # ~/.local/share/agent-learning and honours $AGENT_LEARNING_HOME and
+  # $XDG_DATA_HOME. These three lines named ~/.claude until 2026-07-31.
+  root_dir: "<store>/learned-skills"
+  archive_dir: "<store>/learned-skills/.archive"
+  usage_file: "<store>/learned-skills/.usage.json"
   stale_after_days: 30             # Days of inactivity before marking stale
   archive_after_days: 90           # Days of inactivity before archiving
   template_vars: true              # Enable ${VAR} substitution in skills
@@ -52,12 +57,12 @@ curator:
   min_idle_hours: 2                # Minimum idle time before running
   consolidate: false               # Enable LLM consolidation pass (opt-in)
   prune_builtins: false            # Include builtins in curation candidates
-  log_dir: "~/.claude/logs/curator"
+  log_dir: "<store>/logs/curator"
 
 # Session Search
 session_search:
   enabled: true
-  db_path: "~/.claude/sessions/search.db"
+  db_path: "<store>/sessions/search.db"
   retention_days: 90               # Auto-delete sessions older than this
   discover_scan_limit: 300         # Max FTS rows scanned before dedup
   discovery_limit: 3               # Default sessions per DISCOVERY query
@@ -77,7 +82,7 @@ session_search:
 
 # Identity
 identity:
-  file: "~/.claude/IDENTITY.md"    # Identity file path
+  file: "<store>/IDENTITY.md"    # Identity file path
   hot_reload: false                # Reload identity each turn (not each session)
 
 # Security
@@ -90,7 +95,7 @@ security:
 prompt:
   date_format: "date_only"         # "date_only" for cache stability, "datetime" for precision
   skills_cache_enabled: true       # Cache assembled skills text to disk
-  skills_cache_path: "~/.claude/cache/skills-manifest.json"
+  skills_cache_path: "<store>/cache/skills-manifest.json"
 
 # Session-start delivery (Route B). The read-back half: learned memory is
 # injected into each new session via a SessionStart hook.
