@@ -332,13 +332,42 @@ Only rows backed by a suite in `tests/run-all.sh` are marked supported.
 | Capability | Claude Code | Copilot CLI | VS Code Copilot Chat |
 |------------|-------------|-------------|----------------------|
 | Learned memory + skills stores | ✅ | ✅ | ✅ |
-| AGENTS.md learned-context injection | ✅ | ✅ (also reads CLAUDE.md) | ✅ |
+| Learned memory injected at session start | ⚠️ wired, never observed firing | ⚠️ wired, never observed firing | ⚠️ wired, never observed firing |
+| Learned skills published where the harness looks | ⚠️ wired, never observed firing | ⚠️ wired, never observed firing | — (reads `~/.claude`) |
 | Session-end background review | ✅ `Stop` | ✅ `sessionEnd` | ✅ `Stop` — **per turn**, not per session |
 | Mid-session turn counting | ✅ `PostToolUse` | ❌ not wired (deliberate — the session-end loop is the portable core) | ✅ `PostToolUse` — **required**, not optional, because `Stop` is per turn |
 | Independent of Claude Code | — | ✅ `test-claude-absent.sh` runs the full Copilot path with no `claude` binary and no `~/.claude` | — |
 | Session search indexing | ✅ (Claude JSONL) | ❌ planned | ❌ not wired — `index-session.sh` reads `~/.claude/projects` |
 | Coach signals (Routes A/B) | ✅ | ✅ | ✅ |
 | Live end-to-end, real session on disk | ✅ | ✅ 2026-07-25 / -26, real paid model call | ⚠️ **never** — no real VS Code hook has invoked our scripts |
+
+> **On "wired, never observed firing".** Delivery exists as of 2026-07-30 and is exercised
+> by 55 passing suites, but **no real hook has ever fired it** on Claude Code or VS Code.
+> Every harness contract behind it was read out of shipped code and disassembly, not
+> observed at runtime — the sole exception is Copilot CLI's, where the real
+> `runtime.node` parser was invoked directly. So these rows stay ⚠️ deliberately: a green
+> matrix is not evidence that a hook ran.
+>
+> Flip a row to ✅ only after observing it live, and prove it with a **byte count before
+> and after** rather than the emptiness of a command's output — that mistake is this
+> project's signature defect and has produced a false "verified clean" here before:
+>
+> ```bash
+> # memory injection (Route B) — run a real session, then:
+> tail -3 "$(python3 scripts/lib/paths.py all | sed -n 's/^logs=//p')/persist-failures.log"
+> # skill publication (Route A):
+> ls ~/.claude/skills/*/.self-learning-managed 2>/dev/null | wc -l
+> ```
+>
+> Until 2026-07-30 there was a single row here reading `✅ | ✅ | ✅` for "AGENTS.md
+> learned-context injection". It had never run once: **0 of 175** `AGENTS.md`/`CLAUDE.md`
+> files under `$HOME` carried the marker. The 2026-07-22 plan specified the injector and
+> its test but named no invoker, so the gap was in the spec rather than a regression —
+> `git log --all -S "inject-agents-md.py" -- 'scripts/*.sh' install.sh 'config/*'` shows a
+> caller never existed. See
+> [`docs/upstream-audit-2026-07-30.md`](docs/upstream-audit-2026-07-30.md) for the evidence
+> and [`docs/superpowers/plans/2026-07-30-learned-context-delivery.md`](docs/superpowers/plans/2026-07-30-learned-context-delivery.md)
+> for the plan this implements.
 | Windows | ✅ green, with skips | ✅ green, with skips | ⚠️ untested — suites run, no hook has ever fired |
 | macOS | ✅ green | ✅ green | ⚠️ untested — same |
 

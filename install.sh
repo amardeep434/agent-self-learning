@@ -271,6 +271,9 @@ SCRIPTS=(
     "copilot-session-review.sh"
     "vscode-session-review.sh"
     "inject-agents-md.py"
+    "session-start-context.py"
+    "session-start-context.sh"
+    "mirror-skills.py"
     "coach-rules-eval.py"
     "coach-export-read.py"
     "coach-signals.py"
@@ -457,7 +460,7 @@ if [[ -d "${HOME}/.copilot" ]]; then
     # changed timeout, an added key or a user's own wrapper still classifies as
     # edited and still keeps its backup.
     _canonical_copilot_hook() {
-        normalize_hook_path --canonical "$1" copilot-session-review.sh
+        normalize_hook_path --canonical "$1" copilot-session-review.sh session-start-context.sh
     }
 
     if [[ ! -f "$COPILOT_HOOK_DST" ]]; then
@@ -477,7 +480,7 @@ if [[ -d "${HOME}/.copilot" ]]; then
         # path: the trailing `.sh"` stopped matching `.sh'"`, so this branch
         # printed `<unknown>` while still reporting success. See
         # lib/normalize-hook-path.py's find_paths().
-        OLD_HOOK_PATH="$(normalize_hook_path --print-path "$COPILOT_HOOK_DST" copilot-session-review.sh | head -n 1)"
+        OLD_HOOK_PATH="$(normalize_hook_path --print-path "$COPILOT_HOOK_DST" copilot-session-review.sh session-start-context.sh | head -n 1)"
         if [[ "$DRY_RUN" == "true" ]]; then
             echo "[DRY RUN] re-render STALE hook ${COPILOT_HOOK_DST}: ${OLD_HOOK_PATH:-<unknown>} -> ${SL_SCRIPTS}"
         else

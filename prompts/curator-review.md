@@ -47,12 +47,24 @@ active ---(30 days no use)---> stale ---(90 days no use)---> archived
 
 ### Transition Rules
 
-- **active -> stale**: `last_used_at` is older than `stale_after_days` (default 30)
-  AND `use_count > 0`. Never-used skills (use_count == 0) get a grace floor
-  measured from `created_at`.
+> **Archival is wall-clock only.** The rules below mention `use_count`, and it is
+> **structurally 0 for every skill** -- nothing increments it, because no harness
+> reports skill invocation to us (see `prompts/authoring-standards.md`). So the
+> `use_count > 0` clause can never be true and the `use_count`/`view_count`
+> reactivation clause can never fire. They are documented as written because
+> `skill-lifecycle.py` really does read the field; do not read them as evidence
+> that usage influences archival. It does not. Corrected 2026-07-30 after this
+> file was found asserting a gate that cannot fire.
+
+- **active -> stale**: `last_used_at` is older than `stale_after_days` (default 30).
+  The code additionally requires `use_count > 0`, which is never true, so in
+  practice never-used skills get the grace floor measured from `created_at` and
+  everything is governed by the wall clock.
 - **stale -> archived**: `last_used_at` is older than `archive_after_days`
   (default 90). Move skill directory to `.archive/`.
-- **stale -> active**: Any `use_count` or `view_count` increment reactivates.
+- **stale -> active**: reactivation on a `use_count` or `view_count` increment is
+  DEAD -- neither field is ever incremented. Reactivation happens only via the
+  never-used grace floor in `skill-lifecycle.py`.
 - **Pinned skills**: Skip all transitions regardless of inactivity.
 - **Hub-installed / bundled skills**: Skip all transitions.
 

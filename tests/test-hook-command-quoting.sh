@@ -105,8 +105,14 @@ _component_survives() {
 _populate_scripts_dir() {
     local dir="$1" s
     mkdir -p "$dir"
+    # Every script any template's hook command names. session-start-context is
+    # a bash wrapper around session-start-context.py for exactly this reason:
+    # this harness, sl_hook_script_path, and lib/normalize-hook-path.py all
+    # assume the one `bash '<dir>/<name>.sh'` command shape, and the MSYS argv
+    # boundary has broken this project four times already. One shape.
     for s in turn-counter session-review index-session \
-             copilot-session-review vscode-session-review; do
+             copilot-session-review vscode-session-review \
+             session-start-context; do
         printf '#!/usr/bin/env bash\nprintf "RAN:%s:argc=%%d\\n" "$#"\n' "$s" \
             > "${dir}/${s}.sh"
         chmod +x "${dir}/${s}.sh"

@@ -103,7 +103,11 @@ check "guarded entry spawns nothing" "no" "$([[ -s "$FAKE_CLAUDE_LOG" ]] && echo
 echo '{"session_id":"s1","total_turns_this_session":9,"memory_turns":0,"skill_iterations":0}' > "$TMP/state/turn_counter.json"
 echo '{"generated_at":"2099-01-01T00:00:00Z","signals":[{"id":"mega-sessions","severity":"high","suggestion":"Break large tasks into focused conversations."}]}' > "$SL_COACH_SIGNALS_FILE"
 export SL_COACH_EXPORT_ENABLED=true SL_COACH_EXPORT_PATH="$TMP/export.json"
-echo '{"antiPatterns":{"totalOccurrences":1,"topPatterns":[{"id":"mega-sessions","name":"Mega Sessions","severity":"high","group":"session-hygiene","occurrences":1,"description":"d","suggestion":"Break large tasks into focused conversations."}]}}' > "$SL_COACH_EXPORT_PATH"
+# Carries schemaVersion because every real export does (upstream
+# summary-export.ts:39) and coach-export-read.py now refuses a payload without
+# it rather than assuming v1. Omitting it made this fixture silently yield no
+# signals at all -- caught by this suite on 2026-07-30.
+echo '{"schemaVersion":1,"antiPatterns":{"totalOccurrences":1,"topPatterns":[{"id":"mega-sessions","name":"Mega Sessions","severity":"high","group":"session-hygiene","occurrences":1,"description":"d","suggestion":"Break large tasks into focused conversations."}]}}' > "$SL_COACH_EXPORT_PATH"
 : > "$FAKE_CLAUDE_LOG"
 sl_clear_review_marker "$SL_LOG_DIR"
 echo '{"session_id":"s1","hook_event_name":"Stop"}' | bash "${SCRIPT_DIR}/scripts/session-review.sh"

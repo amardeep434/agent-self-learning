@@ -50,7 +50,12 @@ check "no Copilot-CLI 'powershell' key" "0" "$(grep -c '"powershell"' "$HOOK" ||
 check "no Copilot-CLI 'timeoutSec' key" "0" "$(grep -c 'timeoutSec' "$HOOK" || true)"
 
 ENTRY_COUNT="$(jq '[.hooks[][].hooks[]] | length' "$HOOK")"
-check "two hook entries (turn-counter, vscode-session-review)" "2" "$ENTRY_COUNT"
+# Not a hardcoded count -- see the same change in test-claude-hooks-json.sh.
+# This said "2" until the SessionStart hook made it 3.
+check "at least one hook entry exists" "yes" \
+    "$([[ "$ENTRY_COUNT" -ge 1 ]] && echo yes || echo no)"
+check "SessionStart is registered (the learned-context read-back)" "yes" \
+    "$(jq -e '.hooks.SessionStart[0].hooks[0].command | test("session-start-context")' "$HOOK" >/dev/null 2>&1 && echo yes || echo no)"
 check "every entry has type=command" "$ENTRY_COUNT" \
     "$(jq '[.hooks[][].hooks[] | select(.type == "command")] | length' "$HOOK")"
 
