@@ -178,10 +178,21 @@ if command -v python3 >/dev/null 2>&1 && [[ -f "$MIRROR_PY" ]]; then
     python3 "$MIRROR_PY" --uninstall-mirrors || \
         echo "  WARNING: some mirrored skill directories could not be removed" >&2
 else
+    # Deliberately does NOT say "delete any directory containing a
+    # .self-learning-managed file". That is precisely the filename-only rule
+    # this code refuses to apply, because it destroyed five user directories in
+    # testing: a renamed copy of a mirrored skill carries a valid-looking
+    # marker, as does a hand-dropped or symlinked one. Refusing to run the
+    # unsafe rule ourselves and then instructing the human to run it by hand
+    # would be the same data loss with an extra step.
     echo "  WARNING: python3 or mirror-skills.py unavailable — mirrored skill" >&2
     echo "  directories under ~/.claude/skills and ~/.copilot/skills were NOT" >&2
-    echo "  removed. Delete any directory containing a .self-learning-managed" >&2
-    echo "  file by hand." >&2
+    echo "  removed, and CANNOT be identified safely without python3: the" >&2
+    echo "  marker file alone does not prove a directory is ours, so deleting" >&2
+    echo "  on that basis can destroy your own skills." >&2
+    echo "  To finish: install python3 and re-run this script, or run" >&2
+    echo "    python3 <repo>/scripts/mirror-skills.py --uninstall-mirrors" >&2
+    echo "  which applies the verified check." >&2
 fi
 
 if [[ "$KEEP_DATA" != "true" ]]; then

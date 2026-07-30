@@ -288,8 +288,17 @@ elif command -v python3 >/dev/null 2>&1 && ! env -i HOME="$HOME_DIR" PATH="$NOPY
         SL_CONFIG_FILE=/nonexistent bash "${SCRIPT_DIR}/uninstall.sh" --yes 2>&1 || true)
     check "H: without python3 the mirror is NOT deleted" "yes" \
         "$(exists "${HOME_DIR}/.claude/skills/orphaned/SKILL.md")"
-    check "H: and the reason names the marker file to look for" "yes" \
-        "$(printf '%s' "$OUT_H" | grep -Fq "$MARKER" && echo yes || echo no)"
+    # Asserts the SAFETY property, not the wording. The message used to end
+    # "Delete any directory containing a .self-learning-managed file by hand" --
+    # which is the filename-only rule this very branch abandoned because it
+    # destroyed five user directories in testing. Refusing to apply the unsafe
+    # rule and then telling the human to apply it is the same data loss with an
+    # extra step. Found by an independent (non-Claude) review; three Claude
+    # agents and the author all missed it.
+    check "H: does NOT tell the user to delete by marker on their own" "no" \
+        "$(printf '%s' "$OUT_H" | grep -qiE 'delete .*(any )?director[^.]*by hand' && echo yes || echo no)"
+    check "H: points at the verified check instead" "yes" \
+        "$(printf '%s' "$OUT_H" | grep -Fq -- "--uninstall-mirrors" && echo yes || echo no)"
     check "H: and does not claim there were none to find" "no" \
         "$(printf '%s' "$OUT_H" | grep -Fq 'no marker-managed mirrored skills found' && echo yes || echo no)"
 else
