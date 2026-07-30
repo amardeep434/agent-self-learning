@@ -40,6 +40,20 @@ import json
 import sys
 from pathlib import Path
 
+# The one export schema version this reader's `count`/`denominator` semantics
+# are known to match. Upstream declares it at src/core/summary-export.ts:39
+# (`schemaVersion: 1;`) as an exported contract. Bump ONLY after re-reading
+# upstream's topPatterns and totals fields -- a version bump is upstream
+# telling us the meaning may have moved.
+#
+# Related, and worth stating because our own docs invited the wrong reading:
+# upstream caps topPatterns at TOP_ANTI_PATTERN_LIMIT = 10
+# (summary-export.ts:82, applied :146). The "10 signals" figure in
+# docs/coach-integration.md is therefore UPSTREAM'S CAP, not a reduction this
+# reader performs -- and Route B can never surface an 11th anti-pattern
+# however prevalent it is.
+SUPPORTED_SCHEMA_VERSION = 1
+
 
 def main():
     if len(sys.argv) != 2:
@@ -54,6 +68,23 @@ def main():
 
     try:
         report = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        # Upstream stamps `schemaVersion: 1` (src/core/summary-export.ts:39) as
+        # an explicitly exported contract, distinct from the internal analyzer
+        # types it is built from, precisely so a consumer can refuse a payload
+        # it does not understand. Reaching straight for antiPatterns.topPatterns
+        # ignored that: a v2 that re-semanticised `occurrences` from requests to
+        # sessions would be consumed happily against the v1 denominator and
+        # produce a plausible wrong prevalence -- the silent-wrong-value class
+        # this project exists to eliminate. A KeyError here is deliberate: an
+        # export with no schemaVersion at all is not a v1 export.
+        version = report["schemaVersion"]
+        if version != SUPPORTED_SCHEMA_VERSION:
+            raise ValueError(
+                "export schemaVersion is {!r}, but this reader understands only "
+                "{}. `occurrences` and `totals.requests` semantics are not "
+                "guaranteed across versions, so the denominator cannot be "
+                "trusted -- refusing rather than reporting a wrong prevalence."
+                .format(version, SUPPORTED_SCHEMA_VERSION))
         patterns = report["antiPatterns"]["topPatterns"]
         # A non-list here would iterate as something else entirely (a dict
         # yields its keys, a string its characters), every element would fail
@@ -63,7 +94,7 @@ def main():
         if not isinstance(patterns, list):
             raise TypeError("antiPatterns.topPatterns is {}, not a list".format(
                 type(patterns).__name__))
-    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         print("coach-export-read: unreadable export at {} ({}: {})".format(
             path, type(exc).__name__, exc), file=sys.stderr)
         print("[]")

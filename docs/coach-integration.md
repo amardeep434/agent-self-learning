@@ -72,11 +72,32 @@ asserting it.
 
 ### The one rule still skipped
 
-- **`no-devcontainer` — genuinely unreachable.** Not because of `requiresIdeContext`:
-  because upstream's own `computeDevcontainerStats` opens with
+- **`no-devcontainer` — unreachable while no VS Code session source is plumbed into
+  `telemetry.py`.** Not because of `requiresIdeContext`: because upstream's own
+  `computeDevcontainerStats` opens with
   `sessions.filter(s => VSCODE_HARNESSES.has(...))` (`src/core/dsl/interpreter.ts:579-585`),
   so for a CLI harness the scored population is empty **inside upstream's own function**,
   by a hardcoded gate, before any field of ours is consulted.
+
+  > **Corrected 2026-07-30.** This bullet said "genuinely unreachable" and called itself
+  > the only entry in the table for which that was true. That asserted a *structural*
+  > impossibility, and it is not one. Plain VS Code is labelled `'Local Agent'`
+  > (`src/core/parser-vscode.ts:18-26`), which **is** a member of `VSCODE_HARNESSES` — and
+  > this project ships VS Code Copilot Chat as a declared peer harness. The rule is
+  > unreachable because our telemetry emits no harness field and reads no VS Code source
+  > at all, not because no supported harness can satisfy the gate:
+  >
+  > ```bash
+  > grep -n '"harness"' scripts/lib/telemetry.py scripts/coach-rules-eval.py   # zero hits
+  > grep -n "_vscode_" scripts/lib/telemetry.py                                # no reader
+  > ls ~/.config/Code/User/workspaceStorage/*/chatSessions 2>/dev/null | head  # data exists
+  > ```
+  >
+  > This is the same shape as the "First correction" below — *"The telemetry was unplumbed
+  > here, not unobtainable."* Reaching the gate would additionally require requests
+  > carrying `toolConfirmations[].isTerminal`, which is **unverified** for VS Code's
+  > `chatSessions` JSON. So "obtainable" means the gate becomes passable, not that the rule
+  > is proven to fire.
 
 Its skip reason is user-visible output, and `tests/test-coach-rules-eval.py` enforces that
 a reason with no checkable evidence — an upstream `file:line` or a measurement over the

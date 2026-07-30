@@ -18,6 +18,10 @@ MERGER = REPO / "scripts" / "coach-signals.py"
 FIXTURE = REPO / "tests" / "fixtures" / "coach-export-v1.json"
 
 EXPORT = {
+    # Every real export carries this (upstream summary-export.ts:39), and the
+    # reader now refuses a payload without it rather than assuming v1 -- so a
+    # hand-rolled fixture must carry it too or it is not a realistic payload.
+    "schemaVersion": 1,
     "antiPatterns": {
         "totalOccurrences": 7,
         "topPatterns": [

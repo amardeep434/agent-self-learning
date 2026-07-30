@@ -124,13 +124,49 @@ class ReaderContractTest(unittest.TestCase):
 
     def test_unknown_top_level_keys_are_tolerated(self):
         """Upstream will add fields. A new sibling of `antiPatterns` must not
-        cost us Route B."""
+        cost us Route B.
+
+        Note this deliberately leaves `schemaVersion` at its fixture value. An
+        additive sibling key and a version bump are NOT the same event: a new
+        key cannot change what `count` means, a version bump is upstream
+        telling us it might have. This test used to set schemaVersion = 99 as
+        just another "unknown thing", which conflated the two and is why the
+        reader tolerated a re-semanticised payload -- see
+        test_future_schema_version_is_refused.
+        """
         report = load_fixture()
         report["someFutureSection"] = {"nested": [1, 2, 3]}
-        report["schemaVersion"] = 99
         proc = run_reader(write_tmp(report))
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(len(json.loads(proc.stdout)), 10)
+
+    def test_future_schema_version_is_refused(self):
+        """A version we do not understand must fail loudly, not be read against
+        v1 semantics.
+
+        Upstream stamps `schemaVersion` (summary-export.ts:39) precisely so a
+        consumer can refuse. If a v2 re-semanticised `occurrences` from
+        requests to sessions, consuming it against `totals.requests` would
+        yield a plausible WRONG prevalence -- indistinguishable from a correct
+        one downstream, which is the failure class this project exists to
+        eliminate.
+        """
+        report = load_fixture()
+        report["schemaVersion"] = 99
+        proc = run_reader(write_tmp(report))
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("schemaVersion", proc.stderr)
+        self.assertEqual(json.loads(proc.stdout), [],
+                         "a refused export must emit an empty array, not partial signals")
+
+    def test_export_with_no_schema_version_is_refused(self):
+        """An export with no version at all is not a v1 export. Treating a
+        missing field as "probably v1" is the assumption that makes the guard
+        above pointless."""
+        report = load_fixture()
+        del report["schemaVersion"]
+        proc = run_reader(write_tmp(report))
+        self.assertEqual(proc.returncode, 1, proc.stderr)
 
     def test_unknown_per_pattern_keys_are_tolerated(self):
         report = load_fixture()

@@ -332,13 +332,34 @@ Only rows backed by a suite in `tests/run-all.sh` are marked supported.
 | Capability | Claude Code | Copilot CLI | VS Code Copilot Chat |
 |------------|-------------|-------------|----------------------|
 | Learned memory + skills stores | ✅ | ✅ | ✅ |
-| AGENTS.md learned-context injection | ✅ | ✅ (also reads CLAUDE.md) | ✅ |
+| AGENTS.md learned-context injection | ⚠️ built, not wired | ⚠️ built, not wired | ⚠️ built, not wired |
 | Session-end background review | ✅ `Stop` | ✅ `sessionEnd` | ✅ `Stop` — **per turn**, not per session |
 | Mid-session turn counting | ✅ `PostToolUse` | ❌ not wired (deliberate — the session-end loop is the portable core) | ✅ `PostToolUse` — **required**, not optional, because `Stop` is per turn |
 | Independent of Claude Code | — | ✅ `test-claude-absent.sh` runs the full Copilot path with no `claude` binary and no `~/.claude` | — |
 | Session search indexing | ✅ (Claude JSONL) | ❌ planned | ❌ not wired — `index-session.sh` reads `~/.claude/projects` |
 | Coach signals (Routes A/B) | ✅ | ✅ | ✅ |
 | Live end-to-end, real session on disk | ✅ | ✅ 2026-07-25 / -26, real paid model call | ⚠️ **never** — no real VS Code hook has invoked our scripts |
+
+> **On "built, not wired".** `scripts/inject-agents-md.py` exists, is installed, and works
+> when run by hand — but nothing invokes it, so no managed block has ever been written.
+> Measured 2026-07-30: **0 of 175** `AGENTS.md`/`CLAUDE.md` files under `$HOME` contain the
+> marker.
+>
+> ```bash
+> n=$(find ~ -name "AGENTS.md" -o -name "CLAUDE.md" | wc -l)
+> h=$(find ~ \( -name "AGENTS.md" -o -name "CLAUDE.md" \) \
+>       -exec grep -l "BEGIN self-learning:managed" {} + 2>/dev/null | wc -l)
+> echo "$h of $n"
+> ```
+>
+> Until 2026-07-30 this row read `✅ | ✅ | ✅`. The 2026-07-22 plan's Task 5 specified the
+> script and its test but named no invoker, so the gap is in the spec, not a regression —
+> and `git log --all -S "inject-agents-md.py" -- 'scripts/*.sh' install.sh 'config/*'`
+> shows a caller never existed. See
+> [`docs/upstream-audit-2026-07-30.md`](docs/upstream-audit-2026-07-30.md) for the evidence
+> and [`docs/superpowers/plans/2026-07-30-learned-context-delivery.md`](docs/superpowers/plans/2026-07-30-learned-context-delivery.md)
+> for the remediation plan. Flip this row to ✅ only when a **real fired hook** has been
+> observed producing the block — not when a unit test passes.
 | Windows | ✅ green, with skips | ✅ green, with skips | ⚠️ untested — suites run, no hook has ever fired |
 | macOS | ✅ green | ✅ green | ⚠️ untested — same |
 
