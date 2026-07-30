@@ -336,7 +336,70 @@ def prune(skills_dir: Path, target_root: Path) -> "tuple[list[str], list[str]]":
     return removed, failed
 
 
+def uninstall_mirrors() -> "tuple[list[str], list[str]]":
+    """Remove every mirrored skill directory we can PROVE we created.
+
+    Called by uninstall.sh (`--uninstall-mirrors`) instead of it reimplementing
+    the gate. uninstall.sh's own copy of the rule was
+    `[[ -f "${_dir}.self-learning-managed" ]]` -- the filename-existence test
+    is_ours() was forced to abandon after an adversarial review destroyed real
+    directories with it three ways (see is_ours' docstring). A safety property
+    written twice drifts, and this one had already drifted: the hardening landed
+    here and never reached there. There is now exactly one implementation.
+
+    Unlike prune(), the store copy's existence is irrelevant -- uninstall removes
+    every mirror, including the ones whose store copy is still present, because
+    the store copy is the data and the mirror is only delivery.
+    """
+    removed: list[str] = []
+    failed: list[str] = []
+    for _label, root in active_roots():
+        if not root.is_dir():
+            continue
+        for child in sorted(root.iterdir()):
+            # Same three gates as prune(): a symlinked directory is not ours to
+            # follow, a non-directory is not a skill, and is_ours() is the only
+            # thing that may authorise a delete.
+            if child.is_symlink() or not child.is_dir() or not is_ours(child):
+                continue
+            try:
+                shutil.rmtree(child)
+                removed.append(str(child))
+            except OSError as exc:
+                failed.append(str(child))
+                print(
+                    f"  WARNING: could not remove {child}: {exc} -- remove it by hand",
+                    file=sys.stderr,
+                )
+    return removed, failed
+
+
+def _run_uninstall_mirrors() -> int:
+    """Print in uninstall.sh's own `remove()` line shape, so output is uniform."""
+    if resolve_home() is None:
+        # "No home" and "a home with no mirrors" must not print the same line:
+        # the second is a clean uninstall, the first left mirrors behind.
+        print(
+            "  WARNING: cannot resolve a home directory -- mirrored skill "
+            "directories were NOT searched for and may remain",
+            file=sys.stderr,
+        )
+        return 1
+    removed, failed = uninstall_mirrors()
+    for path in removed:
+        print(f"  removed: {path}")
+    if removed:
+        print(f"  removed {len(removed)} mirrored skill director(ies) (marker-gated)")
+    else:
+        # Stated rather than silent: "found none" and "did not look" are
+        # different outcomes, and this is the only line that distinguishes them.
+        print("  no marker-managed mirrored skills found")
+    return 1 if failed else 0
+
+
 def main() -> int:
+    if "--uninstall-mirrors" in sys.argv:
+        return _run_uninstall_mirrors()
     quiet = "--quiet" in sys.argv
     try:
         skills_dir = Path(os.environ.get("SL_SKILLS_DIR") or paths.resolve_all()["skills"])

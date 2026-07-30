@@ -153,24 +153,46 @@ fi
 # ever delete directories that script created. ~/.claude/skills is the user's own
 # namespace -- it already held 21 hand-written skills on the machine this was
 # built on, and an unmarked directory is never touched.
-MIRROR_MARKER=".self-learning-managed"
-MIRRORED_REMOVED=0
-for _root in "${HOME}/.claude/skills" "${HOME}/.copilot/skills"; do
-    [[ -d "$_root" ]] || continue
-    for _dir in "$_root"/*/; do
-        [[ -d "$_dir" ]] || continue
-        if [[ -f "${_dir}${MIRROR_MARKER}" ]]; then
-            remove "${_dir%/}"
-            MIRRORED_REMOVED=$((MIRRORED_REMOVED + 1))
-        fi
-    done
-done
-if [[ "$MIRRORED_REMOVED" -gt 0 ]]; then
-    echo "  removed ${MIRRORED_REMOVED} mirrored skill director(ies) (marker-gated)"
+#
+# The gate is DELEGATED to mirror-skills.py --uninstall-mirrors rather than
+# reimplemented here. This block used to carry its own copy:
+#
+#     if [[ -f "${_dir}.self-learning-managed" ]]; then remove "${_dir%/}"; fi
+#
+# which is the bare filename-existence test mirror-skills.py's is_ours() was
+# forced to ABANDON: an adversarial review destroyed real directories with it in
+# three ways (a renamed user copy carrying a valid marker; a hand-dropped file of
+# that name -- the name is documented in README.md and in this very file; a
+# SYMLINK named that, because `.is_file()` follows links). The hardening landed in
+# is_ours() and never reached here, so the delete loop with the WEAKER gate was
+# the one pointed at the user's own directories. One implementation, one place to
+# harden.
+#
+# Degraded, never silent, and never destructive: with no python3 (or no
+# mirror-skills.py -- this file's sibling in the checkout it is run from; the
+# store copy is deleted above) we CANNOT evaluate the gate, so we delete nothing
+# and say so. Falling back to the weak test would be choosing the exact rule that
+# destroyed data.
+MIRROR_PY="${SCRIPT_DIR}/scripts/mirror-skills.py"
+if command -v python3 >/dev/null 2>&1 && [[ -f "$MIRROR_PY" ]]; then
+    python3 "$MIRROR_PY" --uninstall-mirrors || \
+        echo "  WARNING: some mirrored skill directories could not be removed" >&2
 else
-    # Stated rather than silent: "found none" and "did not look" are different
-    # outcomes, and this is the only line that distinguishes them.
-    echo "  no marker-managed mirrored skills found"
+    # Deliberately does NOT say "delete any directory containing a
+    # .self-learning-managed file". That is precisely the filename-only rule
+    # this code refuses to apply, because it destroyed five user directories in
+    # testing: a renamed copy of a mirrored skill carries a valid-looking
+    # marker, as does a hand-dropped or symlinked one. Refusing to run the
+    # unsafe rule ourselves and then instructing the human to run it by hand
+    # would be the same data loss with an extra step.
+    echo "  WARNING: python3 or mirror-skills.py unavailable — mirrored skill" >&2
+    echo "  directories under ~/.claude/skills and ~/.copilot/skills were NOT" >&2
+    echo "  removed, and CANNOT be identified safely without python3: the" >&2
+    echo "  marker file alone does not prove a directory is ours, so deleting" >&2
+    echo "  on that basis can destroy your own skills." >&2
+    echo "  To finish: install python3 and re-run this script, or run" >&2
+    echo "    python3 <repo>/scripts/mirror-skills.py --uninstall-mirrors" >&2
+    echo "  which applies the verified check." >&2
 fi
 
 if [[ "$KEEP_DATA" != "true" ]]; then

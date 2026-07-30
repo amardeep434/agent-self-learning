@@ -74,11 +74,23 @@ done
 # ---------------------------------------------------------------------------
 # D) An unparseable payload is REPORTED, not silently mis-shaped.
 # ---------------------------------------------------------------------------
+#    DIFFERENTIAL AND COUNTED, not phrase-matched. This was
+#    `grep -q 'not JSON'`, which fails if the message is reworded to "could not
+#    be parsed as JSON" while behaving identically -- and passes if the hook
+#    starts logging that same line for a payload that was PERFECTLY VALID, which
+#    is the regression that would actually hurt (an advisory that always fires
+#    is noise, and doctor.sh reports UNHEALTHY on it every session). So: exactly
+#    one line for the bad payload, and not one more for a good one in the same
+#    store.
 H2=$(new_store)
+D_LOG="$H2/store/logs/persist-failures.log"
 echo "- A lesson." > "$H2/store/memory/MEMORY.md"
 run_hook "$H2" 'not json at all' > /dev/null
-check "D: bad payload named in persist-failures.log" "yes" \
-    "$(grep -q 'not JSON' "$H2/store/logs/persist-failures.log" 2>/dev/null && echo yes || echo no)"
+check "D: an unparseable payload logs exactly one line" "1" \
+    "$(grep -c '' "$D_LOG" 2>/dev/null || echo 0)"
+run_hook "$H2" "$CLAUDE_PAYLOAD" > /dev/null
+check "D: and a VALID payload against the same store adds none" "1" \
+    "$(grep -c '' "$D_LOG" 2>/dev/null || echo 0)"
 
 # ---------------------------------------------------------------------------
 # E) An empty store is NOT a failure. A fresh install must inject nothing and
