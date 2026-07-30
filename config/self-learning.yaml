@@ -91,3 +91,26 @@ prompt:
   date_format: "date_only"         # "date_only" for cache stability, "datetime" for precision
   skills_cache_enabled: true       # Cache assembled skills text to disk
   skills_cache_path: "~/.claude/cache/skills-manifest.json"
+
+# Session-start delivery (Route B). The read-back half: learned memory is
+# injected into each new session via a SessionStart hook.
+session_start_injection:
+  # Size (BYTES) at which MEMORY.md is REPORTED as worth consolidating.
+  # Advisory only -- memory is never truncated, and exceeding this costs a named
+  # line in persist-failures.log, not lost content.
+  #
+  # The shipped value is SL_MEMORY_INJECT_BUDGET in self-learning.conf, which is
+  # the file actually sourced at runtime; this entry documents it.
+  #
+  # 32768, not the 2200 Hermes uses, because Hermes applies 2200 on the WRITE
+  # side (refusing the write, so its file never exceeds it) while ours is a
+  # read-side advisory over a file persist-proposal.py allows to reach 1 MiB.
+  # A real store measured 22112 bytes: at 2200 the advisory fired every session
+  # and would have buried real failures in the log doctor.sh surfaces.
+  memory_inject_budget_bytes: 32768
+
+  # Resolution order, matching every other tunable (lib/config.sh semantics):
+  #   env SL_MEMORY_INJECT_BUDGET  >  self-learning.conf  >  built-in default
+  # Read directly in Python by inject-agents-md.py rather than by sourcing
+  # config.sh, because config.sh spawns `python3 lib/paths.py all` (~22-25ms)
+  # and this runs inside a <100ms hook that already resolves paths in-process.
