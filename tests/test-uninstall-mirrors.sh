@@ -202,6 +202,18 @@ fi
 # ---------------------------------------------------------------------------
 # F) A directory-symlink pointing INTO the store must not be followed. Deleting
 #    through it would delete the store copy -- the data -- under --keep-data.
+#
+#    Scope of what this proves, MEASURED rather than claimed. Removing the
+#    `child.is_symlink()` guard does NOT turn this case red: shutil.rmtree
+#    refuses a symlink outright --
+#
+#      >>> shutil.rmtree(link)
+#      OSError: [Errno None] None: PosixPath('/tmp/…/link')   # target intact
+#
+#    -- so the store is protected twice over and the guard is defence in depth,
+#    not the sole barrier. What this case DOES kill is any change that resolves
+#    the path before deleting (`shutil.rmtree(child.resolve())` was applied and
+#    failed this assertion), which is the realistic way the protection gets lost.
 # ---------------------------------------------------------------------------
 setup
 add_skill "linked"
