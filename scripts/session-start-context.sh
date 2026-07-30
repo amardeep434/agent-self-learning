@@ -31,6 +31,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # one case writes to stderr, which hooks show to the user without corrupting
 # the JSON contract on stdout.
 if ! command -v python3 >/dev/null 2>&1; then
+    # `{}` on STDOUT, not just a note on stderr. session-start-context.py exists
+    # to guarantee "exactly one JSON object" precisely because printing nothing
+    # is indistinguishable from the hook never running -- and this branch, the
+    # one nothing tested, violated that contract. stderr still carries the
+    # reason for a human.
+    echo "{}"
     echo "session-start-context: python3 is not on PATH -- no learned context injected" >&2
     exit 0
 fi
@@ -45,13 +51,25 @@ fi
 #   - it is idempotent and self-healing, so missing a run costs nothing: the
 #     next session start picks up whatever the last review wrote and prunes
 #     whatever the curator archived.
-# Failures are the mirror's own to report; this hook must still exit 0.
-python3 "${SCRIPT_DIR}/session-start-context.py"
-_status=$?
+# `|| _status=$?` and NOT a bare call: under `set -e` a failing simple command
+# exits the shell immediately, so with a bare call everything below here --
+# including the mirror launch and this file's own `exit` -- was unreachable on
+# any nonzero exit from the injector. Measured: the wrapper exited 3 and printed
+# nothing after. Route A was silently skipped as collateral damage whenever
+# Route B failed, which is precisely the coupling the detached launch exists to
+# avoid.
+_status=0
+python3 "${SCRIPT_DIR}/session-start-context.py" || _status=$?
 
-if [[ -x "${SCRIPT_DIR}/mirror-skills.py" || -f "${SCRIPT_DIR}/mirror-skills.py" ]]; then
+# Launched UNCONDITIONALLY and before the exit: mirroring skills does not depend
+# on the memory injection having succeeded, and the two failing together was a
+# bug, not a policy.
+if [[ -f "${SCRIPT_DIR}/mirror-skills.py" ]]; then
     nohup python3 "${SCRIPT_DIR}/mirror-skills.py" --quiet >/dev/null 2>&1 &
     disown 2>/dev/null || true
 fi
 
+# The hook's exit status is the injector's. A nonzero status here is not fatal to
+# a session -- the harness treats it as "no context" -- but it must not be
+# swallowed, or a persistently broken injector looks identical to an empty store.
 exit "$_status"

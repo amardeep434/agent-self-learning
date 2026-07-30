@@ -113,7 +113,7 @@ def _log_failure(message: str) -> None:
         with open(Path(log_dir) / "persist-failures.log", "a",
                   encoding="utf-8", newline="\n") as handle:
             handle.write(f"{now_iso()} session-start-context: {message}\n")
-    except (OSError, ImportError, KeyError):
+    except (OSError, ImportError, KeyError, RuntimeError):
         pass
 
 
@@ -163,7 +163,7 @@ def main() -> int:
 
     try:
         memory_dir = Path(os.environ.get("SL_MEMORY_DIR") or paths.resolve_all()["memory"])
-    except (KeyError, OSError) as exc:
+    except (KeyError, OSError, RuntimeError) as exc:
         # No store means no context. Say so and emit a well-formed empty object:
         # printing nothing is indistinguishable from the hook never running.
         _log_failure(f"cannot resolve the memory directory ({exc}) -- injected nothing")
@@ -172,7 +172,7 @@ def main() -> int:
 
     try:
         context = build_context(memory_dir)
-    except (ImportError, OSError) as exc:
+    except (ImportError, OSError, RuntimeError) as exc:
         _log_failure(f"cannot build the learned-context block ({exc}) -- injected nothing")
         print("{}")
         return 0
@@ -201,4 +201,24 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # A catch-all around main(), because this file's stdout IS a wire contract:
+    # "EXACTLY ONE JSON OBJECT ON STDOUT". Measured before this guard, an
+    # uncaught RuntimeError from paths.py (raised for an unresolvable home, and
+    # NOT one of the types the handlers caught) produced 0 bytes on stdout and a
+    # traceback -- the docstring's own non-negotiable broken by the error path.
+    # Any escape here is a bug, but a bug must still not violate the contract.
+    # `Exception`, NOT `BaseException`: sys.exit() raises SystemExit, which is a
+    # BaseException, so catching that caught main()'s own normal exit and printed
+    # a SECOND "{}" after the real object. Two JSON objects concatenate into
+    # invalid JSON and Copilot then discards the injection silently -- this guard
+    # briefly produced the exact failure it exists to prevent. Measured: 2 lines
+    # on stdout, json.load() refused the result.
+    try:
+        sys.exit(main())
+    except Exception as exc:  # noqa: BLE001 -- deliberate; see above
+        try:
+            _log_failure(f"unhandled {type(exc).__name__}: {exc} -- injected nothing")
+        except BaseException:
+            pass
+        print("{}")
+        sys.exit(0)
