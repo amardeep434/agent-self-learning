@@ -37,9 +37,12 @@ run_mirror > /dev/null
 TARGET="${HOME_DIR}/.claude/skills/probe-before-inferring"
 check "A: skill directory created in the harness location" "yes" \
     "$([[ -f "${TARGET}/SKILL.md" ]] && echo yes || echo no)"
-check "A: content matches the store copy byte for byte" \
-    "$(md5sum < "${STORE}/learned-skills/probe-before-inferring/SKILL.md")" \
-    "$(md5sum < "${TARGET}/SKILL.md")"
+# cmp, not md5sum: macOS ships `md5` and has no `md5sum`, so an md5sum here
+# fails on both macos-latest CI cells. cmp also answers the actual question --
+# are these bytes identical -- without a hash in between.
+check "A: content matches the store copy byte for byte" "yes" \
+    "$(cmp -s "${STORE}/learned-skills/probe-before-inferring/SKILL.md" \
+              "${TARGET}/SKILL.md" && echo yes || echo no)"
 check "A: marker written" "yes" "$([[ -f "${TARGET}/${MARKER}" ]] && echo yes || echo no)"
 
 # ---------------------------------------------------------------------------
@@ -64,9 +67,10 @@ add_skill "collision" "Ours."
 USERS="${HOME_DIR}/.claude/skills/collision"
 mkdir -p "$USERS"
 printf 'MY OWN HAND-WRITTEN SKILL\n' > "${USERS}/SKILL.md"
-USER_SUM=$(md5sum < "${USERS}/SKILL.md")
+# cksum: POSIX, unlike md5sum. See case A.
+USER_SUM=$(cksum < "${USERS}/SKILL.md")
 OUT=$(run_mirror)
-check "C: user's file left byte-identical" "$USER_SUM" "$(md5sum < "${USERS}/SKILL.md")"
+check "C: user's file left byte-identical" "$USER_SUM" "$(cksum < "${USERS}/SKILL.md")"
 check "C: no marker planted in the user's directory" "no" \
     "$([[ -f "${USERS}/${MARKER}" ]] && echo yes || echo no)"
 check "C: the collision is reported, not silent" "yes" \
