@@ -100,7 +100,29 @@ def _gate_line(text: str) -> "tuple[str, str | None]":
     if not text.strip():
         return text, None
     try:
-        findings = _scan_threats().scan_for_threats(text, scope="strict")
+        # "relaxed" skips exactly {encoded_payloads, shell_injection_in_content}
+        # (scan-threats.py:88) and keeps prompt_injection plus every credential
+        # category -- the ones that matter for text entering a model's context.
+        #
+        # Measured against the real store 2026-07-30: "strict" blocked 5 of 137
+        # MEMORY.md lines and all five were false positives. The pattern is
+        # `(?i)`.*(?:curl|wget|nc|bash|sh|python).*` -- a backtick followed
+        # anywhere by those substrings, which "occurre[nc]es", "concurrency" and
+        # "[sh]lex" all satisfy. It is written for content a shell may execute;
+        # this text is injected for a model to READ and is never executed, so
+        # here it only destroys real lessons about shell quoting.
+        #
+        # Re-derive:
+        #   python3 - <<'EOF'
+        #   import importlib.util, pathlib
+        #   s=importlib.util.spec_from_file_location("st","scripts/scan-threats.py")
+        #   st=importlib.util.module_from_spec(s); s.loader.exec_module(st)
+        #   mem=(pathlib.Path.home()/".local/share/agent-learning/memory/MEMORY.md")
+        #   for l in mem.read_text().splitlines():
+        #       for scope in ("strict","relaxed"):
+        #           if st.scan_for_threats(l, scope=scope): print(scope, l[:90])
+        #   EOF
+        findings = _scan_threats().scan_for_threats(text, scope="relaxed")
     except (ImportError, OSError, AttributeError):
         # A threat table we cannot load must not silently become "no threats".
         # Fail closed: block the line and say why.

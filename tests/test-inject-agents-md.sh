@@ -178,7 +178,39 @@ check "threat gate: clean content is not marked" "no" \
     "$(grep -q 'BLOCKED' "${CLEAN_HOME}/AGENTS.md" && echo yes || echo no)"
 check "threat gate: clean content logs nothing" "no" \
     "$([[ -s "${CLEAN_STORE}/logs/persist-failures.log" ]] && echo yes || echo no)"
-rm -rf "$GATE_HOME" "$CLEAN_HOME"
+
+# 8) The gate must NOT block a lesson that merely QUOTES a shell fragment.
+#
+#    Measured 2026-07-30: with scope="strict" the gate blocked 5 of 137 real
+#    MEMORY.md lines and every one was a false positive -- ordinary lessons
+#    about shell quoting, matched by shell_injection_in_content. This text is
+#    injected for a model to READ and is never executed by a shell, so those
+#    patterns describe a threat that does not exist on this path while
+#    destroying exactly the lessons most worth keeping. scan-threats.py's
+#    "relaxed" scope skips {encoded_payloads, shell_injection_in_content} and
+#    keeps prompt_injection plus every credential category.
+#
+#    These are verbatim shapes from the real store.
+SHELL_HOME=$(mktemp -d)
+SHELL_STORE="${SHELL_HOME}/store"
+mkdir -p "${SHELL_STORE}/memory" "${SHELL_STORE}/logs"
+#    These three are copied VERBATIM from the real MEMORY.md lines that
+#    scope="strict" blocked, so this test actually reproduces the false
+#    positive. An earlier version of it used paraphrases that tripped nothing,
+#    so it passed under both scopes and guarded nothing -- caught by mutation
+#    testing, which is the only reason it is worth anything now.
+{
+    echo '- Coach signals name the field `count`, not `occurrences` - probing the wrong key faked a dropped-data defect.'
+    echo '- Quoting the templates broke 5 suites that recovered the path with `${cmd#bash }`; tests/lib/hook-command.sh shlex-tokenizes instead.'
+    echo '- A red-looking matrix cell may be `cancelled` (dropped runner), not `failed` - there is no `concurrency` block to blame.'
+} > "${SHELL_STORE}/memory/MEMORY.md"
+env -i HOME="$SHELL_HOME" AGENT_LEARNING_HOME="$SHELL_STORE" PATH="$PATH" \
+    python3 "${SCRIPT_DIR}/scripts/inject-agents-md.py" "${SHELL_HOME}/AGENTS.md"
+check "gate scope: a lesson quoting shell is NOT blocked" "no" \
+    "$(grep -q 'BLOCKED' "${SHELL_HOME}/AGENTS.md" && echo yes || echo no)"
+check "gate scope: that lesson's text survives intact" "yes" \
+    "$(grep -q 'cmd#bash' "${SHELL_HOME}/AGENTS.md" && echo yes || echo no)"
+rm -rf "$GATE_HOME" "$CLEAN_HOME" "$SHELL_HOME"
 
 if [[ "$FAILURES" -gt 0 ]]; then exit 1; fi
 echo "All inject-agents-md tests passed."
