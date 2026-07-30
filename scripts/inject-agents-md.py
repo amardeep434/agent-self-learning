@@ -23,14 +23,78 @@ import skill_layout  # noqa: E402  (single definition of the skill-directory lay
 
 BEGIN = "<!-- BEGIN self-learning:managed -->"
 END = "<!-- END self-learning:managed -->"
-MAX_MEMORY_CHARS = 2200
+
+# Advisory only -- the size at which MEMORY.md is worth consolidating, NOT a
+# truncation point. Hermes uses this same 2200 as a write-side budget that
+# refuses the write and tells the agent to consolidate
+# (tools/memory_tool.py:165, rejection :426-437); its read path never
+# truncates either.
+#
+# This used to be `MAX_MEMORY_CHARS`, applied as `read_text(...)[:2200]`.
+# Measured 2026-07-30 against the real store that slice injected 10% of a
+# 20752-byte MEMORY.md and silently discarded 89% of it, mid-entry -- and
+# because the file is append-ordered, what it discarded was the NEWEST
+# lessons, i.e. precisely the content most worth delivering. No ellipsis, no
+# log line, nothing doctor.sh could surface: hard rule 2's exact failure
+# class, dormant only because this script had no caller.
+#
+# The budget is not copied to our write path: MEMORY.md is already ~9x over
+# it, so enforcing 2200 there would reject every future append, and
+# persist-proposal.py already bounds accumulated growth loudly via
+# MAX_MEMORY_FILE_BYTES. So over-budget is reported and everything is still
+# injected. Override with SL_MEMORY_INJECT_BUDGET (bytes).
+DEFAULT_MEMORY_INJECT_BUDGET = 2200
+
+
+def _log_advisory(message: str) -> None:
+    """Append one line to ${SL_LOG_DIR}/persist-failures.log.
+
+    Same log, same line shape as persist-proposal.py and skill-lifecycle.py,
+    so doctor.sh needs no new parsing. Never raises: an unwritable log
+    directory must not turn an advisory into a failed injection.
+    """
+    try:
+        log_dir = os.environ.get("SL_LOG_DIR")
+        if not log_dir:
+            log_dir = str(paths.resolve_all()["logs"])
+        Path(log_dir).mkdir(parents=True, exist_ok=True)
+        from isotime import now_iso
+        with open(Path(log_dir) / "persist-failures.log", "a",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write(f"{now_iso()} {message}\n")
+    except (OSError, ImportError, KeyError):
+        pass
+
+
+def _inject_budget() -> int:
+    raw = os.environ.get("SL_MEMORY_INJECT_BUDGET", "")
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_MEMORY_INJECT_BUDGET
+    return value if value > 0 else DEFAULT_MEMORY_INJECT_BUDGET
 
 
 def read_memory(memory_dir: Path) -> str:
+    """Return MEMORY.md in full. Never truncates.
+
+    Over-budget is reported to persist-failures.log and still injected --
+    dropping a lesson silently is worse than injecting a large block, and the
+    reviewer cannot consolidate a file it is never told is oversized.
+    """
     memory_file = memory_dir / "MEMORY.md"
     if not memory_file.is_file():
         return ""
-    return memory_file.read_text(encoding="utf-8", errors="replace")[:MAX_MEMORY_CHARS].strip()
+    content = memory_file.read_text(encoding="utf-8", errors="replace")
+    budget = _inject_budget()
+    size = len(content.encode("utf-8"))
+    if size > budget:
+        _log_advisory(
+            f"{memory_file} is {size} bytes, over the {budget}-byte injection "
+            "budget -- injected in full anyway (never truncated). Consolidate "
+            "overlapping entries to bring it back under budget."
+        )
+    return content.strip()
 
 
 def read_skill_description(skill_md: Path) -> str:
