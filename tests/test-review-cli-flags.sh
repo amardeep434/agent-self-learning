@@ -41,27 +41,50 @@
 #   copilot --max-ai-credits 30 --help       sessions 0 -> 0
 #   copilot --max-ai-credits 29 --help       sessions 0 -> 0
 #   claude  --max-turns 16 -p ""             $HOME files 0 -> 2 (.claude/sessions)
-#   claude  --max-turns notanumber --help    $HOME files 0 -> 0
+#   claude  --max-turns 16 mcp list          sessions 0 -> 0
 #
-# So every probe below is now `<argv under test> --help`, which both CLIs parse
-# fully before printing usage and exiting -- no session, no prompt, no credits.
+# So every probe below now parses the argv under test against a CHEAP
+# SUBCOMMAND -- `copilot ... help limits` and `claude ... mcp list`. Both
+# validate global options fully before the subcommand runs, both are
+# read-only, and neither opens a session or calls a model.
 #
-# WHY THIS IS A STRONGER GUARD, NOT A WEAKER ONE
-# ----------------------------------------------
-# `--help` alone would be weaker: measured, BOTH CLIs print usage and exit 0
-# for `--sl-not-a-real-flag --help` with no "unknown option" error, so a
-# silently-swallowed flag would pass an acceptance check phrased as "no error".
-# That trap is why the acceptance probe is PAIRED with a deliberately-invalid
-# VALUE for the same flag:
+# WHY NOT `--help`, THE OBVIOUS CHOICE
+# ------------------------------------
+# Because it is silently vacuous. MEASURED: `copilot --sl-not-a-real-flag
+# --help` and `claude --sl-not-a-real-flag --help` BOTH print usage and exit
+# 0, with no "unknown option" error -- commander prints help before it
+# validates. An acceptance check phrased as "no error appeared" therefore
+# passes for a flag that no longer exists. The first draft of this rewrite
+# used `--help` and mutation testing caught it: mutations M3 and M5 (adding a
+# flag the CLI rejects to the argv under test) both went UNDETECTED, suite
+# exit 0. The subcommand form detects them.
+#
+# WHY THIS IS A STRONGER GUARD THAN WHAT IT REPLACES
+# --------------------------------------------------
+# The old control only proved "not rejected as unknown". Each acceptance
+# probe here is paired with a deliberately-INVALID VALUE for the same flag:
 #   copilot --max-ai-credits 29    -> error: ... argument '29' is invalid.
 #                                     Use at least 30 AI credits.
 #   claude  --max-turns notanumber -> error: option '--max-turns <turns>'
-#                                     argument 'notanumber' is invalid.
-# An UNDECLARED option cannot produce a validator error naming itself. So the
-# invalid-value probe proves the option is declared AND parsed AND validated,
-# which the old `-p ""` control never did -- it only proved "not rejected as
-# unknown". The pair (invalid value errors / real value does not) is what
-# detects flag drift, and it detects the credit MINIMUM moving too.
+#                                     argument 'notanumber' is invalid
+# Only a DECLARED option has a value validator, so this proves declared AND
+# parsed AND validated, and it pins the credit MINIMUM (30) that
+# copilot-session-review.sh validates against.
+#
+# Both invalid-value assertions additionally require the error NOT to be
+# "unknown option". Mutation M1 showed why: `copilot help limits` prints the
+# string "--max-ai-credits" in its own body, and a removed flag errors with
+# "unknown option '--max-turns'" -- which also contains the flag name. A bare
+# substring match passes in both cases. The error line must name the option
+# AND not be the unknown-option error.
+#
+# MUTATION-TESTED 2026-07-30, six mutations, all six detected, suite exit 1:
+#   M1 --max-ai-credits renamed away        -> control check FAILs
+#   M2 credit floor asserted 31 not 30      -> floor check FAILs
+#   M3 copilot argv gains a rejected flag   -> argv check FAILs
+#   M4 --max-turns gone from claude         -> control check FAILs
+#   M5 claude argv gains a rejected flag    -> tool-restriction check FAILs
+#   M6 a `-p ""` probe is reintroduced      -> both session guards FAIL
 #
 # Capability-probed, never platform-branched: where a CLI is absent this
 # says so loudly and moves on. Both are absent on CI runners, so in CI this
@@ -179,27 +202,33 @@ if command -v copilot >/dev/null 2>&1; then
         "$(run_probe 60 copilot help limits 2>&1 | grep -qF -- '--max-ai-credits' && echo yes || echo no)"
     check "copilot's documented credit minimum is still 30" "yes" \
         "$(run_probe 60 copilot help limits 2>&1 | grep -qiE 'minimum: *30' && echo yes || echo no)"
-    # PARSER CONTROL + EXISTENCE PROOF in one probe, and without a session.
-    # A value below the documented minimum must be rejected BY NAME. Only a
-    # DECLARED option can emit a validator error naming itself; an undeclared
-    # one is swallowed silently in `--help` form (measured -- see the header).
-    # So a PASS here proves --max-ai-credits still exists, is still parsed,
-    # and its floor is still the 30 that copilot-session-review.sh validates
-    # against. This replaces the old `-p ""` control, which started a real
-    # session and only ever proved "not rejected as unknown".
-    COPILOT_CREDITS_LOW="$(run_probe 60 copilot --max-ai-credits 29 --help </dev/null 2>&1 || true)"
+    # PARSE TARGET: `help limits`. See the header for why it is not `--help`
+    # and not `-p ""`. Global options are validated fully before the
+    # subcommand runs, and no session is opened.
+    #
+    # Control: the CLI must reject an unknown option here, or "accepted"
+    # below means nothing.
+    COPILOT_UNKNOWN="$(run_probe 60 copilot --sl-definitely-not-a-real-flag help limits </dev/null 2>&1 || true)"
+    check "copilot control: unknown flags DO error" "yes" \
+        "$(printf '%s' "$COPILOT_UNKNOWN" | grep -qi "unknown option" && echo yes || echo no)"
+
+    # EXISTENCE + FLOOR, from one probe. A value below the documented minimum
+    # must be rejected by an error line that NAMES the option -- and must not
+    # be the "unknown option" error, which is what a removed flag would give.
+    # Those two conditions together are what separate "declared, parsed and
+    # validated" from "gone upstream"; `help limits` PRINTS the string
+    # "--max-ai-credits" in its own body, so a bare substring match on the
+    # whole output passes even when the flag has been deleted (this exact
+    # false pass was caught by mutation M1 before it shipped).
+    COPILOT_CREDITS_LOW="$(run_probe 60 copilot --max-ai-credits 29 help limits </dev/null 2>&1 || true)"
     check "copilot control: --max-ai-credits validator still rejects 29" "yes" \
-        "$(printf '%s' "$COPILOT_CREDITS_LOW" | grep -qiE 'max-ai-credits' && \
-           printf '%s' "$COPILOT_CREDITS_LOW" | grep -qiE 'invalid' && echo yes || echo no)"
+        "$(printf '%s' "$COPILOT_CREDITS_LOW" | grep -qiE 'error:.*max-ai-credits' && \
+           ! printf '%s' "$COPILOT_CREDITS_LOW" | grep -qi 'unknown option' && echo yes || echo no)"
     check "copilot's rejection still names 30 as the floor" "yes" \
-        "$(printf '%s' "$COPILOT_CREDITS_LOW" | grep -qiE 'at least 30' && echo yes || echo no)"
-    # ...and the value the script actually passes must clear that validator.
-    COPILOT_CREDITS_OK="$(run_probe 60 copilot --max-ai-credits 30 --help </dev/null 2>&1 || true)"
-    check "copilot accepts --max-ai-credits 30" "yes" \
-        "$(printf '%s' "$COPILOT_CREDITS_OK" | grep -qiE 'error:|unknown option' && echo no || echo yes)"
+        "$(printf '%s' "$COPILOT_CREDITS_LOW" | grep -qiE 'error:.*at least 30' && echo yes || echo no)"
 
     # The full argv shape copilot-session-review.sh builds, parsed end to end.
-    COPILOT_ARGV_ERR="$(run_probe 60 copilot --allow-tool read --max-ai-credits 30 --help </dev/null 2>&1 || true)"
+    COPILOT_ARGV_ERR="$(run_probe 60 copilot --allow-tool read --max-ai-credits 30 help limits </dev/null 2>&1 || true)"
     check "copilot accepts the argv copilot-session-review.sh builds" "yes" \
         "$(printf '%s' "$COPILOT_ARGV_ERR" | grep -qiE 'error:|unknown option' && echo no || echo yes)"
 
@@ -235,25 +264,31 @@ if command -v claude >/dev/null 2>&1; then
     # (2 files) before erroring. A test for a vendor-neutral project should
     # not materialise a harness's private state directory to run.
     #
-    # Same proof, `--help` form, zero files created: an INVALID VALUE for
-    # --max-turns must be rejected by name. An undeclared option is swallowed
-    # silently in `--help` form (measured: `claude --sl-not-a-real-flag
-    # --help` prints usage and exits 0, no error), so only a declared,
-    # parsed, validated option can produce this message.
-    MAXTURNS_BAD="$(run_probe 60 claude --max-turns notanumber --help </dev/null 2>&1 || true)"
-    CONTROL_OK="$(printf '%s' "$MAXTURNS_BAD" | grep -qiE 'max-turns' && \
-                  printf '%s' "$MAXTURNS_BAD" | grep -qiE 'invalid' && echo yes || echo no)"
+    # PARSE TARGET: `mcp list` -- read-only, no model call, no session, and
+    # (measured) it validates global options before running. `--help` will
+    # NOT do: `claude --sl-not-a-real-flag --help` prints usage and exits 0.
+    UNKNOWN_ERR="$(run_probe 60 claude --sl-definitely-not-a-real-flag mcp list </dev/null 2>&1 || true)"
+    CONTROL_OK="$(printf '%s' "$UNKNOWN_ERR" | grep -qi "unknown option" && echo yes || echo no)"
     if [[ "$CONTROL_OK" == "yes" ]]; then
-        echo "PASS: claude control: --max-turns is a declared, validated option"
-        MAXTURNS_OK="$(run_probe 60 claude --max-turns 16 --help </dev/null 2>&1 || true)"
+        # --max-turns is NOT listed in `claude --help` on 2.1.220, but it IS
+        # accepted, so grepping help text proves nothing either way. Probe the
+        # declaration instead: a non-numeric argument must draw a validator
+        # error that names the option AND is not "unknown option". A removed
+        # --max-turns yields "error: unknown option '--max-turns'", which
+        # names the option too -- excluding that string is what makes this
+        # detect removal rather than rubber-stamp it.
+        MAXTURNS_BAD="$(run_probe 60 claude --max-turns notanumber mcp list </dev/null 2>&1 || true)"
+        check "claude control: --max-turns is a declared, validated option" "yes" \
+            "$(printf '%s' "$MAXTURNS_BAD" | grep -qiE 'error:.*max-turns' && \
+               ! printf '%s' "$MAXTURNS_BAD" | grep -qi 'unknown option' && echo yes || echo no)"
+        MAXTURNS_OK="$(run_probe 60 claude --max-turns 16 mcp list </dev/null 2>&1 || true)"
         check "claude accepts --max-turns 16" "yes" \
             "$(printf '%s' "$MAXTURNS_OK" | grep -qiE 'error:|unknown option' && echo no || echo yes)"
     else
-        echo "[capability probe] claude: --max-turns produced no value-validation"
-        echo "  error for a non-numeric argument, so this CLI cannot be probed this"
-        echo "  way. The --max-turns check is INCONCLUSIVE here -- reported, not"
-        echo "  assumed. Output was:"
-        printf '%s\n' "$MAXTURNS_BAD" | head -3 | sed 's/^/    /'
+        echo "[capability probe] claude: the control experiment did not produce an"
+        echo "  'unknown option' error, so this CLI cannot be probed this way. The"
+        echo "  --max-turns checks are INCONCLUSIVE here -- reported, not assumed."
+        printf '%s\n' "$UNKNOWN_ERR" | head -3 | sed 's/^/    /'
     fi
 
     check "session-review.sh passes a turn cap" "yes" \
@@ -271,7 +306,7 @@ if command -v claude >/dev/null 2>&1; then
     done
     if [[ "$CONTROL_OK" == "yes" ]]; then
         RESTRICT_ERR="$(run_probe 60 claude --allowedTools "Read,Glob,Grep" \
-            --disallowedTools "Write,Edit,NotebookEdit" --max-turns 16 --help </dev/null 2>&1 || true)"
+            --disallowedTools "Write,Edit,NotebookEdit" --max-turns 16 mcp list </dev/null 2>&1 || true)"
         check "claude accepts the tool-restriction argv session-review.sh builds" "yes" \
             "$(printf '%s' "$RESTRICT_ERR" | grep -qiE 'error:|unknown option' && echo no || echo yes)"
     fi
