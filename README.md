@@ -500,6 +500,7 @@ Environment variables of the same name override the file.
 | `SL_VSCODE_REVIEWER` | (empty — auto) | Which CLI reviews a VS Code session: `copilot` or `claude`. See note below |
 | `SL_PERSIST_LOCK_TIMEOUT` | `20` (seconds) | How long a writer waits for the store lock before failing loudly |
 | `SL_MEMORY_INJECT_BUDGET` | `32768` (bytes) | Size at which `MEMORY.md` is **reported** as worth consolidating when injected at session start. Advisory only — memory is never truncated; exceeding it costs a line in `persist-failures.log`, not content. Roughly 4 bytes per token, so the default is ~8K tokens added per session start **and after every compaction** |
+| `SL_MEMORY_NEAR_DUP_THRESHOLD` | `0.62` | Similarity at which an appended `MEMORY.md` line is **refused** as restating an existing one. `0` disables it. Exact repeats are refused separately. Never auto-merged — merging is a judgement about meaning, so the reviewer is told to consolidate with a `replace` entry instead |
 | `SL_COACH_RULES_ENABLED` | `false` | Coach Route A (rule evaluation) |
 | `SL_COACH_EXPORT_ENABLED` | `false` | Coach Route B (fork auto-export) |
 | `SL_COACH_EXPORT_PATH` | `~/.aiec/summary-latest.json` | Route B input file |

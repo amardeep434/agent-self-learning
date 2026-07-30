@@ -105,7 +105,14 @@ def _run_barrier(store: Path, payloads: "list[str]", env_extra: "dict | None" = 
 
     Returns [(returncode, stdout, stderr)] in payload order.
     """
-    env = dict(os.environ, AGENT_LEARNING_HOME=str(store))
+    # Near-duplicate refusal is OFF here, deliberately. This suite tests LOCK
+    # CONTENTION: every writer emits "ENTRY-000N " followed by identical padding
+    # precisely so the appends collide, which makes them ~1.00 similar to each
+    # other. That is the fixture doing its job, not memory accumulating
+    # restatements, and leaving the check on would have this suite fail for a
+    # reason unrelated to what it asserts.
+    env = dict(os.environ, AGENT_LEARNING_HOME=str(store),
+               SL_MEMORY_NEAR_DUP_THRESHOLD="0")
     env.pop("SL_LOG_DIR", None)
     env.pop("SL_STATE_DIR", None)
     if env_extra:
