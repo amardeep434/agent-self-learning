@@ -220,5 +220,47 @@ check "gate scope: that lesson's text survives intact" "yes" \
     "$(grep -q 'cmd#bash' "${SHELL_HOME}/AGENTS.md" && echo yes || echo no)"
 rm -rf "$GATE_HOME" "$CLEAN_HOME" "$SHELL_HOME"
 
+# 9) The advisory budget is CONFIGURABLE, with env > conf > default precedence.
+#
+#    It shipped as an env var only, which is no configuration at all: every other
+#    tunable in this project lives in self-learning.conf, and the hook wrapper
+#    does not source config.sh, so a user had no supported way to set it.
+CFG_HOME=$(mktemp -d)
+CFG_STORE="${CFG_HOME}/store"
+mkdir -p "${CFG_STORE}/memory" "${CFG_STORE}/logs"
+python3 -c "print('- lesson'*400)" > "${CFG_STORE}/memory/MEMORY.md"
+CFG_BYTES=$(wc -c < "${CFG_STORE}/memory/MEMORY.md" | tr -d ' ')
+
+# (a) default: a file smaller than 32768 must NOT trip the advisory.
+env -i HOME="$CFG_HOME" AGENT_LEARNING_HOME="$CFG_STORE" PATH="$PATH" \
+    python3 "${SCRIPT_DIR}/scripts/inject-agents-md.py" "${CFG_HOME}/A.md"
+check "budget: ${CFG_BYTES}b file is under the raised default, no advisory" "no" \
+    "$([[ -s "${CFG_STORE}/logs/persist-failures.log" ]] && echo yes || echo no)"
+
+# (b) self-learning.conf is honoured.
+printf 'SL_MEMORY_INJECT_BUDGET=100\n' > "${CFG_STORE}/self-learning.conf"
+env -i HOME="$CFG_HOME" AGENT_LEARNING_HOME="$CFG_STORE" PATH="$PATH" \
+    python3 "${SCRIPT_DIR}/scripts/inject-agents-md.py" "${CFG_HOME}/A.md"
+check "budget: self-learning.conf value is honoured" "yes" \
+    "$([[ -s "${CFG_STORE}/logs/persist-failures.log" ]] && echo yes || echo no)"
+
+# (c) env beats conf -- the documented precedence.
+: > "${CFG_STORE}/logs/persist-failures.log"
+env -i HOME="$CFG_HOME" AGENT_LEARNING_HOME="$CFG_STORE" PATH="$PATH" \
+    SL_MEMORY_INJECT_BUDGET=999999 \
+    python3 "${SCRIPT_DIR}/scripts/inject-agents-md.py" "${CFG_HOME}/A.md"
+check "budget: env overrides a smaller conf value" "no" \
+    "$([[ -s "${CFG_STORE}/logs/persist-failures.log" ]] && echo yes || echo no)"
+
+# (d) a garbage conf value falls through to the default, never to 0 -- a 0 budget
+#     would make the advisory fire on every non-empty file.
+printf 'SL_MEMORY_INJECT_BUDGET=not-a-number\n' > "${CFG_STORE}/self-learning.conf"
+: > "${CFG_STORE}/logs/persist-failures.log"
+env -i HOME="$CFG_HOME" AGENT_LEARNING_HOME="$CFG_STORE" PATH="$PATH" \
+    python3 "${SCRIPT_DIR}/scripts/inject-agents-md.py" "${CFG_HOME}/A.md"
+check "budget: unparseable conf value falls back to the default, not 0" "no" \
+    "$([[ -s "${CFG_STORE}/logs/persist-failures.log" ]] && echo yes || echo no)"
+rm -rf "$CFG_HOME"
+
 if [[ "$FAILURES" -gt 0 ]]; then exit 1; fi
 echo "All inject-agents-md tests passed."

@@ -44,7 +44,54 @@ END = "<!-- END self-learning:managed -->"
 # persist-proposal.py already bounds accumulated growth loudly via
 # MAX_MEMORY_FILE_BYTES. So over-budget is reported and everything is still
 # injected. Override with SL_MEMORY_INJECT_BUDGET (bytes).
-DEFAULT_MEMORY_INJECT_BUDGET = 2200
+# Advisory threshold, in BYTES: the size at which MEMORY.md is worth
+# consolidating. NOT a truncation point -- the read path never truncates.
+#
+# 32768, not Hermes' 2200. Hermes uses 2200 as a WRITE-side budget that refuses
+# the write and forces the agent to consolidate, so its memory never grows past
+# it. Ours is a read-side ADVISORY over a file that persist-proposal.py lets grow
+# to MAX_MEMORY_FILE_BYTES (1 MiB), and a real store measured 22112 bytes on
+# 2026-07-30 -- so 2200 fired on every single session start. An advisory that
+# always fires is one nobody reads, and it would have filled
+# persist-failures.log (the file doctor.sh surfaces) with a line per session
+# until the real failures were buried.
+#
+# Resolution order matches lib/config.sh's for every other tunable:
+#   env SL_MEMORY_INJECT_BUDGET  >  self-learning.conf  >  this default
+# Read here in Python rather than by sourcing config.sh, because config.sh
+# spawns `python3 lib/paths.py all` (~22-25ms measured) and this runs inside a
+# <100ms hook that already resolves paths in-process.
+DEFAULT_MEMORY_INJECT_BUDGET = 32768
+_BUDGET_KEY = "SL_MEMORY_INJECT_BUDGET"
+
+
+def _budget_from_config() -> "int | None":
+    """Read SL_MEMORY_INJECT_BUDGET from self-learning.conf, or None.
+
+    Deliberately a dumb KEY=VALUE scan, not a shell source: this file is read
+    inside a hook, and executing the user's config as shell to obtain one integer
+    would be both slower and a far larger blast radius.
+    """
+    try:
+        config_file = paths.resolve_all()["config_file"]
+    except (KeyError, OSError, RuntimeError):
+        return None
+    try:
+        text = Path(config_file).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith(_BUDGET_KEY):
+            continue
+        _, _, value = line.partition("=")
+        value = value.strip().strip("'\"").split("#")[0].strip()
+        try:
+            parsed = int(value)
+        except ValueError:
+            return None
+        return parsed if parsed > 0 else None
+    return None
 
 
 def _log_advisory(message: str) -> None:
@@ -184,12 +231,20 @@ def gate_for_injection(text: str) -> "tuple[str, list[str]]":
 
 
 def _inject_budget() -> int:
-    raw = os.environ.get("SL_MEMORY_INJECT_BUDGET", "")
-    try:
-        value = int(raw)
-    except ValueError:
-        return DEFAULT_MEMORY_INJECT_BUDGET
-    return value if value > 0 else DEFAULT_MEMORY_INJECT_BUDGET
+    """env > self-learning.conf > default. An unparseable or non-positive value
+    at any level falls through to the next, never to 0 -- a 0 budget would make
+    the advisory fire on every non-empty file, which is the failure this default
+    was raised to avoid."""
+    raw = os.environ.get(_BUDGET_KEY, "")
+    if raw:
+        try:
+            value = int(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+    from_config = _budget_from_config()
+    return from_config if from_config else DEFAULT_MEMORY_INJECT_BUDGET
 
 
 def read_memory(memory_dir: Path) -> str:

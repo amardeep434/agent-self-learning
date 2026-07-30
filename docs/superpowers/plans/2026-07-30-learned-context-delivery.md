@@ -4,7 +4,30 @@ Companion to [`docs/upstream-audit-2026-07-30.md`](../../upstream-audit-2026-07-
 which is the evidence. This file is the decision and the work list. Where the two
 disagree, the audit wins — it carries the re-derivation commands.
 
-**Status: not started. One decision is open (§2) and it is the user's.**
+**Status: DELIVERED 2026-07-30 (PR #12, merged), with one step outstanding.**
+
+The decision in §2 was taken: **Route C, reached as B then A**. Both shipped.
+
+- Route B — `scripts/session-start-context.py` + `.sh`, registered as `SessionStart`
+  in all three templates.
+- Route A — `scripts/mirror-skills.py`, publishing to `~/.claude/skills` and
+  `~/.copilot/skills`, launched detached from the same hook.
+- P0.1–P0.5 and P1.1–P1.3 are all closed. `use_count` (P0.2) was resolved by making
+  the documentation honest rather than by inventing a signal no harness reports —
+  see `tests/test-skill-usage-honesty.py`, which locks the two together in both
+  directions.
+
+**Outstanding, and it is the acceptance bar in §6, not a formality:** no hook has
+been observed firing on Claude Code or VS Code. Copilot CLI's `sessionStart` is
+registered and live; Claude Code registration is manual and is the user's step.
+Until a real hook is observed producing the block, README's capability rows stay
+⚠️ "wired, never observed firing" — a green matrix is not evidence a hook ran.
+
+Three adversarial reviews after the fact found two CRITICAL defects in the
+delivered code (ungated skill *bodies* reaching an auto-loaded directory, and a
+marker check that let `prune()` delete the user's own skills) plus four HIGH. All
+fixed in PR #12; see its description. Read that before trusting anything below as
+still-accurate design intent.
 
 ---
 

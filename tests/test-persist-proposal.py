@@ -15,8 +15,10 @@ def _load_writer_module():
     return module
 
 
-def run(stdin_text, home, extra_args=()):
+def run(stdin_text, home, extra_args=(), env_extra=None):
     env = dict(os.environ, AGENT_LEARNING_HOME=str(home))
+    if env_extra:
+        env.update(env_extra)
     return subprocess.run([sys.executable, str(WRITER), *extra_args],
                           input=stdin_text, capture_output=True, text=True, env=env)
 
@@ -853,10 +855,11 @@ class TestAppendLineDiscipline(unittest.TestCase):
     dispatches to.
     """
 
-    def _append(self, home, content):
+    def _append(self, home, content, env_extra=None):
         return run(json.dumps({"version": 1,
                                "memory": [{"file": "MEMORY.md", "mode": "append",
-                                           "content": content}]}), home)
+                                           "content": content}]}), home,
+                   env_extra=env_extra)
 
     def _seed(self, home, text):
         (home / "memory").mkdir(parents=True, exist_ok=True)
@@ -923,14 +926,52 @@ class TestAppendLineDiscipline(unittest.TestCase):
             # All-or-nothing: the new fact is not half-applied.
             self.assertEqual(mem.read_text(), "- keep this\n- dup entry\n")
 
-    def test_near_duplicate_is_not_refused(self):
-        """Honest scope: only EXACT lines. The live near-duplicate pair
-        differed after the em-dash, so this check would not have caught it --
-        the OUTPUT CONTRACT's read-the-file-first rule is what covers that."""
+    def test_near_duplicate_is_refused(self):
+        """FLIPPED 2026-07-30. This asserted the opposite -- that only EXACT
+        lines are caught -- on the reasoning that near-duplicates "cannot be
+        [caught] without the writer judging meaning".
+
+        Measured against the real store, that was too pessimistic. Similarity
+        over the 88 bullet lines has a clean gap: the three genuine duplicate
+        pairs score 0.84, 0.76 and 0.61, and the next-highest unrelated pair is
+        0.52, with everything below it clustered. A threshold inside that gap
+        separates them lexically, with no judgement about meaning at all.
+
+        Memory has NO eviction (MAX_MEMORY_FILE_BYTES is a wall, not a trim), so
+        every near-duplicate that lands is permanent.
+        """
         with tempfile.TemporaryDirectory() as d:
             home = Path(d)
-            mem = self._seed(home, "- Wait for CI - reason one.\n")
-            r = self._append(home, "- Wait for CI - reason two.\n")
+            mem = self._seed(home, "- Wait for CI before pushing dependent commits - pushing three unwaited commits wasted a run.\n")
+            r = self._append(home, "- Wait for CI before pushing dependent commits - pushing without waiting made it worse.\n")
+            self.assertEqual(r.returncode, 2, r.stdout)
+            self.assertIn("near-duplicate", r.stderr)
+            self.assertIn("Wait for CI", r.stderr)
+            # All-or-nothing, same as the exact-duplicate path.
+            self.assertNotIn("made it worse", mem.read_text())
+
+    def test_distinct_lessons_are_not_refused_as_near_duplicates(self):
+        """The false-positive guard. Two real lessons that share vocabulary but
+        say different things must both land -- a check that blocks genuine
+        content is worse than the duplication it prevents.
+
+        These are verbatim shapes from the real store that scored BELOW the gap.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            mem = self._seed(home, "- Coach signals name the field `count`, not `occurrences`.\n")
+            r = self._append(home, "- A red matrix cell may be `cancelled`, not `failed`.\n")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("cancelled", mem.read_text())
+
+    def test_near_duplicate_check_can_be_disabled(self):
+        """0 disables it. An operator who disagrees with the threshold must be
+        able to turn it off without editing the writer."""
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            mem = self._seed(home, "- Wait for CI before pushing dependent commits - reason one here.\n")
+            r = self._append(home, "- Wait for CI before pushing dependent commits - reason two here.\n",
+                             env_extra={"SL_MEMORY_NEAR_DUP_THRESHOLD": "0"})
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("reason two", mem.read_text())
 

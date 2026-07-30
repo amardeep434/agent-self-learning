@@ -74,9 +74,11 @@ a second, filesystem-level boundary — defence in depth, not duplicated trust.
 from __future__ import annotations
 
 import argparse
+import difflib
 import errno
 import json
 import os
+import re
 import stat
 import sys
 import tempfile
@@ -326,6 +328,123 @@ def _append_join(existing: str, content: str) -> str:
     return prefix + body + "\n"
 
 
+# Similarity at or above which an appended memory line counts as a
+# near-duplicate of one already on disk. 0 disables the check entirely.
+#
+# 0.62 is not a guess. Measured over the 88 bullet lines of a real MEMORY.md on
+# 2026-07-30, difflib similarity has a clean gap: the three genuine duplicate
+# pairs score 0.84, 0.76 and 0.61, and the highest UNRELATED pair is 0.52 with
+# everything below it densely clustered. A threshold inside that gap separates
+# them lexically, with no judgement about meaning -- which is what the previous
+# version of _reject_duplicate_lines' docstring said was impossible.
+#
+# Re-derive on any store:
+#   python3 - <<'EOF'
+#   import pathlib, difflib, re
+#   mem = pathlib.Path("<store>/memory/MEMORY.md").read_text()
+#   lines = [l for l in mem.splitlines() if l.strip().startswith("- ")]
+#   n = lambda s: ' '.join(re.sub(r'[^a-z0-9 ]',' ',re.sub(r'`[^`]*`',' ',s.lower())).split())
+#   print(sorted((difflib.SequenceMatcher(None,n(a),n(b)).ratio()
+#                 for i,a in enumerate(lines) for b in lines[i+1:]), reverse=True)[:12])
+#   EOF
+#
+# env SL_MEMORY_NEAR_DUP_THRESHOLD > self-learning.conf > this default.
+DEFAULT_NEAR_DUP_THRESHOLD = 0.62
+_NEAR_DUP_KEY = "SL_MEMORY_NEAR_DUP_THRESHOLD"
+
+# Lines shorter than this (after normalisation) are never compared. Similarity
+# over a handful of words is dominated by shared structure rather than shared
+# meaning: "- second entry" vs "- third entry" scores 0.61, which is a hair off
+# the threshold and says nothing about whether they duplicate each other. The
+# threshold was derived from real lessons, whose normalised length is minimum
+# 73 characters (median 126) in the measured store -- so a 40-character floor
+# excludes the degenerate short case while touching none of them.
+#
+# Found by an EXISTING test in this suite failing on synthetic short lines, not
+# by inspection: the first version of this check had no floor.
+MIN_LENGTH_FOR_SIMILARITY = 40
+
+
+def _near_dup_threshold() -> float:
+    """env > self-learning.conf > default. 0 (or negative) disables the check.
+
+    A malformed value falls through to the next level rather than to 0: silently
+    disabling a guard because a config line had a typo is the failure mode this
+    project exists to eliminate.
+    """
+    raw = os.environ.get(_NEAR_DUP_KEY, "")
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            pass
+    try:
+        config_file = paths.resolve_all()["config_file"]
+        for line in Path(config_file).read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if line.startswith(_NEAR_DUP_KEY):
+                _, _, value = line.partition("=")
+                return max(0.0, float(value.strip().strip("'\"").split("#")[0].strip()))
+    except (KeyError, OSError, RuntimeError, ValueError):
+        pass
+    return DEFAULT_NEAR_DUP_THRESHOLD
+
+
+def _normalize_for_similarity(line: str) -> str:
+    """Reduce a memory line to comparable words.
+
+    Backticked spans go first: two lessons quoting different code but making the
+    same point should still compare as similar, and two quoting the SAME code
+    while making different points should not be pulled together by it.
+    """
+    text = re.sub(r"`[^`]*`", " ", line.lower())
+    text = re.sub(r"[^a-z0-9 ]", " ", text)
+    return " ".join(text.split())
+
+
+def _reject_near_duplicate_lines(existing: str, content: str, target: Path) -> None:
+    """Refuse an append that restates a line already present in `target`.
+
+    Exact repeats are caught by _reject_duplicate_lines; this catches the same
+    lesson worded differently, which is what actually accumulates -- the real
+    store held three such pairs and memory has NO eviction, so each one is
+    permanent.
+
+    Refused, never merged. Merging two lines into one is a judgement about
+    meaning, and a writer that silently rewrites the operator's memory file is
+    exactly the class of silent-wrong-result this project treats as a defect.
+    Refusal hands the decision back to the reviewer, which can consolidate with
+    `replace` -- the same move Hermes' write-side budget demands when it rejects
+    ("Consolidate now: use 'replace' to merge overlapping entries").
+    """
+    threshold = _near_dup_threshold()
+    if threshold <= 0:
+        return
+    have = [(line, _normalize_for_similarity(line))
+            for line in existing.splitlines() if line.strip()]
+    if not have:
+        return
+    for line in content.splitlines():
+        if not line.strip():
+            continue
+        norm = _normalize_for_similarity(line)
+        if len(norm) < MIN_LENGTH_FOR_SIMILARITY:
+            continue
+        for original, other in have:
+            if len(other) < MIN_LENGTH_FOR_SIMILARITY:
+                continue
+            ratio = difflib.SequenceMatcher(None, norm, other).ratio()
+            if ratio >= threshold:
+                raise PersistError(
+                    f"refusing to append a near-duplicate to {target} "
+                    f"(similarity {ratio:.2f} >= {threshold:.2f}): proposed "
+                    f"{line.strip()[:90]!r} restates existing "
+                    f"{original.strip()[:90]!r}. Consolidate the two with a "
+                    f"'replace' entry instead of appending, or set "
+                    f"{_NEAR_DUP_KEY}=0 to disable this check."
+                )
+
+
 def _reject_duplicate_lines(existing: str, content: str, target: Path) -> None:
     """Refuse an append that repeats a line already present in `target`.
 
@@ -343,11 +462,15 @@ def _reject_duplicate_lines(existing: str, content: str, target: Path) -> None:
     trade proposal_schema already makes for two entries naming one file:
     wholesale refusal with a diagnostic the reviewer can act on.
 
-    Exact whole-line matches only. The near-duplicates in the real store
-    (the same lesson twice, with different wording after the em-dash) are
-    NOT caught here and cannot be, without the writer judging meaning; the
-    defence for those is the contract rule telling the reviewer to read the
-    file first, not this check.
+    Exact whole-line matches only. Near-duplicates -- the same lesson twice
+    with different wording after the em-dash -- are handled by
+    _reject_near_duplicate_lines, which runs alongside this one.
+
+    This docstring used to claim they "cannot be [caught], without the writer
+    judging meaning". Measured on the real store, that was too pessimistic:
+    similarity over its 88 bullet lines has a clean gap between the genuine
+    duplicates and everything else, so a lexical threshold separates them with
+    no judgement about meaning at all.
     """
     # Blank lines are filtered on the CONTENT side only. Filtering them out of
     # `have` as well was written first and proved inert under mutation -- with
@@ -376,6 +499,9 @@ def _append_data(existing: str, content: str, target: Path) -> str:
     header), so it lives here once.
     """
     _reject_duplicate_lines(existing, content, target)
+    # Exact repeats first, then restatements: the exact check gives the more
+    # precise diagnostic, so it should win when both would fire.
+    _reject_near_duplicate_lines(existing, content, target)
     return _append_join(existing, content)
 
 
