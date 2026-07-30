@@ -155,8 +155,13 @@ run_probe() {
 # Grepping the raw file would flag its own explanation -- the same
 # false-positive class the --allow-tool check below already had to fix.
 SELF_CODE="$(sed 's/#.*//' "${BASH_SOURCE[0]}")"
+# Matches BOTH spellings. It matched only `-p`, so a future edit reintroducing
+# `copilot --prompt ""` or `claude --prompt ""` would have kept this guard green
+# while recreating the session -- and the runtime half only counts COPILOT
+# session dirs, so a Claude long-form regression would have been invisible on
+# both checks. Found by an independent (non-Claude) review.
 check "this suite starts no CLI session (no '-p' invocation in code)" "yes" \
-    "$(printf '%s' "$SELF_CODE" | grep -qE '(copilot|claude)[^|;]*[[:space:]]-p[[:space:]]' && echo no || echo yes)"
+    "$(printf '%s' "$SELF_CODE" | grep -qE '(copilot|claude)[^|;]*[[:space:]](-p|--prompt)[[:space:]]' && echo no || echo yes)"
 
 # --- Regression guard 2 (runtime, only where copilot is installed) ---------
 # Belt and braces: count Copilot's session directories before and after. A
