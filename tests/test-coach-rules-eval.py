@@ -1944,6 +1944,13 @@ class SuggestionOverrideAndScopeTest(CoachRulesEvalBase):
             "SL_COACH_RULES_DIR": str(VENDOR_RULES),
             "SL_SEARCH_DB": str(self.db),
             "SL_COACH_SIGNALS_FILE": str(out),
+            # coach-signals.py now writes a named line to
+            # ${SL_LOG_DIR}/persist-failures.log when a route fails. With
+            # SL_LOG_DIR inherited-or-unset it falls back to paths.resolve_all(),
+            # i.e. the DEVELOPER'S REAL STORE (CLAUDE.md hard rule 1). Pinned to
+            # the temp dir so a regression in the rules route cannot make this
+            # suite write there.
+            "SL_LOG_DIR": str(Path(self.tmp) / "logs"),
             "SL_COPILOT_HOME": str(self.store),
             "CLAUDE_CONFIG_DIR": str(Path(self.tmp) / "no-claude"),
         })
