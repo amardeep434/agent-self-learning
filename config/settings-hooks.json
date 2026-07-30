@@ -7,6 +7,18 @@
     "SL_REVIEW_MAX_TURNS": "16"
   },
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash '__SL_SCRIPTS_DIR__/session-start-context.sh'",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "",

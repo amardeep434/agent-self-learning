@@ -36,6 +36,13 @@ check() { if [[ "$2" == "$3" ]]; then echo "PASS: $1"; else echo "FAIL: $1 (expe
 NORMALIZER="${SCRIPT_DIR}/scripts/lib/normalize-hook-path.py"
 TEMPLATE="${SCRIPT_DIR}/config/copilot-hooks.json"
 SCRIPT_NAME="copilot-session-review.sh"
+# Every script the real Copilot template registers. The single-line fixtures
+# below each contain one script, so they keep passing $SCRIPT_NAME -- but the
+# WHOLE-TEMPLATE cases must pass all of them, because the template gained a
+# sessionStart hook on 2026-07-30 and normalizing only one name leaves the other
+# path in place, which makes install.sh's textual freshness check see a
+# correctly-installed hook as permanently stale.
+ALL_SCRIPT_NAMES=(copilot-session-review.sh session-start-context.sh)
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -156,14 +163,14 @@ check "canonical: both powershell generations agree" "yes" \
 printf '%s' '/home/u/store/scripts' | python3 "${SCRIPT_DIR}/scripts/lib/render-template.py" "$TEMPLATE" > "${TMP}/current.json"
 tr -d "'" < "${TMP}/current.json" > "${TMP}/pre-quoting.json"
 check "canonical: rendered template equals its pre-quoting form" \
-    "$(python3 "$NORMALIZER" --canonical "$TEMPLATE" "$SCRIPT_NAME")" \
-    "$(python3 "$NORMALIZER" --canonical "${TMP}/pre-quoting.json" "$SCRIPT_NAME")"
+    "$(python3 "$NORMALIZER" --canonical "$TEMPLATE" "${ALL_SCRIPT_NAMES[@]}")" \
+    "$(python3 "$NORMALIZER" --canonical "${TMP}/pre-quoting.json" "${ALL_SCRIPT_NAMES[@]}")"
 # The mirror image, and the one that must NOT collapse: a real edit next to the
 # quoting still has to differ, or install.sh re-renders over it without a .bak.
 sed "s#bash '#bash /usr/bin/env bash '#" "${TMP}/current.json" > "${TMP}/edited.json"
 check "canonical: a user's wrapper still differs from the template" "differs" \
-    "$([[ "$(python3 "$NORMALIZER" --canonical "${TMP}/edited.json" "$SCRIPT_NAME")" \
-        == "$(python3 "$NORMALIZER" --canonical "$TEMPLATE" "$SCRIPT_NAME")" ]] \
+    "$([[ "$(python3 "$NORMALIZER" --canonical "${TMP}/edited.json" "${ALL_SCRIPT_NAMES[@]}")" \
+        == "$(python3 "$NORMALIZER" --canonical "$TEMPLATE" "${ALL_SCRIPT_NAMES[@]}")" ]] \
         && echo same || echo differs)"
 
 # --- 2. What must NOT be normalized ---
@@ -202,7 +209,7 @@ for store in '/home/u/store/scripts' '/home/u/My Store/scripts' 'C:/Users/u/My S
     printf '%s' "$store" | python3 "${SCRIPT_DIR}/scripts/lib/render-template.py" "$TEMPLATE" > "${TMP}/rendered.json"
     check "round trip restores the template: ${store}" \
         "$(cat "$TEMPLATE")" \
-        "$(python3 "$NORMALIZER" "${TMP}/rendered.json" "$SCRIPT_NAME")"
+        "$(python3 "$NORMALIZER" "${TMP}/rendered.json" "${ALL_SCRIPT_NAMES[@]}")"
 done
 
 # --- 3. The real consequence, through install.sh ---

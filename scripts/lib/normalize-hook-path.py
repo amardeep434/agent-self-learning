@@ -302,24 +302,33 @@ def _main(argv: list[str]) -> int:
         canonical = True
         argv = argv[1:]
 
-    if len(argv) != 2:
+    if len(argv) < 2:
         print(
             "usage: normalize-hook-path.py [--print-path|--canonical] "
-            "<hook-file> <script-basename>",
+            "<hook-file> <script-basename> [<script-basename> ...]",
             file=sys.stderr,
         )
         return 2
 
-    hook_path, script_name = argv
+    # Several basenames, because one hook FILE may register several scripts:
+    # Copilot's carries both sessionStart (session-start-context.sh) and
+    # sessionEnd (copilot-session-review.sh). This took exactly one name until
+    # 2026-07-30, so adding the second hook left its path un-normalized, which
+    # makes install.sh's textual freshness comparison see a correctly-installed
+    # hook as permanently stale -- the same class of silent-wrong-state the
+    # MSYS argv bug produced. Order does not matter: each name is scanned
+    # independently.
+    hook_path, script_names = argv[0], argv[1:]
 
     # A script name with a separator in it would make the scan's "rightmost
     # path start" question meaningless. Callers pass a basename.
-    if "/" in script_name or "\\" in script_name or not script_name:
-        print(
-            f"normalize-hook-path.py: {script_name!r} is not a bare basename",
-            file=sys.stderr,
-        )
-        return 2
+    for script_name in script_names:
+        if "/" in script_name or "\\" in script_name or not script_name:
+            print(
+                f"normalize-hook-path.py: {script_name!r} is not a bare basename",
+                file=sys.stderr,
+            )
+            return 2
 
     try:
         # newline="" so CRLF survives the round trip: install.sh diffs bytes.
@@ -338,11 +347,23 @@ def _main(argv: list[str]) -> int:
         # diffed against bytes, and a CR riding along would land in the middle
         # of the "previously ..." message. Prints nothing at all (exit 0) when
         # no path was found, so the caller's `${VAR:-<unknown>}` still fires.
-        out = "".join(p + "\n" for p in find_paths(text, script_name))
+        seen: list[str] = []
+        for script_name in script_names:
+            for found in find_paths(text, script_name):
+                # De-duplicated: every script in one hook file normally lives in
+                # the SAME scripts dir, so N names would otherwise print the
+                # same directory N times and the caller's `head -n 1` would hide
+                # a genuine disagreement between them.
+                if found not in seen:
+                    seen.append(found)
+        out = "".join(p + "\n" for p in seen)
     else:
-        out = normalize(text, script_name)
+        out = text
+        for script_name in script_names:
+            out = normalize(out, script_name)
         if canonical:
-            out = dequote(out, script_name)
+            for script_name in script_names:
+                out = dequote(out, script_name)
     sys.stdout.buffer.write(out.encode("utf-8"))
     sys.stdout.buffer.flush()
     return 0

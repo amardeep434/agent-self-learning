@@ -144,7 +144,8 @@ check "hostile credit string dropped" "no" \
 mkdir -p "$TMP/state"
 echo '{"generated_at":"2099-01-01T00:00:00Z","signals":[{"id":"x","severity":"low","suggestion":"s"}]}' > "$TMP/state/coach-signals.json"
 export SL_COACH_EXPORT_ENABLED=true SL_COACH_EXPORT_PATH="$TMP/export6.json"
-echo '{"antiPatterns":{"totalOccurrences":1,"topPatterns":[{"id":"x","name":"X","severity":"low","group":"g","occurrences":1,"description":"d","suggestion":"s"}]}}' > "$SL_COACH_EXPORT_PATH"
+# schemaVersion is required: see the same note in test-session-review.sh.
+echo '{"schemaVersion":1,"antiPatterns":{"totalOccurrences":1,"topPatterns":[{"id":"x","name":"X","severity":"low","group":"g","occurrences":1,"description":"d","suggestion":"s"}]}}' > "$SL_COACH_EXPORT_PATH"
 : > "$FAKE_COPILOT_LOG"
 sl_clear_review_marker "$SL_LOG_DIR"
 SL_COACH_SIGNALS_FILE="$TMP/state/coach-signals.json" bash "${SCRIPT_DIR}/scripts/copilot-session-review.sh" </dev/null

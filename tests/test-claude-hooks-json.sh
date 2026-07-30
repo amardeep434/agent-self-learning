@@ -36,7 +36,28 @@ check "no command sits directly on a matcher group (the flat schema)" "0" \
 
 # --- Every hook entry must be well-formed, whichever event it hangs off.
 ENTRY_COUNT="$(jq '[.hooks[][].hooks[]] | length' "$HOOK")"
-check "three hook entries (turn-counter, session-review, index-session)" "3" "$ENTRY_COUNT"
+# Deliberately NOT a hardcoded count. This asserted "3" until 2026-07-30, when
+# adding the SessionStart hook made it 4 -- the same drift CLAUDE.md already
+# records for suite counts ("Never hardcode a suite count anywhere -- it drifts
+# on every suite added or removed and has gone stale repeatedly"). What matters
+# is not how many entries there are but that every one names a script this
+# repository actually ships: a count catches a deletion and nothing else, while
+# this catches a typo, a rename, and a hook pointing at a script that was never
+# written.
+check "at least one hook entry exists" "yes" \
+    "$([[ "$ENTRY_COUNT" -ge 1 ]] && echo yes || echo no)"
+MISSING_SCRIPTS=""
+while IFS= read -r cmd; do
+    # Commands are `bash '__SL_SCRIPTS_DIR__/<name>'`; recover <name> without
+    # assuming the interpreter, so a future python3-invoked hook still passes.
+    name="${cmd##*__SL_SCRIPTS_DIR__/}"
+    name="${name%\'*}"
+    [[ -z "$name" || "$name" == "$cmd" ]] && continue
+    [[ -f "${SCRIPT_DIR}/scripts/${name}" ]] || MISSING_SCRIPTS="${MISSING_SCRIPTS} ${name}"
+done < <(jq -r '.hooks[][].hooks[].command' "$HOOK")
+check "every hook entry names a script that exists in scripts/" "" "$MISSING_SCRIPTS"
+check "SessionStart is registered (the learned-context read-back)" "yes" \
+    "$(jq -e '.hooks.SessionStart[0].hooks[0].command | test("session-start-context")' "$HOOK" >/dev/null 2>&1 && echo yes || echo no)"
 check "every entry has type=command" "$ENTRY_COUNT" \
     "$(jq '[.hooks[][].hooks[] | select(.type == "command")] | length' "$HOOK")"
 
