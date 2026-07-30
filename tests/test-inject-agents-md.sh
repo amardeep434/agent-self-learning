@@ -118,7 +118,12 @@ BIG_LOG="${BIG_STORE}/logs/persist-failures.log"
 # One line carrying all three facts, not three facts scattered over the file:
 # an advisory naming a different file than the size it reports is a bug this
 # would otherwise pass.
-BIG_ADVISORY_LINES=$(grep -F "${BIG_STORE}/memory/MEMORY.md" "$BIG_LOG" 2>/dev/null \
+# Basename, not the full path: bash and Python spell the same directory
+# differently under Git Bash, so "${BIG_STORE}/memory/MEMORY.md" cannot match a
+# Python-written log line there (green on Linux, red on both Windows cells).
+# MEMORY.md is the only memory file, so the basename still identifies it, and
+# all three facts are still required on ONE line.
+BIG_ADVISORY_LINES=$(grep -F "MEMORY.md" "$BIG_LOG" 2>/dev/null \
                      | grep -F "$BIG_BYTES" | grep -c 2200 || true)
 check "oversized memory: exactly one advisory names the file, its measured size and the budget" "1" \
     "$BIG_ADVISORY_LINES"

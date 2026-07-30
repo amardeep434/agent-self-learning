@@ -63,8 +63,15 @@ AFTER=$(stat -c %Y "${TARGET}/SKILL.md" 2>/dev/null || stat -f %m "${TARGET}/SKI
 # outcomes into one message makes them equal and fails.
 check "B: the report distinguishes a writing run from a no-op run" "no" \
     "$([[ "$OUT_FIRST" == "$OUT" ]] && echo yes || echo no)"
+# Matched on the ROOT-DISCRIMINATING SUFFIX after normalising separators, not
+# on the full path. bash and Python disagree on how to spell the same
+# directory under Git Bash -- bash has "/tmp/..." where Python writes
+# "C:\\Users\\..." -- so a grep for "${HOME_DIR}/..." can never match a
+# Python-written line there. It passed on Linux and failed on both Windows
+# cells. What the assertion actually needs to prove is WHICH root was
+# reported (claude vs copilot), and ".claude/skills" carries that.
 check "B: and the no-op run still reports on the right root" "yes" \
-    "$(printf '%s' "$OUT" | grep -Fq "${HOME_DIR}/.claude/skills" && echo yes || echo no)"
+    "$(printf '%s' "$OUT" | tr '\\\\' '/' | grep -Fq ".claude/skills" && echo yes || echo no)"
 check "B: file not rewritten (mtime stable)" "$BEFORE" "$AFTER"
 
 # ---------------------------------------------------------------------------
@@ -91,7 +98,7 @@ check "C: no marker planted in the user's directory" "no" \
 # -- because "3 skipped" without a name does not tell the user what to rename.
 COLLISION_LOG="${STORE}/logs/persist-failures.log"
 check "C: the collision reaches persist-failures.log naming the root and the skill" "1" \
-    "$(grep -F "${HOME_DIR}/.claude/skills" "$COLLISION_LOG" 2>/dev/null | grep -c 'collision' || true)"
+    "$(tr '\\\\' '/' < "$COLLISION_LOG" 2>/dev/null | grep -F ".claude/skills" | grep -c 'collision' || true)"
 check "C: and stdout names the colliding skill too, for an interactive run" "yes" \
     "$(printf '%s' "$OUT" | grep -Fq 'collision' && echo yes || echo no)"
 
