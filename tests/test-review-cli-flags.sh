@@ -164,7 +164,19 @@ check "this suite starts no CLI session (no '-p' invocation in code)" "yes" \
 # as absence is the exact verification defect that let the original claim
 # ("no tokens and no quota") stand unchallenged in this file's own header.
 COPILOT_SESSION_DIR="${HOME}/.copilot/session-state"
-count_copilot_sessions() { ls -1 "$COPILOT_SESSION_DIR" 2>/dev/null | wc -l | tr -d ' '; }
+# `2>/dev/null` silences ls's MESSAGE but not its EXIT STATUS. With
+# `set -euo pipefail`, a missing session-state directory made `ls` fail,
+# pipefail propagated it, and the assignment below aborted the whole suite --
+# exit 2 (ls's own code) after a single PASS and with no FAIL line, which reads
+# as a crash rather than a failed assertion. Green on this developer's machine,
+# red on all six CI cells, because CI has no ~/.copilot at all.
+#
+# A machine that has never run Copilot has zero sessions; that is the answer,
+# not an error. Guard on the directory instead of swallowing the status.
+count_copilot_sessions() {
+    [[ -d "$COPILOT_SESSION_DIR" ]] || { printf '0'; return 0; }
+    ls -1 "$COPILOT_SESSION_DIR" | wc -l | tr -d ' '
+}
 SESSIONS_BEFORE="$(count_copilot_sessions)"
 
 # --- GitHub Copilot CLI ----------------------------------------------------
