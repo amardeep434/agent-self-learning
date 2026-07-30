@@ -104,11 +104,24 @@ check "oversized memory: nothing dropped (block >= source bytes)" "yes" \
     "$([[ "$BLOCK_BYTES" -ge "$BIG_BYTES" ]] && echo yes || echo no)"
 
 # Loud, not silent: over-budget must be named in persist-failures.log.
+#
+# Asserted on IDENTIFIERS AND MEASURED FIGURES, never on the advisory's wording.
+# This used to be `grep -qi 'consolidat'`, and MEASURED 2026-07-30: rewording
+# "Consolidate overlapping entries" to "Please merge overlapping entries" --
+# behaviour bit-identical, still logged, still injected in full -- turned this
+# suite red. A test that fails on a synonym while a real regression walks past
+# it teaches people to edit the test, which is how an assertion stops meaning
+# anything. What the advisory must actually do is name WHICH file, HOW BIG it
+# measured, and WHAT budget it exceeded, all on one line -- so that is what is
+# checked. The neighbouring $BIG_BYTES grep was already the right pattern.
 BIG_LOG="${BIG_STORE}/logs/persist-failures.log"
-check "oversized memory: logged a named reason" "yes" \
-    "$([[ -s "$BIG_LOG" ]] && grep -qi 'consolidat' "$BIG_LOG" && echo yes || echo no)"
-check "oversized memory: reason states the measured size" "yes" \
-    "$(grep -q "$BIG_BYTES" "$BIG_LOG" && echo yes || echo no)"
+# One line carrying all three facts, not three facts scattered over the file:
+# an advisory naming a different file than the size it reports is a bug this
+# would otherwise pass.
+BIG_ADVISORY_LINES=$(grep -F "${BIG_STORE}/memory/MEMORY.md" "$BIG_LOG" 2>/dev/null \
+                     | grep -F "$BIG_BYTES" | grep -c 2200 || true)
+check "oversized memory: exactly one advisory names the file, its measured size and the budget" "1" \
+    "$BIG_ADVISORY_LINES"
 
 # And a file UNDER budget must stay quiet -- an advisory that always fires is
 # noise, and doctor.sh distinguishes an absent log from an empty one.

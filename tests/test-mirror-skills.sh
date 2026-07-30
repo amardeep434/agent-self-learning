@@ -33,7 +33,7 @@ run_mirror() {
 # ---------------------------------------------------------------------------
 setup
 add_skill "probe-before-inferring" "Probe the platform, never infer from its name."
-run_mirror > /dev/null
+OUT_FIRST=$(run_mirror)
 TARGET="${HOME_DIR}/.claude/skills/probe-before-inferring"
 check "A: skill directory created in the harness location" "yes" \
     "$([[ -f "${TARGET}/SKILL.md" ]] && echo yes || echo no)"
@@ -53,8 +53,18 @@ BEFORE=$(stat -c %Y "${TARGET}/SKILL.md" 2>/dev/null || stat -f %m "${TARGET}/SK
 sleep 1
 OUT=$(run_mirror)
 AFTER=$(stat -c %Y "${TARGET}/SKILL.md" 2>/dev/null || stat -f %m "${TARGET}/SKILL.md")
-check "B: second run reports unchanged" "yes" \
-    "$(printf '%s' "$OUT" | grep -q 'unchanged=1' && echo yes || echo no)"
+# DIFFERENTIAL, not phrase-matched. This was `grep -q 'unchanged=1'`, which
+# locks the tally's key spelling and its punctuation: renaming the action to
+# "up-to-date" or printing "unchanged: 1" fails it while the behaviour is
+# identical. What must be true is that the report DISTINGUISHES a run that
+# wrote from a run that did not -- if it does not, the report cannot tell a
+# working mirror from a dead one, which is this project's signature failure.
+# A reword changes both strings and they still differ; collapsing the two
+# outcomes into one message makes them equal and fails.
+check "B: the report distinguishes a writing run from a no-op run" "no" \
+    "$([[ "$OUT_FIRST" == "$OUT" ]] && echo yes || echo no)"
+check "B: and the no-op run still reports on the right root" "yes" \
+    "$(printf '%s' "$OUT" | grep -Fq "${HOME_DIR}/.claude/skills" && echo yes || echo no)"
 check "B: file not rewritten (mtime stable)" "$BEFORE" "$AFTER"
 
 # ---------------------------------------------------------------------------
@@ -73,8 +83,17 @@ OUT=$(run_mirror)
 check "C: user's file left byte-identical" "$USER_SUM" "$(cksum < "${USERS}/SKILL.md")"
 check "C: no marker planted in the user's directory" "no" \
     "$([[ -f "${USERS}/${MARKER}" ]] && echo yes || echo no)"
-check "C: the collision is reported, not silent" "yes" \
-    "$(printf '%s' "$OUT" | grep -q 'not created by us' && echo yes || echo no)"
+# Reported where a human or doctor.sh will actually SEE it. The old assertion
+# was `grep -q 'not created by us'` against stdout -- one sentence, and the
+# wrong channel: the session-start hook runs this with --quiet and discards both
+# streams, so stdout is nobody's signal. persist-failures.log is (hard rule 2).
+# Asserted on the identifiers the line must carry -- WHICH root and WHICH skill
+# -- because "3 skipped" without a name does not tell the user what to rename.
+COLLISION_LOG="${STORE}/logs/persist-failures.log"
+check "C: the collision reaches persist-failures.log naming the root and the skill" "1" \
+    "$(grep -F "${HOME_DIR}/.claude/skills" "$COLLISION_LOG" 2>/dev/null | grep -c 'collision' || true)"
+check "C: and stdout names the colliding skill too, for an interactive run" "yes" \
+    "$(printf '%s' "$OUT" | grep -Fq 'collision' && echo yes || echo no)"
 
 # ---------------------------------------------------------------------------
 # D) Pruning. curator-run.sh archives and DELETES skills, so a mirror that only
@@ -89,12 +108,20 @@ check "D: both mirrored initially" "2" \
     "$(find "${HOME_DIR}/.claude/skills" -name SKILL.md | wc -l | tr -d ' ')"
 rm -rf "${STORE}/learned-skills/delete-me"
 OUT=$(run_mirror)
+OUT_AFTER_PRUNE=$(run_mirror)
 check "D: removed-from-store skill is pruned" "no" \
     "$([[ -d "${HOME_DIR}/.claude/skills/delete-me" ]] && echo yes || echo no)"
 check "D: the surviving skill is still there" "yes" \
     "$([[ -f "${HOME_DIR}/.claude/skills/keep-me/SKILL.md" ]] && echo yes || echo no)"
-check "D: pruning is reported" "yes" \
-    "$(printf '%s' "$OUT" | grep -q 'pruned=1' && echo yes || echo no)"
+# DIFFERENTIAL again, for the same reason as case B: `grep -q 'pruned=1'` locks
+# the key spelling and the "=" separator, not the behaviour. The behaviour is
+# that a run which DELETED something must not report the same thing as a run
+# which deleted nothing -- otherwise a destructive action is indistinguishable
+# from a no-op in the only output there is. OUT_AFTER_PRUNE is the immediately
+# following run, identical in every respect except that there is nothing left
+# to prune.
+check "D: a pruning run reports differently from a run with nothing to prune" "no" \
+    "$([[ "$OUT" == "$OUT_AFTER_PRUNE" ]] && echo yes || echo no)"
 
 # ---------------------------------------------------------------------------
 # E) Pruning must NEVER delete an unmarked directory. This is the destructive
@@ -166,8 +193,17 @@ NO_HOME_OUT=$(env -i PATH="$PATH" python3 "$MIRROR" 2>&1 || true)
 NO_HOME_RC=0
 env -i PATH="$PATH" python3 "$MIRROR" > /dev/null 2>&1 || NO_HOME_RC=$?
 check "H: no resolvable home exits 1, not a crash" "1" "$NO_HOME_RC"
-check "H: and says why" "yes" \
-    "$(printf '%s' "$NO_HOME_OUT" | grep -qi 'cannot resolve' && echo yes || echo no)"
+# Not `grep -qi 'cannot resolve'`: that pins one phrase of a message whose
+# informative half is the exception text from paths.py, which this file does not
+# own. What must hold is that the failure is ATTRIBUTED and legible -- non-empty
+# diagnostic output, carrying this program's name so a user reading a hook log
+# knows which of several detached scripts died, and no traceback (asserted
+# below). Silence with exit 1 is the failure this catches, and it is the one
+# that actually happened.
+check "H: and says why (a non-empty diagnostic, not a silent exit 1)" "yes" \
+    "$([[ -n "${NO_HOME_OUT//[[:space:]]/}" ]] && echo yes || echo no)"
+check "H: and the diagnostic attributes itself to this script" "yes" \
+    "$(printf '%s' "$NO_HOME_OUT" | grep -Fq 'mirror-skills' && echo yes || echo no)"
 check "H: no Python traceback reaches the user" "no" \
     "$(printf '%s' "$NO_HOME_OUT" | grep -q 'Traceback' && echo yes || echo no)"
 
