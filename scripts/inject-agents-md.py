@@ -13,6 +13,7 @@ default, which would be wrong-location on Copilot CLI and VS Code):
 Everything outside the marker pair is preserved byte-for-byte.
 """
 
+import importlib.util
 import os
 import sys
 from pathlib import Path
@@ -66,6 +67,72 @@ def _log_advisory(message: str) -> None:
         pass
 
 
+_scan_threats_module = None
+
+
+def _scan_threats():
+    """Load scripts/scan-threats.py by path.
+
+    Same loader shape as lib/transcript.py's -- the filename is hyphenated, so
+    it is not importable as a module name, and there is exactly one
+    THREAT_PATTERNS table in this project on purpose.
+    """
+    global _scan_threats_module
+    if _scan_threats_module is None:
+        path = Path(__file__).resolve().parent / "scan-threats.py"
+        spec = importlib.util.spec_from_file_location("sl_scan_threats_inject", path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load scan-threats.py from {path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _scan_threats_module = module
+    return _scan_threats_module
+
+
+def _gate_line(text: str) -> "tuple[str, str | None]":
+    """Return (safe_text, blocked_category).
+
+    A line that trips a threat pattern is replaced wholesale, not edited: a
+    partial rewrite of an injection attempt can still carry the instruction,
+    and the categories here (prompt_injection, credentials, private keys) are
+    ones where no part of the line is worth keeping.
+    """
+    if not text.strip():
+        return text, None
+    try:
+        findings = _scan_threats().scan_for_threats(text, scope="strict")
+    except (ImportError, OSError, AttributeError):
+        # A threat table we cannot load must not silently become "no threats".
+        # Fail closed: block the line and say why.
+        return "[BLOCKED: threat scanner unavailable]", "scanner_unavailable"
+    if not findings:
+        return text, None
+    category = findings[0].get("category", "unknown")
+    return f"[BLOCKED: {category}]", category
+
+
+def gate_for_injection(text: str) -> "tuple[str, list[str]]":
+    """Gate text line by line, returning (safe_text, blocked_categories).
+
+    Hermes' pattern, both halves: the blocked marker goes into the INJECTED
+    text and the raw entry stays on disk untouched, so the user can still see
+    and remove it (tools/memory_tool.py load_from_disk / snapshot sanitisation).
+    Dropping the line instead would hide the attack; rewriting the file would
+    destroy the evidence.
+
+    Line granularity suits MEMORY.md, which is one lesson per line -- one
+    poisoned entry costs that entry, not the whole block.
+    """
+    blocked: list[str] = []
+    safe_lines: list[str] = []
+    for line in text.splitlines():
+        safe, category = _gate_line(line)
+        if category:
+            blocked.append(category)
+        safe_lines.append(safe)
+    return "\n".join(safe_lines), blocked
+
+
 def _inject_budget() -> int:
     raw = os.environ.get("SL_MEMORY_INJECT_BUDGET", "")
     try:
@@ -93,6 +160,15 @@ def read_memory(memory_dir: Path) -> str:
             f"{memory_file} is {size} bytes, over the {budget}-byte injection "
             "budget -- injected in full anyway (never truncated). Consolidate "
             "overlapping entries to bring it back under budget."
+        )
+    content, blocked = gate_for_injection(content)
+    if blocked:
+        _log_advisory(
+            f"{memory_file}: BLOCKED {len(blocked)} memory line(s) from the "
+            f"injected block (categories: {', '.join(sorted(set(blocked)))}). "
+            "The raw lines are UNCHANGED on disk -- read them and delete them "
+            "if they are hostile. Injected content reaches every future "
+            "session, so a match is gated rather than trusted."
         )
     return content.strip()
 
@@ -122,7 +198,19 @@ def list_skills(skills_dir: Path) -> list:
             continue
         skill_md = skill_layout.skill_md_path(skills_dir, child.name)
         if skill_md.is_file():
-            entries.append((child.name, read_skill_description(skill_md)))
+            # The description is injected verbatim, so it is gated exactly like
+            # a memory line. The skill NAME is kept either way: a name is not a
+            # sentence and cannot carry an instruction, and dropping the row
+            # entirely would hide the poisoned skill instead of flagging it.
+            description, blocked = gate_for_injection(read_skill_description(skill_md))
+            if blocked:
+                _log_advisory(
+                    f"{skill_md}: BLOCKED this skill's description from the "
+                    f"injected block (categories: {', '.join(sorted(set(blocked)))}). "
+                    "The skill is still listed by name. The file is UNCHANGED "
+                    "on disk -- read it and delete the skill if it is hostile."
+                )
+            entries.append((child.name, description))
     return entries
 
 
