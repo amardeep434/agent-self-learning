@@ -57,14 +57,29 @@ equivalents) in addition to the store.
 
 ### Route C — both
 
-Route A for skills (discovery), Route B for `MEMORY.md` (no native home for it).
-Most faithful to Hermes, which delivers memory and skills through *different* channels.
-Most work.
+Not a third body of work. C is the **end state** in which A and B both exist: Route B
+carries `MEMORY.md`, Route A carries skills. Most faithful to Hermes, which delivers memory
+and skills through *different* channels for exactly this reason.
 
-**Recommendation: C, staged — B first for memory, then A for skills.** Memory has no
-harness-native location, so it needs B regardless; skills already have one, so A is
-strictly less machinery than injecting them. But A crosses the neutrality line, so B
-first delivers value without forcing that call.
+### Recommendation: reach C in two ordered steps
+
+**Step 1 — Route B, for memory only.** The hook reads `MEMORY.md` and returns it as
+`additionalContext`. This is required under every scenario: `MEMORY.md` has no
+harness-native location, so no harness will ever discover it on its own. Injection is the
+only available route for memory.
+
+**Step 2 — Route A, for skills only.** Write each learned skill to
+`~/.claude/skills/<name>/SKILL.md` and the Copilot/VS Code equivalents. Skills *do* have a
+native home, so this needs no hook, and progressive disclosure comes free — name and
+description in the prompt, body loaded on demand.
+
+**Why this order.** Step 2 writes into a harness-owned directory and so crosses the
+harness-neutrality rule; step 1 touches nothing under `~/.claude`. Doing step 1 first
+delivers working memory read-back without settling the neutrality question, and leaves
+step 2 to be judged on its own merits — including the option of declining it, in which
+case memory is delivered and skills remain undelivered.
+
+Prerequisites for step 1 are P0.1 (§3) and P1.1 (§4), not part of it.
 
 ---
 
