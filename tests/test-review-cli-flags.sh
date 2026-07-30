@@ -19,9 +19,49 @@
 # the dev box all along. "Absent locally" had been standing in for
 # "unverifiable" without anyone checking.
 #
-# NO MODEL CALLS. Everything here is `--help` parsing plus one control
-# experiment (an unknown flag must error) -- no prompt is ever executed, so
-# this costs no tokens and no quota.
+# NO MODEL CALLS, AND NO SESSIONS (2026-07-30)
+# ---------------------------------------------
+# The paragraph that used to sit here claimed "no prompt is ever executed, so
+# this costs no tokens and no quota". That was FALSE for one line. The
+# acceptance probes were shaped `copilot --max-ai-credits 30 -p ""` and
+# `claude --max-turns 16 -p ""` -- a syntactically VALID argv, which each CLI
+# parses successfully and then rejects on the empty prompt. Copilot rejects it
+# *after* opening a session.
+#
+# MEASURED 2026-07-30, this suite alone, against the developer's live store:
+#   ~/.local/share/agent-learning        30990693 -> 30991006 bytes  (+313)
+#   ~/.local/share/agent-learning/logs/persist.log  47045 -> 47358   (+313)
+#   ~/.copilot/session-state/                    271 -> 272 entries  (+1)
+# The +313 is the user's own installed sessionEnd hook firing on the session
+# this test created. A test suite was writing to the store under test.
+#
+# Isolated in a sandboxed HOME, one invocation form at a time:
+#   copilot --max-ai-credits 30 -p ""        sessions 0 -> 1   <-- the cause
+#   copilot --sl-not-a-real-flag -p ""       sessions 1 -> 1   (errors first)
+#   copilot --max-ai-credits 30 --help       sessions 0 -> 0
+#   copilot --max-ai-credits 29 --help       sessions 0 -> 0
+#   claude  --max-turns 16 -p ""             $HOME files 0 -> 2 (.claude/sessions)
+#   claude  --max-turns notanumber --help    $HOME files 0 -> 0
+#
+# So every probe below is now `<argv under test> --help`, which both CLIs parse
+# fully before printing usage and exiting -- no session, no prompt, no credits.
+#
+# WHY THIS IS A STRONGER GUARD, NOT A WEAKER ONE
+# ----------------------------------------------
+# `--help` alone would be weaker: measured, BOTH CLIs print usage and exit 0
+# for `--sl-not-a-real-flag --help` with no "unknown option" error, so a
+# silently-swallowed flag would pass an acceptance check phrased as "no error".
+# That trap is why the acceptance probe is PAIRED with a deliberately-invalid
+# VALUE for the same flag:
+#   copilot --max-ai-credits 29    -> error: ... argument '29' is invalid.
+#                                     Use at least 30 AI credits.
+#   claude  --max-turns notanumber -> error: option '--max-turns <turns>'
+#                                     argument 'notanumber' is invalid.
+# An UNDECLARED option cannot produce a validator error naming itself. So the
+# invalid-value probe proves the option is declared AND parsed AND validated,
+# which the old `-p ""` control never did -- it only proved "not rejected as
+# unknown". The pair (invalid value errors / real value does not) is what
+# detects flag drift, and it detects the credit MINIMUM moving too.
 #
 # Capability-probed, never platform-branched: where a CLI is absent this
 # says so loudly and moves on. Both are absent on CI runners, so in CI this
@@ -80,6 +120,30 @@ run_probe() {
     fi
 }
 
+# --- Regression guard 1 (source level, runs everywhere) --------------------
+# The defect this suite carried for months was a single VALID argv ending in
+# `-p ""`. It cost a live session dir, a write into the store under test, and
+# a paid-credit risk -- and it read as harmless, because the header said so.
+# Assert at the source level that no such invocation comes back. This runs on
+# CI too, where neither CLI is installed and every runtime probe below skips,
+# so it is the only guard that is always in force.
+#
+# Comment-stripped: the header above quotes the offending forms verbatim.
+# Grepping the raw file would flag its own explanation -- the same
+# false-positive class the --allow-tool check below already had to fix.
+SELF_CODE="$(sed 's/#.*//' "${BASH_SOURCE[0]}")"
+check "this suite starts no CLI session (no '-p' invocation in code)" "yes" \
+    "$(printf '%s' "$SELF_CODE" | grep -qE '(copilot|claude)[^|;]*[[:space:]]-p[[:space:]]' && echo no || echo yes)"
+
+# --- Regression guard 2 (runtime, only where copilot is installed) ---------
+# Belt and braces: count Copilot's session directories before and after. A
+# BYTE/ENTRY COUNT, not the emptiness of a command's output -- reading silence
+# as absence is the exact verification defect that let the original claim
+# ("no tokens and no quota") stand unchallenged in this file's own header.
+COPILOT_SESSION_DIR="${HOME}/.copilot/session-state"
+count_copilot_sessions() { ls -1 "$COPILOT_SESSION_DIR" 2>/dev/null | wc -l | tr -d ' '; }
+SESSIONS_BEFORE="$(count_copilot_sessions)"
+
 # --- GitHub Copilot CLI ----------------------------------------------------
 if command -v copilot >/dev/null 2>&1; then
     echo "[capability probe] copilot: AVAILABLE"
@@ -115,14 +179,29 @@ if command -v copilot >/dev/null 2>&1; then
         "$(run_probe 60 copilot help limits 2>&1 | grep -qF -- '--max-ai-credits' && echo yes || echo no)"
     check "copilot's documented credit minimum is still 30" "yes" \
         "$(run_probe 60 copilot help limits 2>&1 | grep -qiE 'minimum: *30' && echo yes || echo no)"
-    # Control experiment, same shape as the Claude one below: prove the CLI
-    # rejects unknown options, so "accepted" means something.
-    COPILOT_UNKNOWN="$(run_probe 60 copilot --sl-definitely-not-a-real-flag -p "" </dev/null 2>&1 || true)"
-    check "copilot control: unknown flags DO error" "yes" \
-        "$(printf '%s' "$COPILOT_UNKNOWN" | grep -qi "unknown option" && echo yes || echo no)"
-    COPILOT_CREDITS_ERR="$(run_probe 60 copilot --max-ai-credits 30 -p "" </dev/null 2>&1 || true)"
+    # PARSER CONTROL + EXISTENCE PROOF in one probe, and without a session.
+    # A value below the documented minimum must be rejected BY NAME. Only a
+    # DECLARED option can emit a validator error naming itself; an undeclared
+    # one is swallowed silently in `--help` form (measured -- see the header).
+    # So a PASS here proves --max-ai-credits still exists, is still parsed,
+    # and its floor is still the 30 that copilot-session-review.sh validates
+    # against. This replaces the old `-p ""` control, which started a real
+    # session and only ever proved "not rejected as unknown".
+    COPILOT_CREDITS_LOW="$(run_probe 60 copilot --max-ai-credits 29 --help </dev/null 2>&1 || true)"
+    check "copilot control: --max-ai-credits validator still rejects 29" "yes" \
+        "$(printf '%s' "$COPILOT_CREDITS_LOW" | grep -qiE 'max-ai-credits' && \
+           printf '%s' "$COPILOT_CREDITS_LOW" | grep -qiE 'invalid' && echo yes || echo no)"
+    check "copilot's rejection still names 30 as the floor" "yes" \
+        "$(printf '%s' "$COPILOT_CREDITS_LOW" | grep -qiE 'at least 30' && echo yes || echo no)"
+    # ...and the value the script actually passes must clear that validator.
+    COPILOT_CREDITS_OK="$(run_probe 60 copilot --max-ai-credits 30 --help </dev/null 2>&1 || true)"
     check "copilot accepts --max-ai-credits 30" "yes" \
-        "$(printf '%s' "$COPILOT_CREDITS_ERR" | grep -qi "unknown option" && echo no || echo yes)"
+        "$(printf '%s' "$COPILOT_CREDITS_OK" | grep -qiE 'error:|unknown option' && echo no || echo yes)"
+
+    # The full argv shape copilot-session-review.sh builds, parsed end to end.
+    COPILOT_ARGV_ERR="$(run_probe 60 copilot --allow-tool read --max-ai-credits 30 --help </dev/null 2>&1 || true)"
+    check "copilot accepts the argv copilot-session-review.sh builds" "yes" \
+        "$(printf '%s' "$COPILOT_ARGV_ERR" | grep -qiE 'error:|unknown option' && echo no || echo yes)"
 
     # And the script must not be passing anything the CLI does not accept.
     # Comment-stripped: the script CONTAINS the string "--allow-tool write"
@@ -147,20 +226,34 @@ if command -v claude >/dev/null 2>&1; then
 
     # --max-turns is NOT listed in `claude --help` on 2.1.220, but it IS
     # accepted. Absence from help text proves nothing either way, so this
-    # uses a control experiment instead of grepping: an unknown flag must
-    # produce "unknown option", and the flag under test must not. Both runs
-    # use an empty prompt, which the CLI rejects before contacting any
-    # model -- no tokens are spent.
-    UNKNOWN_ERR="$(run_probe 60 claude --sl-definitely-not-a-real-flag -p "" </dev/null 2>&1 || true)"
-    MAXTURNS_ERR="$(run_probe 60 claude --max-turns 16 -p "" </dev/null 2>&1 || true)"
-    CONTROL_OK="$(printf '%s' "$UNKNOWN_ERR" | grep -qi "unknown option" && echo yes || echo no)"
+    # uses a control experiment instead of grepping.
+    #
+    # The control used to be `claude --sl-not-a-real-flag -p ""` paired with
+    # `claude --max-turns 16 -p ""`. The empty prompt is rejected before any
+    # model call, so no tokens were spent -- but MEASURED 2026-07-30 in a
+    # sandboxed HOME, the second form still created $HOME/.claude/sessions
+    # (2 files) before erroring. A test for a vendor-neutral project should
+    # not materialise a harness's private state directory to run.
+    #
+    # Same proof, `--help` form, zero files created: an INVALID VALUE for
+    # --max-turns must be rejected by name. An undeclared option is swallowed
+    # silently in `--help` form (measured: `claude --sl-not-a-real-flag
+    # --help` prints usage and exits 0, no error), so only a declared,
+    # parsed, validated option can produce this message.
+    MAXTURNS_BAD="$(run_probe 60 claude --max-turns notanumber --help </dev/null 2>&1 || true)"
+    CONTROL_OK="$(printf '%s' "$MAXTURNS_BAD" | grep -qiE 'max-turns' && \
+                  printf '%s' "$MAXTURNS_BAD" | grep -qiE 'invalid' && echo yes || echo no)"
     if [[ "$CONTROL_OK" == "yes" ]]; then
-        check "claude accepts --max-turns (control: unknown flags DO error)" "yes" \
-            "$(printf '%s' "$MAXTURNS_ERR" | grep -qi "unknown option" && echo no || echo yes)"
+        echo "PASS: claude control: --max-turns is a declared, validated option"
+        MAXTURNS_OK="$(run_probe 60 claude --max-turns 16 --help </dev/null 2>&1 || true)"
+        check "claude accepts --max-turns 16" "yes" \
+            "$(printf '%s' "$MAXTURNS_OK" | grep -qiE 'error:|unknown option' && echo no || echo yes)"
     else
-        echo "[capability probe] claude: the control experiment did not produce an"
-        echo "  'unknown option' error, so this CLI cannot be probed this way. The"
-        echo "  --max-turns check is INCONCLUSIVE here -- reported, not assumed."
+        echo "[capability probe] claude: --max-turns produced no value-validation"
+        echo "  error for a non-numeric argument, so this CLI cannot be probed this"
+        echo "  way. The --max-turns check is INCONCLUSIVE here -- reported, not"
+        echo "  assumed. Output was:"
+        printf '%s\n' "$MAXTURNS_BAD" | head -3 | sed 's/^/    /'
     fi
 
     check "session-review.sh passes a turn cap" "yes" \
@@ -178,13 +271,26 @@ if command -v claude >/dev/null 2>&1; then
     done
     if [[ "$CONTROL_OK" == "yes" ]]; then
         RESTRICT_ERR="$(run_probe 60 claude --allowedTools "Read,Glob,Grep" \
-            --disallowedTools "Write,Edit,NotebookEdit" -p "" </dev/null 2>&1 || true)"
+            --disallowedTools "Write,Edit,NotebookEdit" --max-turns 16 --help </dev/null 2>&1 || true)"
         check "claude accepts the tool-restriction argv session-review.sh builds" "yes" \
-            "$(printf '%s' "$RESTRICT_ERR" | grep -qi "unknown option" && echo no || echo yes)"
+            "$(printf '%s' "$RESTRICT_ERR" | grep -qiE 'error:|unknown option' && echo no || echo yes)"
     fi
 else
     echo "[capability probe] claude: NOT AVAILABLE -- the Claude Code flag checks did"
     echo "  NOT run. Reported, not silently passed."
+fi
+
+# --- Regression guard 2, the measurement ------------------------------------
+SESSIONS_AFTER="$(count_copilot_sessions)"
+if [[ "$SESSIONS_BEFORE" == "$SESSIONS_AFTER" ]]; then
+    echo "PASS: no Copilot session created by this suite (${COPILOT_SESSION_DIR}:" \
+         "${SESSIONS_BEFORE} entries before and after)"
+else
+    echo "FAIL: this suite created Copilot session state -- ${COPILOT_SESSION_DIR}" \
+         "went ${SESSIONS_BEFORE} -> ${SESSIONS_AFTER}. A probe above is running a"
+    echo "      real session (and firing the user's sessionEnd hook into the live"
+    echo "      store). Use the '<argv> --help' form instead of '-p'."
+    FAILURES=$((FAILURES+1))
 fi
 
 if [[ "$FAILURES" -gt 0 ]]; then exit 1; fi
