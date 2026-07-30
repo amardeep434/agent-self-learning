@@ -327,6 +327,27 @@ done
 echo ""
 
 # --- Step 3: Copy prompts (if present) ---
+#
+# Only two files remain here, and both are STORE-SIDE artifacts a human or a
+# subagent reads against an installed store:
+#   curator-review.md      -- the consolidation prompt for the opt-in pass
+#                             curator-run.sh prepares an inventory for
+#                             (see its "LLM consolidation requires manual
+#                             trigger" branch); nothing runs it automatically.
+#   authoring-standards.md -- the standards curator-review.md cross-references.
+#
+# The three REVIEW prompts that used to live here (memory-review.md,
+# skill-review.md, combined-review.md) were deleted 2026-07-31. They were
+# installed into every store and read by nothing -- the real review prompts
+# are inline in session-review.sh / copilot-session-review.sh /
+# vscode-session-review.sh, which share their common sections through
+# lib/review-common.sh. Worse than dead, they were WRONG: they named
+# ~/.claude/memory and ~/.claude/learned-skills (paths this project stopped
+# using at Task 7b), they told the reviewer to write files itself (the
+# pipeline inverted to reviewer-proposes / writer-persists), and they
+# prescribed a lowercase-kebab skill-name regex the schema rejects.
+#
+# Do not re-add a prompt file here unless something actually reads it.
 
 echo "Step 3: Copying prompt templates..."
 

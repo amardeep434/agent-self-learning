@@ -588,8 +588,12 @@ config/     self-learning.yaml / .conf   defaults; .conf is what actually ships
             vscode-hooks.json            hook template — VS Code (Claude Code's schema,
                                            which VS Code parses; not Copilot CLI's)
             claude-md-snippet.md         self-learning protocol for CLAUDE.md
-prompts/    memory-review / skill-review / combined-review / curator-review
+prompts/    curator-review.md            prompt for the curator's opt-in manual
+                                           consolidation pass (curator-run.sh
+                                           prepares its inventory; a human runs it)
             authoring-standards.md       skill authoring standards
+            (the review prompts are NOT here — they are inline in the three
+             review scripts, sharing lib/review-common.sh. See that file.)
 schema/     session-search-schema.sql    base sessions/messages schema, always applied
             session-search-fts5.sql      FTS5 index + triggers, applied only when
                                            probe_fts5() confirms support
