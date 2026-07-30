@@ -273,6 +273,7 @@ SCRIPTS=(
     "inject-agents-md.py"
     "session-start-context.py"
     "session-start-context.sh"
+    "mirror-skills.py"
     "coach-rules-eval.py"
     "coach-export-read.py"
     "coach-signals.py"

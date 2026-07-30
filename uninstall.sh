@@ -140,6 +140,39 @@ if [[ -f "$SETTINGS" ]] && grep -qE "$SL_HOOK_PATTERN" "$SETTINGS"; then
     fi
 fi
 
+# --- Mirrored skills (Route A) ---
+#
+# mirror-skills.py publishes learned skills into each harness's own skills
+# directory, which is the only place a harness discovers them. Those copies are
+# DELIVERY artifacts, not the data, so they go even with --keep-data: the store
+# copy under learned-skills/ is the data and survives that flag. Leaving them
+# behind would have the harness keep loading learned skills with nothing left to
+# manage, prune or update them.
+#
+# Removal is gated on the marker file mirror-skills.py writes, so this can only
+# ever delete directories that script created. ~/.claude/skills is the user's own
+# namespace -- it already held 21 hand-written skills on the machine this was
+# built on, and an unmarked directory is never touched.
+MIRROR_MARKER=".self-learning-managed"
+MIRRORED_REMOVED=0
+for _root in "${HOME}/.claude/skills" "${HOME}/.copilot/skills"; do
+    [[ -d "$_root" ]] || continue
+    for _dir in "$_root"/*/; do
+        [[ -d "$_dir" ]] || continue
+        if [[ -f "${_dir}${MIRROR_MARKER}" ]]; then
+            remove "${_dir%/}"
+            MIRRORED_REMOVED=$((MIRRORED_REMOVED + 1))
+        fi
+    done
+done
+if [[ "$MIRRORED_REMOVED" -gt 0 ]]; then
+    echo "  removed ${MIRRORED_REMOVED} mirrored skill director(ies) (marker-gated)"
+else
+    # Stated rather than silent: "found none" and "did not look" are different
+    # outcomes, and this is the only line that distinguishes them.
+    echo "  no marker-managed mirrored skills found"
+fi
+
 if [[ "$KEEP_DATA" != "true" ]]; then
     echo "Removing learned data..."
     # Legacy location.

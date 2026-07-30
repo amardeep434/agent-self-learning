@@ -35,4 +35,23 @@ if ! command -v python3 >/dev/null 2>&1; then
     exit 0
 fi
 
-exec python3 "${SCRIPT_DIR}/session-start-context.py"
+# Publish learned skills where each harness natively looks (Route A). Launched
+# DETACHED and after the JSON is on stdout, for three reasons:
+#   - the hook budget is <100ms and the injection above already spends ~43ms;
+#     mirroring 46 skill directories has no business inside that budget;
+#   - its stdout must never reach this hook's stdout. Copilot concatenates all
+#     non-progress stdout and runs one JSON.parse, so a single summary line from
+#     the mirror would silently kill the injection;
+#   - it is idempotent and self-healing, so missing a run costs nothing: the
+#     next session start picks up whatever the last review wrote and prunes
+#     whatever the curator archived.
+# Failures are the mirror's own to report; this hook must still exit 0.
+python3 "${SCRIPT_DIR}/session-start-context.py"
+_status=$?
+
+if [[ -x "${SCRIPT_DIR}/mirror-skills.py" || -f "${SCRIPT_DIR}/mirror-skills.py" ]]; then
+    nohup python3 "${SCRIPT_DIR}/mirror-skills.py" --quiet >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+fi
+
+exit "$_status"
