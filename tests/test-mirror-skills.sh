@@ -177,13 +177,21 @@ if [[ "$ENV_I_PYTHON_OK" -ne 0 ]]; then
          "itself exits ${ENV_I_PYTHON_OK} on this platform, so the interpreter cannot start" \
          "in a stripped environment and the import cannot be isolated here."
 else
+    # The module path crosses into python3 as ARGV, never interpolated into the
+    # -c string. python3 is a NATIVE binary under Git Bash, so MSYS rewrites
+    # POSIX-looking argv values into Windows form for it -- but it cannot touch a
+    # path baked inside a string literal, so the embedded form arrived as
+    # "/d/a/..." which native Python cannot open. That failed on both
+    # windows-latest cells while passing everywhere else, and it is the same
+    # MSYS/native boundary that has bitten this project repeatedly: cross it with
+    # DATA, never with a path you have already spelled out.
     IMPORT_RC=0
     env -i PATH="$PATH" python3 -c "
 import importlib.util, sys
-spec = importlib.util.spec_from_file_location('m', '${MIRROR}')
+spec = importlib.util.spec_from_file_location('m', sys.argv[1])
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
-" > /dev/null 2>&1 || IMPORT_RC=$?
+" "$MIRROR" > /dev/null 2>&1 || IMPORT_RC=$?
     check "H: module imports with no HOME and no USERPROFILE" "0" "$IMPORT_RC"
 fi
 
