@@ -207,7 +207,23 @@ def run_lifecycle(dry_run: bool = False) -> str:
             anchor = now_epoch  # No timestamps at all -- treat as current
 
         # Never-used grace period: if use_count == 0 and still within
-        # stale window, it is too young to mark stale
+        # stale window, it is too young to mark stale.
+        #
+        # NOTE, measured 2026-07-30: use_count is 0 for EVERY skill, always.
+        # Nothing increments it -- no harness reports skill invocation to us --
+        # so this branch is taken for every unpinned agent-created skill and
+        # the `use_count`-dependent half of the documented transition rules
+        # cannot fire. Archival is governed by the wall clock alone. Re-derive:
+        #   grep -rn "use_count" scripts/ | grep -E "\+= *1|increment"   # empty
+        #   python3 -c "import json,collections;print(collections.Counter(
+        #     v.get('use_count') for v in json.load(open(
+        #     '<store>/learned-skills/.usage.json')).values()
+        #     if isinstance(v, dict)))"                                  # {0: 50}
+        # The field is left in place rather than deleted because it is the
+        # correct condition IF a signal ever exists; what was wrong was
+        # prompts/curator-review.md asserting a gate that cannot fire, which is
+        # now stated there. tests/test-skill-usage-honesty.py holds the two in
+        # sync.
         if use_count == 0 and anchor > stale_cutoff:
             if state == "stale":
                 lines.append(

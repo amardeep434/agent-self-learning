@@ -173,8 +173,13 @@ Every skill has a telemetry entry in the global `.usage.json` file:
 }
 ```
 
-- `use_count`: incremented when the skill is invoked via Skill tool
-- `view_count`: incremented when the skill file is read
+- `use_count`: **reserved, always 0 today.** Nothing increments it. Measured
+  2026-07-30: all 50 tracked skills read 0, and
+  `grep -rn "use_count" scripts/ | grep -E "\+= *1|increment"` returns nothing.
+  It is initialised by `persist-proposal.py` and read by `skill-lifecycle.py`,
+  but no harness reports skill invocation to us, so nothing ever raises it.
+- `view_count`: **reserved, never written at all** -- absent from every record
+  in the live `.usage.json`, not merely zero.
 - `patch_count`: incremented when the skill is updated
 - `created_by`: `"agent"` (background review), `"user"` (/learn command),
   `"hub"` (installed from registry)
