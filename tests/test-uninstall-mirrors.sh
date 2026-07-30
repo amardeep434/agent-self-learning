@@ -79,10 +79,15 @@ check "A: mirrored directory removed from the copilot root" "no" \
 check "A: --keep-data preserved the store copy of the skill" "yes" \
     "$(exists "${STORE}/learned-skills/genuine/SKILL.md")"
 # Reported by path, not by prose: the removal names each directory it deleted.
+# Separator-normalised suffix, not the bash-spelled absolute path: under Git
+# Bash, bash sees "/tmp/..." where the tool writes "C:\\Users\\...", so a
+# "${HOME_DIR}/..." match can never succeed there. Green on Linux and macOS,
+# red on both windows-latest cells. What must be proven is WHICH directory was
+# named, and the ".claude/skills/genuine" suffix carries that.
 check "A: removal names the claude directory it deleted" "yes" \
-    "$(printf '%s' "$OUT_A" | grep -Fq "${HOME_DIR}/.claude/skills/genuine" && echo yes || echo no)"
+    "$(printf '%s' "$OUT_A" | tr '\\\\' '/' | grep -Fq ".claude/skills/genuine" && echo yes || echo no)"
 check "A: removal names the copilot directory it deleted" "yes" \
-    "$(printf '%s' "$OUT_A" | grep -Fq "${HOME_DIR}/.copilot/skills/genuine" && echo yes || echo no)"
+    "$(printf '%s' "$OUT_A" | tr '\\\\' '/' | grep -Fq ".copilot/skills/genuine" && echo yes || echo no)"
 
 # ---------------------------------------------------------------------------
 # B) --keep-data removes mirrors but preserves the whole store.
@@ -263,9 +268,22 @@ mkdir -p "$NOPY_BIN"
 for _tool in bash sh dirname basename pwd grep sed date rm mkdir cp mv ls cat jq find chmod tr uname; do
     _p=$(command -v "$_tool" 2>/dev/null) && ln -s "$_p" "${NOPY_BIN}/${_tool}" 2>/dev/null || true
 done
-if command -v python3 >/dev/null 2>&1 && ! env -i HOME="$HOME_DIR" PATH="$NOPY_BIN" \
+# TWO probes, because one is not enough. The reduced PATH must (a) not reach
+# python3 -- or the case is meaningless -- AND (b) still run bash, or uninstall.sh
+# never executes and its empty output is misread as a missing message. `ln -s`
+# above does NOT create working symlinks under Git Bash without Developer Mode,
+# so on both windows-latest cells NOPY_BIN had no usable bash either and case H
+# failed for a reason that had nothing to do with the code under test.
+_nopy_bash_works=no
+env -i HOME="$HOME_DIR" PATH="$NOPY_BIN" bash -c 'exit 0' >/dev/null 2>&1 && _nopy_bash_works=yes
+if [[ "$_nopy_bash_works" != "yes" ]]; then
+    echo "SKIP: python3-absent uninstall case -- probed: \`env -i PATH=\$NOPY_BIN bash -c 'exit 0'\`" \
+         "fails here, so a reduced PATH with a working bash could not be built and uninstall.sh" \
+         "cannot be executed to observe its refusal. Common on Git Bash, where 'ln -s' does not" \
+         "create real symlinks without Developer Mode."
+elif command -v python3 >/dev/null 2>&1 && ! env -i HOME="$HOME_DIR" PATH="$NOPY_BIN" \
         sh -c 'command -v python3' >/dev/null 2>&1; then
-    # PROBED: python3 really is absent from the reduced PATH.
+    # PROBED: python3 really is absent from the reduced PATH, and bash works.
     OUT_H=$(env -i HOME="$HOME_DIR" AGENT_LEARNING_HOME="$STORE" PATH="$NOPY_BIN" \
         SL_CONFIG_FILE=/nonexistent bash "${SCRIPT_DIR}/uninstall.sh" --yes 2>&1 || true)
     check "H: without python3 the mirror is NOT deleted" "yes" \
