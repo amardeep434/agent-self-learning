@@ -165,6 +165,22 @@ check "learned-skills dir under store" "yes" "$([[ -d "${STORE}/learned-skills" 
 check "logs dir under store" "yes" "$([[ -d "${STORE}/logs/reviews" ]] && echo yes || echo no)"
 check "sessions db under store" "yes" "$([[ -f "${STORE}/sessions/search.db" ]] && echo yes || echo no)"
 
+# --- Store permissions: the tree holds session-derived content, so the root
+# must be owner-only. Probed, never inferred (hard rule 3): if this filesystem
+# does not enforce chmod at all (MSYS/Git Bash, some network mounts), the
+# assertion is meaningless and is skipped with its own printed reason.
+PERM_PROBE="${TMP_HOME}/.perm-probe"
+: > "$PERM_PROBE"; chmod 600 "$PERM_PROBE" 2>/dev/null || true
+PROBE_PERMS="$(stat -c %a "$PERM_PROBE" 2>/dev/null || stat -f %Lp "$PERM_PROBE" 2>/dev/null || echo ERROR)"
+if [[ "$PROBE_PERMS" != "600" ]]; then
+    echo "SKIP: store-permission assertions (chmod not enforced here: probe file reads $PROBE_PERMS)"
+else
+    STORE_PERMS="$(stat -c %a "$STORE" 2>/dev/null || stat -f %Lp "$STORE")"
+    check "store root is 0700" "700" "$STORE_PERMS"
+    DB_PERMS="$(stat -c %a "${STORE}/sessions/search.db" 2>/dev/null || stat -f %Lp "${STORE}/sessions/search.db")"
+    check "installed search.db is 0600" "600" "$DB_PERMS"
+fi
+
 # --- I5 regression guard: SL_COACH_RULES_DIR (as lib/config.sh resolves it
 # for a real caller) must resolve to a directory that ACTUALLY EXISTS after
 # a real install, not just a scripts-array membership check. The prior

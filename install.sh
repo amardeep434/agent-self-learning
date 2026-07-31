@@ -253,6 +253,15 @@ for dir in "${DIRS[@]}"; do
     do_mkdir "$dir"
 done
 
+# The store holds session-derived content; keep the whole tree owner-only,
+# and repair an already-installed store created before this was enforced.
+if [[ "$DRY_RUN" != "true" ]]; then
+    chmod 700 "$SL_HOME" 2>/dev/null || true
+    if [[ -f "${SL_HOME}/sessions/search.db" ]]; then
+        chmod 600 "${SL_HOME}/sessions/search.db" 2>/dev/null || true
+    fi
+fi
+
 echo ""
 
 # --- Step 2: Copy scripts ---

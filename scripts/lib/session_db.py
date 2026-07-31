@@ -111,6 +111,9 @@ def ensure_schema(
     intentionally degraded state, not a failure.
     """
     conn = sqlite3.connect(db_path)
+    # The DB holds full unredacted session text; never leave it at umask
+    # default. Same repair-on-every-run discipline as index-session.py.
+    os.chmod(db_path, 0o600)
     try:
         _apply_schema_file(conn, base_schema_path)
         conn.commit()
