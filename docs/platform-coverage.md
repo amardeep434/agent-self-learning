@@ -21,15 +21,20 @@ from the platform name**, and each printing its own reason. There is no single c
 the old shorthand "symlinks need elevation" was half wrong: the shell half of the suite
 cannot create symlinks while the Python half can.
 
-### Measured: run `30426182617`, 2026-07-29, windows-latest 3.13 vs ubuntu-latest 3.13
+### Measured: run `30588076535`, 2026-07-30, windows-latest 3.13 vs ubuntu-latest 3.13
+
+Re-derived on 2026-07-31 from that run's own logs. The figures below replace the
+2026-07-29 run-`30426182617` set, which had drifted (5 shell skips across 4 suites → 9
+across 6; 21 Python skips → 23). **They will drift again**: the audit-remediation branch
+adds two suites and this run predates it. Re-derive with the commands at the bottom.
 
 | | windows 3.13 | ubuntu 3.13 |
 |---|---|---|
-| shell `SKIP:` lines | **5** across 4 suites | 1 (the inverse: a Windows-only bash-flavour check) |
-| Python skips | **21** across 5 suites | 13 across 2 suites |
-| of which Windows-only | **11** | — |
+| shell `SKIP:` lines | **9** across 6 suites | 1 (the inverse: a Windows-only bash-flavour check, `test-ps1-wrappers.sh`) |
+| Python skips | **23** across 5 suites | 13 across 2 suites |
+| of which Windows-only | **13** | — |
 
-The 11 Windows-only Python skips: `test-persist-proposal.py` 5, `test-adversarial-sweep.py`
+The 13 Windows-only Python skips: `test-persist-proposal.py` 7, `test-adversarial-sweep.py`
 3, `test-store-lock-writers.py` 3.
 
 `test-telemetry.py`'s 4 skips are **on every cell on every platform** — no CI runner has a
@@ -37,23 +42,27 @@ Copilot or Claude store, so live telemetry extraction is exercised only on a dev
 machine that has both harnesses installed. `test-win-dir-pin.py` is the inverse suite: 6
 skip on Windows, 9 on Linux.
 
-### The five shell skips, each with its probed cause
+### The nine shell skips, each with its probed cause
 
 | Suite | Skips | Probed reason (verbatim from the run) |
 |---|---|---|
+| `test-uninstall-mirrors.sh` | 3 | two cases skip on `symlink creation is not permitted here — probed by attempting \`ln -s\` and finding no symlink at the destination`; the third on `python3-absent uninstall case -- probed: \`env -i PATH=$NOPY_BIN bash -c 'exit 0'\` fails here` |
 | `test-path-compare-lib.sh` | 2 | `ln -s` could not create a symlink — *verified* with `[[ -L … ]]` being false after the attempt, not assumed |
 | `test-copilot-hook-input.sh` | 1 | `no pty available to manufacture a real terminal fd on this platform` |
 | `test-doctor.sh` | 1 | `chmod 500 did not make '<dir>' non-writable on this platform/filesystem` — verified by actually creating a file in it |
+| `test-session-start-wrapper.sh` | 1 | `python3-absent case -- probed: a stripped PATH with a WORKING bash could not be built here` |
 | `test-turn-counter.sh` | 1 | `could not build a usable jq-free PATH on this machine` |
 
-That last row is **new since the previously documented figure of "4 shell skips across 3
-suites"**, and it matters more than a count: it is the jq-failure-reporting path added in
-`255a29f` (turn-counter reports a broken `jq` instead of silently resetting the counter).
-That path is therefore unexercised on Windows.
+Two of these matter more than the count. `test-turn-counter.sh`'s is the
+broken-JSON-reader reporting path added in `255a29f` (the counter reports a broken reader
+instead of silently resetting itself) — **unexercised on Windows**. The two
+`python3-absent` skips are the same shape one layer out: on Windows CI a reduced PATH with
+a working `bash` cannot be constructed at all, so every "the interpreter is missing"
+degradation path in the suite goes untested there.
 
-### The eleven Windows-only Python skips
+### The thirteen Windows-only Python skips
 
-- `test-persist-proposal.py` (5) — `O_NOFOLLOW: UNAVAILABLE (POSIX-only primitive)` and
+- `test-persist-proposal.py` (7) — `O_NOFOLLOW: UNAVAILABLE (POSIX-only primitive)` and
   `dir_fd (functional): UNAVAILABLE`. Note the same suite prints `symlink creation:
   AVAILABLE` and `hardlink creation: AVAILABLE`: Python **can** build the attack fixtures
   on Windows. What is missing is the defence, not the attack.

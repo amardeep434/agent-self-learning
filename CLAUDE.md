@@ -162,7 +162,8 @@ gh run list --branch main        # read the history, not just the newest entry
 **Windows green is not equal coverage.** The per-suite skip breakdown, the real probed
 causes, and the commands to re-derive every figure live in
 [`docs/platform-coverage.md`](docs/platform-coverage.md). Do not restate the numbers here;
-they moved on 2026-07-29 (4 shell skips across 3 suites → 5 across 4) and will move again.
+they moved on 2026-07-29 (4 shell skips across 3 suites → 5 across 4) and again on
+2026-07-31 (→ 9 across 6, re-derived from run 30588076535), and will move again.
 
 Fix rounds A-F and P0-P9 fixed real defects the matrix exposed: a Python 3.9
 `fromisoformat` failure on `Z` timestamps, GNU-only `date` use on macOS, CRLF-corrupted
