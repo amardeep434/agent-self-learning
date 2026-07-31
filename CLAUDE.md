@@ -37,6 +37,8 @@ env -i HOME=<tmp> PATH="$PATH" AGENT_LEARNING_HOME=<tmp>/store SL_CONFIG_FILE=/n
     bash scripts/<script>.sh
 ```
 
+(On Windows, run that inside Git Bash — `env -i` and the script itself are POSIX.)
+
 Measured twice: on 2026-07-28 ad-hoc invocations of `session-review.sh` /
 `copilot-session-review.sh` / `vscode-session-review.sh` / `turn-counter.sh` left six lines
 in the live `persist-failures.log` — payloads with no `sessionId`/`transcript_path`, i.e.

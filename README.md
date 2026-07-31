@@ -28,6 +28,7 @@ git clone <this-repo> && cd agent-self-learning
 bash install.sh --dry-run      # see exactly what it would do
 bash install.sh
 bash scripts/doctor.sh         # confirm paths, writability, detected harnesses
+                               # (on Windows, run this line inside Git Bash)
 ```
 
 **Windows (PowerShell, with Git for Windows installed):**
@@ -43,7 +44,7 @@ happens until you do — the installer deliberately does not edit a harness's ow
 files beyond Copilot CLI's dedicated hooks directory.
 
 <details>
-<summary><strong>Requirements</strong> (at least one of Claude Code / Copilot CLI must be installed)</summary>
+<summary><strong>Requirements</strong> (at least one of the two CLIs — Claude Code or Copilot CLI — must be installed; the VS Code adapter reviews through one of them)</summary>
 
 | Dependency | Needed for | Version | Windows notes |
 |------------|-----------|---------|---------------|
@@ -131,6 +132,10 @@ with `--allow-tool read` only. See [Bounding reviewer cost](#bounding-reviewer-c
 ---
 
 ## Registering hooks
+
+Registration is per harness: Copilot CLI's is automatic (`install.sh` writes its dedicated
+hooks file), the other two are manual. The Claude Code section below is the longest because
+its merge is the fiddliest, not because it is the primary harness.
 
 ### Claude Code
 
@@ -358,8 +363,12 @@ Only rows backed by a suite in `tests/run-all.sh` are marked supported.
 > ```bash
 > # memory injection (Route B) — run a real session, then:
 > tail -3 "$(python3 scripts/lib/paths.py all | sed -n 's/^logs=//p')/persist-failures.log"
-> # skill publication (Route A):
-> ls ~/.claude/skills/*/.self-learning-managed 2>/dev/null | wc -l
+> # skill publication (Route A) — one command per harness, because
+> # mirror-skills.py publishes to both roots (scripts/mirror-skills.py:87-100):
+> ls ~/.claude/skills/*/.self-learning-managed 2>/dev/null | wc -l    # Claude Code — and
+> #   VS Code Copilot Chat, which reads the same ~/.claude tree (inference from its default
+> #   hook locations, never measured: no VS Code session has been observed loading a skill)
+> ls ~/.copilot/skills/*/.self-learning-managed 2>/dev/null | wc -l   # Copilot CLI
 > ```
 >
 > Until 2026-07-30 there was a single row here reading `✅ | ✅ | ✅` for "AGENTS.md
@@ -467,7 +476,7 @@ reader should know before trusting the system further than it goes.
   exposes `search` (FTS5 `MATCH`, ranked and stemmed, falling back to a substring `LIKE`
   when the local SQLite build lacks FTS5 — probed functionally at index time, never
   assumed from a platform name). The *scroll / read / browse* shapes described in
-  `config/claude-md-snippet.md` are SQL patterns for an agent to run against the index by
+  `config/agent-context-snippet.md` are SQL patterns for an agent to run against the index by
   hand; there is no tool implementing them.
 
 - **One of the 45 vendored Coach rules is not evaluated** (44 evaluate). `no-devcontainer`
@@ -552,6 +561,11 @@ tokens): `bash tests/test-review-cli-flags.sh`.
 for upgrade safety (its value is used with a deprecation warning on stderr if
 `SL_REVIEW_ENABLED` is unset), but it will be removed.
 
+Every legacy `CLAUDE_`-prefixed name — `CLAUDE_REVIEW_ENABLED`, `CLAUDE_LEARNED_SKILLS_DIR`,
+`CLAUDE_SKILL_STALE_DAYS`, `CLAUDE_SKILL_ARCHIVE_DAYS`, `CLAUDE_CURATOR_IDLE_GATE`,
+`CLAUDE_CURATOR_LLM_PASS` — is removed in the release after 2026-08. "One release" is
+pinned to that date so the promise cannot rot into "forever".
+
 ---
 
 ## Uninstall
@@ -595,7 +609,8 @@ config/     self-learning.yaml / .conf   defaults; .conf is what actually ships
             copilot-hooks.json           hook template — Copilot CLI
             vscode-hooks.json            hook template — VS Code (Claude Code's schema,
                                            which VS Code parses; not Copilot CLI's)
-            claude-md-snippet.md         self-learning protocol for CLAUDE.md
+            agent-context-snippet.md     self-learning protocol for the agent
+                                           context file (CLAUDE.md / AGENTS.md)
 prompts/    curator-review.md            prompt for the curator's opt-in manual
                                            consolidation pass (curator-run.sh
                                            prepares its inventory; a human runs it)
