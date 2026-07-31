@@ -147,8 +147,12 @@ if [[ -f "$USAGE_FILE" ]]; then
         # a plain skill name has no business reaching the tallies or the paths
         # built from it. proposal_schema enforces the same shape on the way in.
         [[ "$SKILL_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]] || continue
-        state=$(jq -r --arg n "$SKILL_NAME" '.[$n].state // "active"' "$USAGE_FILE" 2>/dev/null || echo "active")
-        pinned=$(jq -r --arg n "$SKILL_NAME" '.[$n].pinned // false' "$USAGE_FILE" 2>/dev/null || echo "false")
+        {
+            IFS= read -r state || true
+            IFS= read -r pinned || true
+        } < <(python3 "${SCRIPT_DIR}/lib/jsonio.py" get "$USAGE_FILE" \
+                  "${SKILL_NAME}.state" "${SKILL_NAME}.pinned" 2>/dev/null)
+        : "${state:=active}"; : "${pinned:=false}"
 
         case "$state" in
             active)   TOTAL_ACTIVE=$((TOTAL_ACTIVE + 1)) ;;
@@ -158,7 +162,7 @@ if [[ -f "$USAGE_FILE" ]]; then
         if [[ "$pinned" == "true" ]]; then
             TOTAL_PINNED=$((TOTAL_PINNED + 1))
         fi
-    done < <(jq -r 'keys[]' "$USAGE_FILE" 2>/dev/null)
+    done < <(python3 "${SCRIPT_DIR}/lib/jsonio.py" keys "$USAGE_FILE" 2>/dev/null)
 fi
 
 cat >> "$REPORT_FILE" << EOF
@@ -227,8 +231,12 @@ if [[ "$LLM_PASS" == "true" ]]; then
             # not a plain skill name has no business being interpolated into a
             # path below. proposal_schema enforces the same shape on the way in.
             [[ "$SKILL_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]] || continue
-            state=$(jq -r --arg n "$SKILL_NAME" '.[$n].state // "active"' "$USAGE_FILE" 2>/dev/null || echo "active")
-            use_count=$(jq -r --arg n "$SKILL_NAME" '.[$n].use_count // 0' "$USAGE_FILE" 2>/dev/null || echo "0")
+            {
+                IFS= read -r state || true
+                IFS= read -r use_count || true
+            } < <(python3 "${SCRIPT_DIR}/lib/jsonio.py" get "$USAGE_FILE" \
+                      "${SKILL_NAME}.state" "${SKILL_NAME}.use_count" 2>/dev/null)
+            : "${state:=active}"; : "${use_count:=0}"
 
             # Skip archived
             if [[ "$state" == "archived" ]]; then
@@ -242,7 +250,7 @@ if [[ "$LLM_PASS" == "true" ]]; then
             fi
 
             SKILL_INVENTORY+="- [${SKILL_NAME}] ($state, ${use_count} uses): $description"$'\n'
-        done < <(jq -r 'keys[]' "$USAGE_FILE" 2>/dev/null)
+        done < <(python3 "${SCRIPT_DIR}/lib/jsonio.py" keys "$USAGE_FILE" 2>/dev/null)
     fi
 
     # Write inventory to temp file for manual LLM subagent invocation

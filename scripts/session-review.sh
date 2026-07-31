@@ -47,20 +47,31 @@ if [[ ! -f "$COUNTER_FILE" ]]; then
     exit 0
 fi
 
-# "jq is missing" and "the counter says 0" must not be the same outcome. The
-# old form, `jq ... 2>/dev/null || echo "0"`, collapsed them: on a machine
-# with no jq every session scored 0 turns, fell through the gate below, and
+# "the JSON reader is missing" and "the counter says 0" must not be the same
+# outcome. The old form, `jq ... 2>/dev/null || echo "0"`, collapsed them: on a
+# machine with no jq every session scored 0 turns, fell through the gate below, and
 # exited 0 with nothing written anywhere -- the review pipeline silently
 # switched off for good, looking exactly like a healthy install with short
 # sessions. See sl_review_precondition_failed's header for the Windows CI
-# round this cost.
-if ! command -v jq >/dev/null 2>&1; then
+# round this cost. (jq was replaced by lib/jsonio.py; the exit-status-vs-value
+# distinction that fixed this is the same, and an empty read is a missing field,
+# which legitimately means 0.)
+if ! command -v python3 >/dev/null 2>&1; then
     sl_review_precondition_failed session-review "$SL_LOG_DIR" \
-        "jq is not on PATH, so the turn counter cannot be read -- no session can be reviewed"
+        "python3 is not on PATH, so the turn counter cannot be read -- no session can be reviewed"
     exit 0
 fi
 
-TOTAL_TURNS=$(jq -r '.total_turns_this_session // 0' "$COUNTER_FILE" 2>/dev/null || echo "")
+# EXIT STATUS, not the value: jsonio.py exits 3 when the file cannot be read or
+# parsed at all, and prints an EMPTY line for a field that is merely absent.
+# Collapsing those two into "0 turns" is the exact defect this guard exists to
+# prevent, so a failed read is reported and an absent field is a legitimate 0.
+if ! TOTAL_TURNS=$(python3 "${LIB_DIR}/jsonio.py" get "$COUNTER_FILE" total_turns_this_session 2>/dev/null); then
+    sl_review_precondition_failed session-review "$SL_LOG_DIR" \
+        "could not read .total_turns_this_session from ${COUNTER_FILE} -- the file is unreadable or malformed, or python3 failed on it; no session can be reviewed"
+    exit 0
+fi
+[[ -z "$TOTAL_TURNS" ]] && TOTAL_TURNS=0
 if [[ ! "$TOTAL_TURNS" =~ ^[0-9]+$ ]]; then
     sl_review_precondition_failed session-review "$SL_LOG_DIR" \
         "could not read .total_turns_this_session from ${COUNTER_FILE} (got: ${TOTAL_TURNS:-<empty>})"
@@ -215,10 +226,13 @@ fi
 
 # --- Update counter state ---
 
-jq --arg now "$NOW" \
-    '.last_review_at = $now | .memory_turns = 0 | .skill_iterations = 0' \
-    "$COUNTER_FILE" > "${COUNTER_FILE}.tmp" \
-    && mv "${COUNTER_FILE}.tmp" "$COUNTER_FILE"
+# lib/jsonio.py reads, updates and writes atomically at 0600; the temp-then-mv
+# dance and the jq dependency both go away. Values reach JSON as data, so a
+# hostile timestamp cannot corrupt the file.
+python3 "${LIB_DIR}/jsonio.py" set "$COUNTER_FILE" \
+    "last_review_at=${NOW}" \
+    "memory_turns=json:0" \
+    "skill_iterations=json:0" || true
 
 # --- Remove any pending signal ---
 rm -f "${STATE_DIR}/review_signal.json"

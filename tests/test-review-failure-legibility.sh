@@ -321,22 +321,24 @@ check "F: writer stderr temp file is cleaned up" "" \
 # G) THE WINDOWS-CI GUARD. When the turn count cannot be READ, the hook must
 # say so -- not score it as 0 turns and exit 0.
 #
-# `jq ... 2>/dev/null || echo "0"` collapsed "jq is broken or absent" into
-# "0 turns", which is below every review threshold, so the hook exited 0 and
-# the entire review pipeline was silently off. That is precisely what happened
-# on windows-latest: Git Bash's /usr/bin carries no jq, this suite had
-# amputated PATH, and the only trace left on disk was an empty logs/reviews/.
+# `jq ... 2>/dev/null || echo "0"` collapsed "the JSON reader is broken or
+# absent" into "0 turns", which is below every review threshold, so the hook
+# exited 0 and the entire review pipeline was silently off. That is precisely
+# what happened on windows-latest: Git Bash's /usr/bin carries no jq, this suite
+# had amputated PATH, and the only trace left on disk was an empty logs/reviews/.
 #
-# The jq shim exits 127, which is exactly how the `|| echo` fallback behaved
-# with jq absent, and unlike a truly emptied PATH it is portable to every
-# runner in the matrix.
+# The counter is now read by python3 (lib/jsonio.py) rather than jq, so the shim
+# below breaks python3 instead -- the tool whose failure the guard must survive.
+# It exits 127, exactly how the `|| echo` fallback behaved with the reader
+# absent, and unlike a truly emptied PATH it is portable to every runner in the
+# matrix.
 # ---------------------------------------------------------------------------
 G_DIR="$(mktemp -d)"
 CASE_DIRS+=("$G_DIR")
 mkdir -p "$G_DIR/home" "$G_DIR/store/state" "$G_DIR/store/logs" "$G_DIR/bin"
-printf '#!/usr/bin/env bash\nexit 127\n' > "$G_DIR/bin/jq"
+printf '#!/usr/bin/env bash\nexit 127\n' > "$G_DIR/bin/python3"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$G_DIR/bin/claude"
-chmod +x "$G_DIR/bin/jq" "$G_DIR/bin/claude"
+chmod +x "$G_DIR/bin/python3" "$G_DIR/bin/claude"
 printf '%s\n' \
     '{"session_id":"g","total_turns_this_session":9,"memory_turns":0,"skill_iterations":0}' \
     > "$G_DIR/store/state/turn_counter.json"
