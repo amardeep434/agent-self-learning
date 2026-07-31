@@ -16,8 +16,13 @@ periodic curation, cross-session search.
 
 **Claude Code is one adapter among peers, not a dependency.** No shared code path — storage
 resolution, the review pipeline, the skill/memory schema — may assume Claude Code's binary,
-config, or `~/.claude` layout. `tests/test-claude-absent.sh` is the regression guard: the
-Copilot review path must work with no `claude` binary and no `~/.claude` directory present.
+config, or `~/.claude` layout. Two regression guards, one per direction, because "peers"
+is a claim about both: `tests/test-claude-absent.sh` — the Copilot review path must work
+with no `claude` binary and no `~/.claude` directory present — and
+`tests/test-copilot-absent.sh` — the Claude Code path (review, session-start injection,
+skill mirroring, session indexing) must work with no `copilot` binary and no `~/.copilot`
+directory, creating neither. The VS Code path's reviewer-selection fallback when copilot is
+absent is covered separately by `tests/test-vscode-session-review.sh`.
 
 ## Hard rules
 
