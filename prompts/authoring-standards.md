@@ -65,7 +65,7 @@ it was created.
 name: lowercase-kebab-case (max 64 chars)
 description: One sentence, max 60 characters, ends with period.
 version: 0.1.0
-author: claude-code-review
+author: agent-review
 tags: [tag1, tag2]
 category: coding|workflow|debugging|project|tooling
 created: 2026-01-15T10:30:00Z
@@ -79,7 +79,7 @@ provenance: agent-created
 |-------|------|------------|----------|
 | `name` | string | lowercase-kebab-case, max 64 chars | yes |
 | `description` | string | max 60 chars, one sentence, ends with period | yes |
-| `author` | string | always `claude-code-review` for agent-created | yes |
+| `author` | string | always `agent-review` for agent-created | yes |
 | `category` | enum | `coding`, `workflow`, `debugging`, `project`, `tooling` | yes |
 | `tags` | string[] | lowercase, max 8 tags, max 24 chars each | no |
 | `created` | ISO 8601 | set once at creation | yes |
@@ -109,9 +109,11 @@ other skills. Each skill must contain actionable content.
 1. **Prefer exact commands and code from the session.** Do not invent flags,
    paths, or APIs. If you did not see it in the source, do not write it.
 
-2. **Reference tools by Claude Code name.** Say "Read" not cat/head/tail.
-   Say "Grep" not grep/rg. Say "Edit" not sed/awk. Say "Bash" not "run in
-   terminal".
+2. **Reference tools by the harness's own tool name where one exists**
+   (Claude Code: "Read", "Grep", "Edit", "Bash"). Skills are injected into
+   Claude Code, Copilot CLI and VS Code Copilot Chat sessions alike, and the
+   tool names differ, so prefer harness-neutral phrasing -- "read the file",
+   "search the tree" -- over shell commands like cat/head/tail/grep/sed.
 
 3. **Keep it tight and scannable.** ~100 lines for a simple skill, ~200 for
    a complex one. Do not re-paste upstream documentation.
@@ -142,7 +144,11 @@ Skills can have four types of support directories. The taxonomy is strict:
 
 ## 8. Privacy Protection
 
-The `author` field must always be the literal string `"claude-code-review"`.
+The `author` field must always be the literal string `"agent-review"`. It is
+harness-neutral on purpose: the same store is written by reviewers running under
+Claude Code, Copilot CLI and VS Code Copilot Chat. The legacy literal
+`"claude-code-review"` remains valid on read for one release, so skills authored
+before this rename keep validating; do not emit it in new skills.
 
 **NEVER derive the author from:**
 - OS/login username

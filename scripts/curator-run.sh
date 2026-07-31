@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Curator: periodic skill library maintenance.
-# Triggered by cron, systemd timer, or Claude Code routine.
+# Triggered by any scheduler (cron / systemd timer / Windows Task Scheduler /
+# launchd) or a harness routine.
 #
 # Responsibilities:
 # 1. Check idle gate (user must be idle 2+ hours)
@@ -13,8 +14,12 @@
 #
 # Usage:
 #   bash curator-run.sh                       # Full run with all gates
-#   CLAUDE_CURATOR_IDLE_GATE=0 bash curator-run.sh  # Skip idle gate
-#   CLAUDE_CURATOR_LLM_PASS=true bash curator-run.sh # Enable LLM pass
+#   SL_CURATOR_IDLE_GATE=0 bash curator-run.sh      # Skip idle gate
+#   SL_CURATOR_LLM_PASS=true bash curator-run.sh    # Enable LLM pass
+#
+# The CLAUDE_-prefixed spellings of both are honored for one release and warn
+# on stderr. They were never Claude-specific in effect: the curator maintains
+# the store shared by every harness.
 
 set -euo pipefail
 
@@ -38,8 +43,24 @@ ARCHIVE_DIR="${SKILLS_DIR}/${SL_ARCHIVE_DIRNAME}"
 BACKUP_DIR="${SL_HOME}/backups/curator"
 LOG_DIR="${SL_LOG_DIR}/curator"
 REPORT_FILE="${LOG_DIR}/$(date +%Y-%m-%d)-curator-report.md"
-IDLE_GATE_HOURS="${CLAUDE_CURATOR_IDLE_GATE:-2}"
-LLM_PASS="${CLAUDE_CURATOR_LLM_PASS:-false}"
+# SL_-prefixed name primary, CLAUDE_-prefixed honored for one release with a
+# stderr notice -- the bash equivalent of skill-lifecycle.py's _days_env, and
+# for the same reason (see its docstring).
+sl_curator_env() {
+    local new_name="$1" legacy_name="$2" default="$3"
+    local value="${!new_name-}"
+    if [[ -z "$value" ]]; then
+        local legacy="${!legacy_name-}"
+        if [[ -n "$legacy" ]]; then
+            echo "agent-self-learning: ${legacy_name} is deprecated; use ${new_name}" >&2
+            value="$legacy"
+        fi
+    fi
+    printf '%s' "${value:-$default}"
+}
+
+IDLE_GATE_HOURS="$(sl_curator_env SL_CURATOR_IDLE_GATE CLAUDE_CURATOR_IDLE_GATE 2)"
+LLM_PASS="$(sl_curator_env SL_CURATOR_LLM_PASS CLAUDE_CURATOR_LLM_PASS false)"
 STATE_DIR="$SL_STATE_DIR"
 
 mkdir -p "$ARCHIVE_DIR" "$BACKUP_DIR" "$LOG_DIR" "$STATE_DIR"

@@ -276,6 +276,27 @@ else
     warn "~/.copilot/hooks/self-learning.json not found (normal on a Claude-Code-only or VS-Code-only install -- Copilot hooks live here, Claude Code hooks are registered separately in ~/.claude/settings.json)"
 fi
 
+# --- Check 3c: Hooks registered for VS Code Copilot Chat ---
+# doctor.sh has reported all three harnesses since the VS Code adapter
+# shipped (see its vscode branch); this tool -- the one install.sh tells
+# every user to run -- reported two. That is the same gap Deferred minor 11
+# closed for Copilot, one harness later.
+#
+# WARN-level in BOTH directions, never FAIL: VS Code's default
+# `chat.hookFilesLocations` includes ~/.claude/settings.json, so a machine
+# whose Claude Code hooks are registered is already covered and needs
+# nothing here; and install.sh never edits VS Code's settings.json, so the
+# store-rendered file's presence is a hint, not a registration.
+
+section "Hook Registration (VS Code Copilot Chat)"
+
+VSCODE_HOOKS_FILE="${SL_HOME}/vscode-hooks.json"
+if [[ -f "$VSCODE_HOOKS_FILE" ]]; then
+    warn "vscode-hooks.json rendered in the store (${VSCODE_HOOKS_FILE}) -- add it to VS Code's chat.hookFilesLocations to register it; VS Code also reads ~/.claude/settings.json by default, so the Claude Code hooks above already cover it if they are registered"
+else
+    warn "vscode-hooks.json not found in the store (normal unless you install for VS Code -- re-run install.sh to render it; VS Code reads ~/.claude/settings.json by default, so registering the Claude Code hooks also enables Copilot Chat)"
+fi
+
 # --- Check 4: Turn counter state ---
 
 section "Turn Counter"

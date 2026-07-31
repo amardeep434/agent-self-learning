@@ -59,6 +59,15 @@ Re-vendor with `bash scripts/sync-coach-rules.sh`; the current pin is recorded i
    `events.jsonl` and `session-store.db` (`assistant_usage_events`), its per-session
    `workspace.yaml`, and Claude Code's transcripts. Feeds the other **33**.
 
+**VS Code Copilot Chat is not a source of either**, and the reason is narrower than "it is
+not supported": its transcripts *are* readable — `scripts/lib/transcript.py:705-729` parses
+them for review with the same `summarize_events` vocabulary Copilot CLI's `events.jsonl`
+uses — but they are conversational events only. No VS Code counterpart to Copilot's
+`session-store.db` (`assistant_usage_events`, the per-request model/token/cost table) has
+been probed or wired into `telemetry.py`, and VS Code hands a transcript path over per hook
+invocation rather than exposing a root `telemetry.py` could enumerate. Until one is probed,
+a VS Code-only user gets Route A's index-fed rules and none of the telemetry-fed ones.
+
 `vendor/coach-rules/tables/` holds three artefacts vendored the same way the rule files
 are and pinned by SHA-256 in `scripts/lib/coachtables.py`: upstream's `MODEL_TIERS` and
 `WORK_TYPE_PATTERNS` (verbatim TypeScript slices, extracted with a loud failure if the

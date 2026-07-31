@@ -670,7 +670,7 @@ echo "========================================"
 echo "  Installation complete!"
 echo "========================================"
 echo ""
-echo "NEXT STEP (Claude Code only): Register hooks in ~/.claude/settings.json"
+echo "NEXT STEP (Claude Code / VS Code shared file): Register hooks in ~/.claude/settings.json"
 echo "This is Claude Code's own config directory (not this project's store)."
 echo ""
 

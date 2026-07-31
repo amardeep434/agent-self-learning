@@ -16,7 +16,9 @@
 -- there unused. See session_db.py's module docstring for the full story.
 --
 -- Tables:
---   sessions - one row per Claude Code session
+--   sessions - one row per harness session (currently populated from Claude
+--              Code JSONL only -- see index-session.sh; Copilot CLI's
+--              events.jsonl has no event-to-message mapping here yet)
 --   messages - individual messages within sessions
 
 CREATE TABLE IF NOT EXISTS sessions (

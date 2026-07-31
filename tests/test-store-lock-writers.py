@@ -279,7 +279,7 @@ class TestCuratorTakesTheLock(unittest.TestCase):
         _seed_usage(skills, 3)
         (skills / "seed-00000").mkdir(parents=True, exist_ok=True)
         (skills / "seed-00000" / "SKILL.md").write_text("# x\n", encoding="utf-8")
-        env = _clean_env(store, HOME=str(tmp), CLAUDE_CURATOR_IDLE_GATE="0")
+        env = _clean_env(store, HOME=str(tmp), SL_CURATOR_IDLE_GATE="0")
         return store, env
 
     def test_curator_completes_and_applies_transitions_without_deadlocking(self):
@@ -417,6 +417,80 @@ class TestWritersAgreeOnTheLockFile(unittest.TestCase):
             failures = Path(tmp) / "logs" / "persist-failures.log"
             self.assertTrue(failures.is_file())
             self.assertIn("store-lock", failures.read_text(encoding="utf-8"))
+
+
+class TestCuratorConfigNames(unittest.TestCase):
+    """The curator's two knobs are SL_-prefixed; the CLAUDE_-prefixed names
+    are honored for one release and say so on stderr.
+
+    The curator runs over the SHARED store on every harness, so its primary
+    config names must not be branded with one of them -- same reasoning (and
+    same shape) as skill-lifecycle.py's _days_env and lib/config.sh's
+    CLAUDE_REVIEW_ENABLED shim. This suite already drives curator-run.sh with
+    an env-var knob, so the coverage lands here rather than in a new file."""
+
+    def setUp(self):
+        if not BASH_AVAILABLE:
+            self.skipTest("bash not runnable here (probed, not assumed)")
+
+    def _run_curator(self, tmp: Path, **env_extra):
+        store = tmp / "store"
+        skills = store / "learned-skills"
+        _seed_usage(skills, 2)
+        (skills / "seed-00000").mkdir(parents=True, exist_ok=True)
+        # A `description:` line, unlike the other curator case in this file:
+        # the LLM-pass branch greps for one, and a no-match `grep` inside a
+        # command substitution kills the run under `set -e` (pre-existing
+        # curator behaviour, unrelated to the knob under test -- avoided here
+        # rather than papered over).
+        (skills / "seed-00000" / "SKILL.md").write_text(
+            "---\ndescription: A seeded skill.\n---\n# x\n", encoding="utf-8")
+        # An idle gate the run only clears if the knob under test is read:
+        # the last session ended just now, so the default 2h gate blocks.
+        state = store / "state"
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "last-session-end").write_text(
+            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), encoding="utf-8")
+        env = _clean_env(store, HOME=str(tmp), **env_extra)
+        proc = subprocess.run(["bash", str(CURATOR)], capture_output=True,
+                              text=True, env=env, timeout=90)
+        return store, proc
+
+    def test_sl_curator_idle_gate_is_the_primary_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, proc = self._run_curator(Path(tmp), SL_CURATOR_IDLE_GATE="0")
+            self.assertNotIn("Idle gate not met", proc.stderr,
+                             "SL_CURATOR_IDLE_GATE was not honored")
+            self.assertNotIn("deprecated", proc.stderr,
+                             "the primary name must not warn about itself")
+
+    def test_legacy_claude_name_still_works_and_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, proc = self._run_curator(Path(tmp), CLAUDE_CURATOR_IDLE_GATE="0")
+            self.assertNotIn("Idle gate not met", proc.stderr,
+                             "the legacy name must keep working for one release")
+            self.assertIn("CLAUDE_CURATOR_IDLE_GATE is deprecated", proc.stderr)
+
+    def test_sl_name_wins_when_both_are_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, proc = self._run_curator(Path(tmp), SL_CURATOR_IDLE_GATE="0",
+                                        CLAUDE_CURATOR_IDLE_GATE="999")
+            self.assertNotIn("Idle gate not met", proc.stderr, proc.stderr[-400:])
+            self.assertNotIn("deprecated", proc.stderr,
+                             "no deprecation notice when the primary name is set")
+
+    def test_llm_pass_knob_under_both_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, proc = self._run_curator(Path(tmp), SL_CURATOR_IDLE_GATE="0",
+                                            SL_CURATOR_LLM_PASS="true")
+            self.assertTrue((store / "state" / "curator-inventory.md").is_file(),
+                            "SL_CURATOR_LLM_PASS was not honored: " + proc.stdout[-600:] + proc.stderr[-400:])
+        with tempfile.TemporaryDirectory() as tmp:
+            store, proc = self._run_curator(Path(tmp), SL_CURATOR_IDLE_GATE="0",
+                                            CLAUDE_CURATOR_LLM_PASS="true")
+            self.assertTrue((store / "state" / "curator-inventory.md").is_file(),
+                            "legacy CLAUDE_CURATOR_LLM_PASS must still work")
+            self.assertIn("CLAUDE_CURATOR_LLM_PASS is deprecated", proc.stderr)
 
 
 if __name__ == "__main__":
