@@ -67,6 +67,31 @@ contains "stale copilot hook: flagged STALE" "$OUT" "copilot-session-review.sh h
 check "stale copilot hook flips health to unhealthy" "1" "$STATUS"
 rm -rf "$TMP_HOME"
 
+## 4. VS Code Copilot Chat parity: health reports its registration too.
+#
+# doctor.sh has reported VS Code since the adapter shipped; this tool -- the
+# one install.sh tells users to run -- reported only two of the three
+# harnesses. VS Code rides ~/.claude/settings.json by default, so its section
+# is WARN-level in both directions and can never FAIL a run.
+TMP_HOME="$(mktemp -d)"
+STORE="${TMP_HOME}/store"
+mkdir -p "${STORE}/state" "${STORE}/learned-skills" "${STORE}/sessions" "${STORE}/logs/reviews" "${STORE}/logs/curator" "${STORE}/scripts"
+OUT="$(run_health "$TMP_HOME" "$STORE")"
+STATUS=$?
+contains "no rendered vscode-hooks.json: section present" "$OUT" "Hook Registration (VS Code Copilot Chat)"
+contains "no rendered vscode-hooks.json: reported as a WARN" "$OUT" "vscode-hooks.json not found"
+check "a missing VS Code registration never flips health to unhealthy" "0" "$STATUS"
+rm -rf "$TMP_HOME"
+
+TMP_HOME="$(mktemp -d)"
+STORE="${TMP_HOME}/store"
+mkdir -p "${STORE}/state" "${STORE}/learned-skills" "${STORE}/sessions" "${STORE}/logs/reviews" "${STORE}/logs/curator" "${STORE}/scripts"
+printf '{"hooks":{}}\n' > "${STORE}/vscode-hooks.json"
+OUT="$(run_health "$TMP_HOME" "$STORE")"
+contains "rendered vscode-hooks.json: reported present" "$OUT" "vscode-hooks.json rendered in the store"
+contains "rendered vscode-hooks.json: names the registration setting" "$OUT" "chat.hookFilesLocations"
+rm -rf "$TMP_HOME"
+
 if [[ "$FAILURES" -gt 0 ]]; then
     exit 1
 fi
