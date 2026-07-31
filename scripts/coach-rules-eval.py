@@ -2244,9 +2244,39 @@ def main():
     signals = []
     evaluated = 0
     skipped = 0
+    # A directory carrying UPSTREAM.md is a VENDORED corpus (sync-coach-rules.sh
+    # writes that file, install.sh copies it), so every rule in it must hash to
+    # its RULES_MANIFEST entry. Rule prose reaches the review prompt verbatim
+    # and nothing pinned it before: an edited rule, or an extra .md dropped into
+    # an installed coach-rules directory, was attacker-chosen text in front of
+    # the reviewing model with no drift signal. Directories WITHOUT the marker
+    # (hand-assembled rule sets, test fixtures) are not claiming to be the
+    # vendored corpus and are not held to its manifest.
+    verify_hashes = (rules_dir / "UPSTREAM.md").is_file()
+    if not verify_hashes and any(rules_dir.glob("*.md")):
+        # Deleting UPSTREAM.md from an installed corpus would otherwise disable
+        # verification with no signal at all -- say so, once per run.
+        print("coach-rules-eval: {} has no UPSTREAM.md marker; treating it as a "
+              "hand-assembled rule set, RULES_MANIFEST verification is OFF for "
+              "this run".format(rules_dir), file=sys.stderr)
     for rule_file in sorted(rules_dir.glob("*.md")):
         if rule_file.name == "UPSTREAM.md":
             continue
+        if verify_hashes:
+            expected = coachtables.RULES_MANIFEST.get(rule_file.name)
+            try:
+                actual = coachtables.rule_digest(rule_file.read_bytes())
+            except OSError as exc:
+                actual = "unreadable: {}".format(exc)
+            if expected != actual:
+                # Fail open PER RULE, never per run: Coach is off by default and
+                # one unpinned file must not kill the whole review.
+                print("coach-rules-eval: skipping {} (coach_rule_hash_mismatch:{} "
+                      "-- not the vendored text this evaluator was pinned "
+                      "against)".format(rule_file.stem, rule_file.name),
+                      file=sys.stderr)
+                skipped += 1
+                continue
         rule = parse_rule(rule_file)
         if rule is None:
             print("coach-rules-eval: skipping {} (no frontmatter)".format(rule_file.name),

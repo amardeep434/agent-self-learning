@@ -238,6 +238,11 @@ def _gate_body(text: str) -> "tuple[str, list[str]]":
 
     Importing the injector rather than re-implementing keeps ONE gate: a second
     copy would drift, and this file having no gate at all is how the hole opened.
+
+    Scope is "strict" here, not the injector's "relaxed" default: what this
+    writes is auto-loaded by the harness as instructions, so the
+    shell-substitution and encoded-payload categories relaxed scope skips
+    (measured false positives on MEMORY.md prose) must stay on for bodies.
     """
     global _injector_module
     if _injector_module is None:
@@ -249,7 +254,7 @@ def _gate_body(text: str) -> "tuple[str, list[str]]":
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         _injector_module = module
-    return _injector_module.gate_for_injection(text)
+    return _injector_module.gate_for_injection(text, scope="strict")
 
 
 def mirror_one(source_md: Path, target_dir: Path) -> str:

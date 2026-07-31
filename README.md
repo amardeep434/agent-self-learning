@@ -47,8 +47,8 @@ files beyond Copilot CLI's dedicated hooks directory.
 
 | Dependency | Needed for | Version | Windows notes |
 |------------|-----------|---------|---------------|
-| bash | all scripts | 4.0+ | via Git for Windows (Git Bash) or WSL |
-| jq | hook payload + settings/JSON handling | 1.6+ | `winget install jqlang.jq` |
+| bash | all scripts | 4.0+ | via Git for Windows (Git Bash) or WSL. A Python-first port removing the Git Bash requirement is planned — see [`docs/superpowers/plans/2026-07-31-windows-python-first-port.md`](docs/superpowers/plans/2026-07-31-windows-python-first-port.md) (not started; blocked on a real-hardware probe) |
+| jq | the `turn-counter.sh` PostToolUse hook only — every other JSON read and write now uses `scripts/lib/jsonio.py` (stdlib python3). Kept in that one place because replacing it there measured 97-129ms against a <100ms hook budget (baseline 67-71ms) | 1.6+ | `winget install jqlang.jq` |
 | python3 | injector, coach signals, session indexing and search (incl. its bundled `sqlite3` module) | 3.9+, stdlib only — 3.9 is the CI floor; **3.8 is untested** | `winget install Python.Python.3.12` |
 | sqlite3 (CLI, optional) | manual DB inspection; `self-learning-health.sh`'s database check (degrades to a warning, not a failure, if absent) | any | bundled with Git for Windows |
 | Claude Code | Claude adapter (optional) | current | — |
@@ -87,7 +87,7 @@ SESSION START
     |
     v
 +-------------------+     +--------------------+     +------------------+
-| Load frozen       |     | MEMORY.md (no cap) |     | USER.md (1375ch) |
+| Load frozen       |     | MEMORY.md (no cap) |     | USER.md (no cap) |
 | snapshots from    |<----| learned-skills/    |     | .usage.json      |
 | disk into prompt  |     | sessions/search.db |     |                  |
 +--------+----------+     +--------------------+     +------------------+
@@ -340,9 +340,12 @@ Only rows backed by a suite in `tests/run-all.sh` are marked supported.
 | Session search indexing | ✅ (Claude JSONL) | ❌ planned | ❌ not wired — `index-session.sh` reads `~/.claude/projects` |
 | Coach signals (Routes A/B) | ✅ | ✅ | ✅ |
 | Live end-to-end, real session on disk | ✅ | ✅ 2026-07-25 / -26, real paid model call | ⚠️ **never** — no real VS Code hook has invoked our scripts |
+| Windows | ✅ green, with skips | ✅ green, with skips | ⚠️ untested — suites run, no hook has ever fired |
+| macOS | ✅ green | ✅ green | ⚠️ untested — same |
 
 > **On "wired, never observed firing".** Delivery exists as of 2026-07-30 and is exercised
-> by 55 passing suites, but **no real hook has ever fired it** on Claude Code or VS Code.
+> by the full suite (`bash tests/run-all.sh`; never count suites in prose — the glob is the
+> truth), but **no real hook has ever fired it** on Claude Code or VS Code.
 > Every harness contract behind it was read out of shipped code and disassembly, not
 > observed at runtime — the sole exception is Copilot CLI's, where the real
 > `runtime.node` parser was invoked directly. So these rows stay ⚠️ deliberately: a green
@@ -368,8 +371,6 @@ Only rows backed by a suite in `tests/run-all.sh` are marked supported.
 > [`docs/upstream-audit-2026-07-30.md`](docs/upstream-audit-2026-07-30.md) for the evidence
 > and [`docs/superpowers/plans/2026-07-30-learned-context-delivery.md`](docs/superpowers/plans/2026-07-30-learned-context-delivery.md)
 > for the plan this implements.
-| Windows | ✅ green, with skips | ✅ green, with skips | ⚠️ untested — suites run, no hook has ever fired |
-| macOS | ✅ green | ✅ green | ⚠️ untested — same |
 
 **CI results are per-OS**, not per-harness: the whole matrix cell passes or fails, so both
 CLI columns necessarily show the same platform result. The matrix is
@@ -496,7 +497,7 @@ Environment variables of the same name override the file.
 | `SL_REVIEW_MIN_TURNS` | `5` | Minimum session turns before a review runs |
 | `SL_REVIEW_MAX_TURNS` | `16` | Turn cap for the spawned Claude Code reviewer (`--max-turns`) |
 | `SL_COPILOT_REVIEW_MODEL` | (CLI default) | Model for Copilot reviews; use the cheapest available. Must match `^[A-Za-z0-9._-]+$` |
-| `SL_COPILOT_MAX_AI_CREDITS` | (empty — off) | Optional cost ceiling for Copilot reviews (`--max-ai-credits`). Integer, minimum 30; anything else is dropped with a reason on stderr |
+| `SL_COPILOT_MAX_AI_CREDITS` | `30` | Cost ceiling for Copilot reviews (`--max-ai-credits`). Integer, minimum 30; anything else is dropped with a reason on stderr. Set it **empty** to restore unlimited (amended 2026-07-31; see below) |
 | `SL_VSCODE_REVIEWER` | (empty — auto) | Which CLI reviews a VS Code session: `copilot` or `claude`. See note below |
 | `SL_PERSIST_LOCK_TIMEOUT` | `20` (seconds) | How long a writer waits for the store lock before failing loudly |
 | `SL_MEMORY_INJECT_BUDGET` | `32768` (bytes) | Size at which `MEMORY.md` is **reported** as worth consolidating when injected at session start. Advisory only — memory is never truncated; exceeding it costs a line in `persist-failures.log`, not content. Roughly 4 bytes per token, so the default is ~8K tokens added per session start **and after every compaction** |
@@ -504,6 +505,8 @@ Environment variables of the same name override the file.
 | `SL_COACH_RULES_ENABLED` | `false` | Coach Route A (rule evaluation) |
 | `SL_COACH_EXPORT_ENABLED` | `false` | Coach Route B (fork auto-export) |
 | `SL_COACH_EXPORT_PATH` | `~/.aiec/summary-latest.json` | Route B input file |
+| `SL_SKILL_STALE_DAYS` | `30` | **Environment only** (read by `skill-lifecycle.py` directly, not via `self-learning.conf`). Days of skill inactivity before it is marked stale. The old `CLAUDE_SKILL_STALE_DAYS` is honored for one release with a deprecation notice on stderr |
+| `SL_SKILL_ARCHIVE_DAYS` | `90` | **Environment only**, same as above. Days of skill inactivity before it is archived. The old `CLAUDE_SKILL_ARCHIVE_DAYS` is honored for one release with a deprecation notice on stderr |
 | `SL_SKILLOPT_ENABLED` | `false` | Route C: SkillOpt skill optimization (opt-in) |
 | `SL_SKILLOPT_REPO` | (empty) | Path to a microsoft/SkillOpt checkout. **Optional** when `skillopt-sleep` is on `PATH`; a checkout wins when both are present, matching upstream's own precedence |
 | `SL_SKILLOPT_RUN_CONFIRMED` | `false` | Safety gate; the expensive `run` verb refuses until set true after a dry-run cost review |
@@ -529,11 +532,14 @@ The two harnesses bound the background reviewer differently, and the asymmetry i
   known only after a response returns, so it bounds a runaway loop rather than any single
   call.
 
-`SL_COPILOT_MAX_AI_CREDITS` is **off by default** rather than defaulted to the minimum.
-`copilot` errors on unknown options, so passing the flag unconditionally would hard-break
-the whole review on any CLI older than the release that added it — and the review runs in
-a detached pipeline, so the only symptom would be lines in `persist-failures.log` while
-learning quietly stopped.
+`SL_COPILOT_MAX_AI_CREDITS` **ships at 30** (the CLI's documented minimum). This was
+amended on 2026-07-31 — it used to default to empty/unlimited, deliberately. The cost of
+the amendment is real and is stated here rather than hidden: `copilot` errors on unknown
+options, so on a Copilot CLI older than the release that added `--max-ai-credits` the
+review now fails until you set `SL_COPILOT_MAX_AI_CREDITS=` (empty) in
+`self-learning.conf`. That failure is **loud** — a named line in `persist-failures.log`
+that `doctor.sh` surfaces — whereas unbounded spend in a detached pipeline was silent, and
+a silent-failure pipeline with no spend ceiling is the worse of the two.
 
 To confirm the flags against your own installed binaries at any time (no model calls, no
 tokens): `bash tests/test-review-cli-flags.sh`.

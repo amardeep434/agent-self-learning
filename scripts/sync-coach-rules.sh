@@ -20,6 +20,11 @@ COMMIT_SHA=$(gh api "repos/${REPO}/commits/HEAD" --jq '.sha')
 
 COUNT=0
 for FILE in $(gh api "repos/${REPO}/contents/${RULES_PATH}?ref=${COMMIT_SHA}" --jq '.[] | select(.name | endswith(".md")) | .name'); do
+    # The name comes from a remote API and is interpolated into a write path.
+    # A slash or a .. in it would write outside vendor/coach-rules.
+    case "$FILE" in
+        */*|*..*) echo "refusing suspicious upstream filename: $FILE" >&2; exit 1 ;;
+    esac
     gh api "repos/${REPO}/contents/${RULES_PATH}/${FILE}?ref=${COMMIT_SHA}" --jq '.content' \
         | python3 -c 'import base64,sys;sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' > "${DEST}/${FILE}"
     COUNT=$((COUNT + 1))
@@ -54,6 +59,14 @@ python3 "${SCRIPT_DIR}/scripts/lib/coachtables.py" hash-dictionary \
 
 echo "  (if a sha256 above differs from scripts/lib/coachtables.py TABLE_PINS,"
 echo "   re-read the adapters that consume it BEFORE updating the pin)"
+
+# Rule text is pinned the same way the tables are, and updated the same way:
+# printed for a human to paste, never self-rewritten. The pin is the
+# acknowledgement that the prose reaching the review prompt changed.
+echo ""
+echo "  RULES_MANIFEST for scripts/lib/coachtables.py (replace the block verbatim"
+echo "  after reading the diff of the rule files above):"
+python3 "${SCRIPT_DIR}/scripts/lib/coachtables.py" hash-rules "$DEST"
 
 cat > "${DEST}/UPSTREAM.md" <<EOF
 # Vendored from ${REPO} (MIT License)

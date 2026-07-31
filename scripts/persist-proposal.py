@@ -1215,6 +1215,66 @@ def _write_all_fd(planned: list[tuple[tuple[Path, ...], Path, str, str]]) -> tup
             _close_quietly(fd)
 
 
+_scan_threats_module = None
+
+
+def _scan_threats():
+    """Load scripts/scan-threats.py by path.
+
+    Same loader shape as inject-agents-md.py's -- the filename is hyphenated,
+    so it is not importable as a module name, and there is exactly one
+    THREAT_PATTERNS table in this project on purpose.
+    """
+    global _scan_threats_module
+    if _scan_threats_module is None:
+        import importlib.util
+        path = Path(__file__).resolve().parent / "scan-threats.py"
+        spec = importlib.util.spec_from_file_location("sl_scan_threats_persist", path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load scan-threats.py from {path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _scan_threats_module = module
+    return _scan_threats_module
+
+
+def _scan_proposal(proposal: dict) -> "str | None":
+    """Return a named rejection reason, or None if the proposal is clean.
+
+    Defence in depth over proposal_schema, which validates SHAPE only. The
+    content comes from a background LLM whose context may have been influenced
+    by prompt injection, and it used to reach the store unexamined -- gated
+    only later, at inject/publish time. Anything reading the store directly saw
+    the raw payload.
+
+    Scope splits by destination, mirroring the read side exactly: memory lines
+    scan "relaxed" (strict has measured false positives on prose about shell
+    quoting -- see inject-agents-md.py's _gate_line), skill bodies scan
+    "strict" (they are auto-loaded by a harness as instructions).
+
+    Fail closed: a scanner that cannot be loaded is not "no threats".
+    """
+    try:
+        scanner = _scan_threats()
+    except (ImportError, OSError, AttributeError):
+        return "threat_scanner_unavailable"
+
+    def first(content: str, scope: str) -> "str | None":
+        findings = scanner.scan_for_threats(content, scope=scope)
+        return findings[0].get("category", "unknown") if findings else None
+
+    for entry in proposal.get("memory", []):
+        for line in entry.get("content", "").splitlines():
+            category = first(line, "relaxed")
+            if category:
+                return f"threat_scan_rejected:{category}"
+    for entry in proposal.get("skills", []):
+        category = first(entry.get("content", ""), "strict")
+        if category:
+            return f"threat_scan_rejected:{category}"
+    return None
+
+
 def _log_persist_failure(resolved: dict, message: str) -> None:
     """Append one line to ${SL_LOG_DIR}/persist-failures.log.
 
@@ -1261,6 +1321,17 @@ def main(argv: list[str]) -> int:
 
     resolved = paths.resolve_all()
     memory_dir, skills_dir = resolved["memory"], resolved["skills"]
+
+    # Content gate, after the shape gate and before anything is staged. A hit
+    # rejects the WHOLE proposal rather than editing it: a partial rewrite of an
+    # injection attempt can still carry the instruction, and unlike the read
+    # side (which must keep showing the user their other lessons) nothing here
+    # is lost that the reviewer cannot propose again.
+    threat_reason = _scan_proposal(proposal)
+    if threat_reason is not None:
+        _log_persist_failure(resolved, threat_reason)
+        print(f"persist-proposal: refusing proposal: {threat_reason}", file=sys.stderr)
+        return 1
 
     try:
         # _plan (not just _write_all) can now raise: computing the skill

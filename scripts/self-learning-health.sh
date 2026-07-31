@@ -165,7 +165,15 @@ else
         if [[ "$SELF_CHECK_RC" -ne 0 ]]; then
             fail "writer self-check failed (persist-proposal.py exited ${SELF_CHECK_RC})" \
                 "Inspect: ${SELF_CHECK_OUT}"
-        elif ! printf '%s' "$SELF_CHECK_OUT" | jq -e '.skipped | length == 1' >/dev/null 2>&1; then
+        # Was `jq -e '.skipped | length == 1'`, and this preserves that exact
+        # shape test: a length check on the parsed list, not a glob over its
+        # rendering (a glob false-failed on a planned-write path containing a
+        # comma). An unparseable or empty result fails the test, as before.
+        elif ! printf '%s' "$SELF_CHECK_OUT" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+sys.exit(0 if isinstance(doc.get("skipped"), list) and len(doc["skipped"]) == 1 else 1)
+' 2>/dev/null; then
             fail "writer self-check produced unexpected output" \
                 "persist-proposal.py --dry-run did not return the expected plan: ${SELF_CHECK_OUT}"
         else
@@ -274,9 +282,9 @@ section "Turn Counter"
 
 COUNTER_FILE="${SL_STATE_DIR}/turn_counter.json"
 if [[ -f "$COUNTER_FILE" ]]; then
-    if jq empty "$COUNTER_FILE" 2>/dev/null; then
+    if TOTAL=$(python3 "${SCRIPT_DIR}/lib/jsonio.py" get "$COUNTER_FILE" total_turns_this_session 2>/dev/null); then
         pass "turn_counter.json is valid JSON"
-        TOTAL=$(jq -r '.total_turns_this_session // 0' "$COUNTER_FILE" 2>/dev/null)
+        [[ -z "$TOTAL" ]] && TOTAL=0
         if [[ "$QUIET" != "--quiet" ]]; then
             echo "         Current total turns: $TOTAL"
         fi
@@ -326,12 +334,27 @@ section "Learned Skills"
 
 USAGE_FILE="${SL_SKILLS_DIR}/${SL_USAGE_FILENAME}"
 if [[ -f "$USAGE_FILE" ]]; then
-    if jq empty "$USAGE_FILE" 2>/dev/null; then
-        SKILL_COUNT=$(jq 'keys | length' "$USAGE_FILE" 2>/dev/null || echo 0)
+    if USAGE_KEYS=$(python3 "${SCRIPT_DIR}/lib/jsonio.py" keys "$USAGE_FILE" 2>/dev/null); then
+        SKILL_COUNT=$(printf '%s' "$USAGE_KEYS" | grep -c . || true)
         pass ".usage.json is valid JSON ($SKILL_COUNT skills tracked)"
 
-        # Check for skills in invalid states
-        INVALID=$(jq '[to_entries[] | select(.value.state != "active" and .value.state != "stale" and .value.state != "archived")] | length' "$USAGE_FILE" 2>/dev/null || echo 0)
+        # Check for skills in invalid states. One jsonio.py call per skill would
+        # be one spawn per skill; this is a diagnostic, not a hook, but the loop
+        # still reads every state in ONE call by asking for all of them at once.
+        INVALID=0
+        if [[ -n "$USAGE_KEYS" ]]; then
+            STATE_KEYS=()
+            while IFS= read -r _skill_name; do
+                [[ -n "$_skill_name" ]] || continue
+                STATE_KEYS+=("${_skill_name}.state")
+            done <<< "$USAGE_KEYS"
+            while IFS= read -r _state; do
+                case "$_state" in
+                    active|stale|archived) ;;
+                    *) INVALID=$((INVALID + 1)) ;;
+                esac
+            done < <(python3 "${SCRIPT_DIR}/lib/jsonio.py" get "$USAGE_FILE" "${STATE_KEYS[@]}" 2>/dev/null)
+        fi
         if [[ "$INVALID" -gt 0 ]]; then
             warn "$INVALID skill(s) in invalid state (expected: active, stale, or archived)"
         fi
@@ -346,7 +369,7 @@ fi
 
 section "Dependencies"
 
-for cmd in jq python3; do
+for cmd in python3; do
     if command -v "$cmd" &>/dev/null; then
         pass "$cmd available ($(command -v "$cmd"))"
     else

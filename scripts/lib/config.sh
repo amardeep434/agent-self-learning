@@ -123,9 +123,18 @@ SL_REVIEW_MIN_TURNS="${SL_REVIEW_MIN_TURNS:-5}"
 SL_REVIEW_MAX_TURNS="${SL_REVIEW_MAX_TURNS:-16}"
 SL_COPILOT_REVIEW_MODEL="${SL_COPILOT_REVIEW_MODEL:-}"
 
-# Cost ceiling for the Copilot reviewer. EMPTY BY DEFAULT -- opt-in, not
-# opt-out. Reasoning, since the asymmetry with the Claude path's
-# SL_REVIEW_MAX_TURNS is deliberate rather than an oversight:
+# Cost ceiling for the Copilot reviewer.
+#
+# AMENDED 2026-07-31: this was EMPTY (unlimited) by deliberate choice; it now
+# ships as 30, the CLI's documented minimum. Set it to empty to restore
+# unlimited. A silent-failure pipeline with no spend ceiling is worse than a
+# truncated review: the review is detached, so an unbounded loop's only symptom
+# is the bill. The old reasoning below is kept because its second bullet is the
+# real cost of this amendment -- on a Copilot CLI too old to know the flag, the
+# review now hard-fails until the operator sets this to empty. That failure is
+# LOUD (persist-failures.log, doctor.sh) whereas unbounded spend was silent.
+#
+# Original reasoning, retained:
 #
 #  * The knob is real. `copilot help limits` on 1.0.75 documents
 #    `--max-ai-credits <credits>`, "Minimum: 30 AI credits", and a
@@ -143,7 +152,7 @@ SL_COPILOT_REVIEW_MODEL="${SL_COPILOT_REVIEW_MODEL:-}"
 # Set it to bound a background loop on a machine whose CLI supports it;
 # 30 is the minimum the CLI accepts and anything lower is rejected by
 # `copilot` itself, so this validates the value before it reaches argv.
-SL_COPILOT_MAX_AI_CREDITS="${SL_COPILOT_MAX_AI_CREDITS:-}"
+SL_COPILOT_MAX_AI_CREDITS="${SL_COPILOT_MAX_AI_CREDITS-30}"
 
 # Which CLI reviews a VS Code Copilot Chat session. VS Code Copilot Chat has
 # no headless CLI of its own, so the review has to run in one of the two

@@ -16,6 +16,7 @@ Arguments:
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -148,6 +149,10 @@ def index_session(jsonl_path: str, db_path: str, project_path: str) -> None:
     parent_id = detect_parent_session(jsonl_path)
 
     conn = sqlite3.connect(db_path)
+    # search.db carries full unredacted session text; never leave it at umask
+    # default. chmod after connect (not umask before) so a pre-existing 0644 DB
+    # from an older install is repaired on the next index run.
+    os.chmod(db_path, 0o600)
     now = now_iso()
 
     try:

@@ -91,18 +91,29 @@ check "reviewer actually ran (so the argv assertion below is not vacuous)" "yes"
 check "hostile model string dropped" "no" "$(grep -m1 '^ARGS:' "$FAKE_COPILOT_LOG" | grep -q -- '--model' && echo yes || echo no)"
 
 # 5b) SL_COPILOT_MAX_AI_CREDITS -- the Copilot reviewer's cost ceiling.
-# Default-off by design (see the note in scripts/lib/config.sh), so all
-# three states are pinned: absent when unset, present when set to a legal
-# value, dropped when set to anything the CLI would reject. Same
-# marker-gated, argv-recording technique as case 5; the same
-# "not vacuous" guard applies to the two negative-shaped assertions.
+# Amended 2026-07-31 from empty (unlimited) to a shipped default of 30, so
+# four states are pinned: the default reaches argv, an explicit legal value
+# reaches argv, an explicitly EMPTY value restores unlimited, and anything the
+# CLI would reject is dropped. Same marker-gated, argv-recording technique as
+# case 5; the same "not vacuous" guard applies to the negative-shaped
+# assertions.
 : > "$FAKE_COPILOT_LOG"
 sl_clear_review_marker "$SL_LOG_DIR"
 bash "${SCRIPT_DIR}/scripts/copilot-session-review.sh" </dev/null
 sl_wait_for_review_complete "$SL_LOG_DIR" || true
-check "reviewer ran (credits-unset case is not vacuous)" "yes" \
+check "reviewer ran (default-credits case is not vacuous)" "yes" \
     "$([[ -s "$FAKE_COPILOT_LOG" ]] && echo yes || echo no)"
-check "no credit ceiling in argv when SL_COPILOT_MAX_AI_CREDITS is unset" "no" \
+check "the shipped default credit ceiling reaches argv" "yes" \
+    "$(grep -m1 '^ARGS:' "$FAKE_COPILOT_LOG" | grep -q -- '--max-ai-credits 30' && echo yes || echo no)"
+
+# The documented escape hatch: an explicitly empty value restores unlimited.
+: > "$FAKE_COPILOT_LOG"
+sl_clear_review_marker "$SL_LOG_DIR"
+SL_COPILOT_MAX_AI_CREDITS='' bash "${SCRIPT_DIR}/scripts/copilot-session-review.sh" </dev/null
+sl_wait_for_review_complete "$SL_LOG_DIR" || true
+check "reviewer ran (explicitly-empty case is not vacuous)" "yes" \
+    "$([[ -s "$FAKE_COPILOT_LOG" ]] && echo yes || echo no)"
+check "an explicitly empty SL_COPILOT_MAX_AI_CREDITS restores unlimited" "no" \
     "$(grep -m1 '^ARGS:' "$FAKE_COPILOT_LOG" | grep -q -- '--max-ai-credits' && echo yes || echo no)"
 
 : > "$FAKE_COPILOT_LOG"

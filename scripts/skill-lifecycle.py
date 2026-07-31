@@ -84,8 +84,25 @@ SKILLS_DIR = _default_skills_dir()
 # skill-directory layout every consumer shares. See that module's docstring.
 USAGE_FILE = skill_layout.usage_file_path(SKILLS_DIR)
 ARCHIVE_DIR = skill_layout.archive_dir_path(SKILLS_DIR)
-STALE_DAYS = int(os.environ.get("CLAUDE_SKILL_STALE_DAYS", "30"))
-ARCHIVE_DAYS = int(os.environ.get("CLAUDE_SKILL_ARCHIVE_DAYS", "90"))
+def _days_env(new_name: str, legacy_name: str, default: str) -> int:
+    """SL_-prefixed name, with the CLAUDE_-prefixed one honored for one release.
+
+    Same deprecation shape lib/config.sh uses for CLAUDE_REVIEW_ENABLED, and for
+    the same reason: the legacy name is Claude-branded but is read on every
+    harness's path, which is exactly the vendor coupling this project removes.
+    """
+    value = os.environ.get(new_name)
+    if value is None:
+        legacy = os.environ.get(legacy_name)
+        if legacy is not None:
+            print("agent-self-learning: {} is deprecated; use {}".format(
+                legacy_name, new_name), file=sys.stderr)
+            value = legacy
+    return int(value if value is not None else default)
+
+
+STALE_DAYS = _days_env("SL_SKILL_STALE_DAYS", "CLAUDE_SKILL_STALE_DAYS", "30")
+ARCHIVE_DAYS = _days_env("SL_SKILL_ARCHIVE_DAYS", "CLAUDE_SKILL_ARCHIVE_DAYS", "90")
 
 
 class UsageCorruptError(Exception):

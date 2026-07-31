@@ -81,6 +81,15 @@ class TestResolveHome(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             paths.resolve_home(env, platform="win32")
 
+    def test_relative_override_raises_instead_of_cwd_relative(self):
+        # Same class of defect as HOME being unset: a RELATIVE
+        # AGENT_LEARNING_HOME resolves against whatever directory the caller
+        # happens to be in, so the store silently moves per invocation. Refuse
+        # rather than guess.
+        env = self._env(AGENT_LEARNING_HOME="relative/dir")
+        with self.assertRaises(RuntimeError):
+            paths.resolve_home(env, platform="linux")
+
     def test_home_unset_but_override_present_does_not_raise(self):
         env = self._env(HOME="", AGENT_LEARNING_HOME="/tmp/explicit")
         self.assertEqual(paths.resolve_home(env, platform="linux"), Path("/tmp/explicit"))

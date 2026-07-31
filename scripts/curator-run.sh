@@ -97,8 +97,10 @@ echo "[CURATOR] Starting curator run at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 BACKUP_FILE="${BACKUP_DIR}/skills-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
 if [[ -d "$SKILLS_DIR" ]]; then
     BACKUP_STATUS=0
-    sl_with_store_lock tar -czf "$BACKUP_FILE" \
-        -C "$(dirname "$SKILLS_DIR")" "$(basename "$SKILLS_DIR")" 2>/dev/null \
+    # umask 077 inside the tar: the archive carries 0600 SKILL.md bodies and
+    # must not itself land world-readable at the ambient umask.
+    sl_with_store_lock bash -c 'umask 077; tar -czf "$1" -C "$2" "$3"' _ \
+        "$BACKUP_FILE" "$(dirname "$SKILLS_DIR")" "$(basename "$SKILLS_DIR")" 2>/dev/null \
         || BACKUP_STATUS=$?
     case "$BACKUP_STATUS" in
         0)  echo "[CURATOR] Backup created: $BACKUP_FILE" ;;
@@ -140,9 +142,17 @@ TOTAL_PINNED=0
 
 USAGE_FILE="${SKILLS_DIR}/${SL_USAGE_FILENAME}"
 if [[ -f "$USAGE_FILE" ]]; then
-    for SKILL_NAME in $(jq -r 'keys[]' "$USAGE_FILE" 2>/dev/null); do
-        state=$(jq -r --arg n "$SKILL_NAME" '.[$n].state // "active"' "$USAGE_FILE" 2>/dev/null || echo "active")
-        pinned=$(jq -r --arg n "$SKILL_NAME" '.[$n].pinned // false' "$USAGE_FILE" 2>/dev/null || echo "false")
+    while IFS= read -r SKILL_NAME; do
+        # .usage.json is written from LLM-authored proposals; a key that is not
+        # a plain skill name has no business reaching the tallies or the paths
+        # built from it. proposal_schema enforces the same shape on the way in.
+        [[ "$SKILL_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]] || continue
+        {
+            IFS= read -r state || true
+            IFS= read -r pinned || true
+        } < <(python3 "${SCRIPT_DIR}/lib/jsonio.py" get "$USAGE_FILE" \
+                  "${SKILL_NAME}.state" "${SKILL_NAME}.pinned" 2>/dev/null)
+        : "${state:=active}"; : "${pinned:=false}"
 
         case "$state" in
             active)   TOTAL_ACTIVE=$((TOTAL_ACTIVE + 1)) ;;
@@ -152,7 +162,7 @@ if [[ -f "$USAGE_FILE" ]]; then
         if [[ "$pinned" == "true" ]]; then
             TOTAL_PINNED=$((TOTAL_PINNED + 1))
         fi
-    done
+    done < <(python3 "${SCRIPT_DIR}/lib/jsonio.py" keys "$USAGE_FILE" 2>/dev/null)
 fi
 
 cat >> "$REPORT_FILE" << EOF
@@ -216,9 +226,17 @@ if [[ "$LLM_PASS" == "true" ]]; then
     # Build skill inventory for the LLM
     SKILL_INVENTORY=""
     if [[ -f "$USAGE_FILE" ]]; then
-        for SKILL_NAME in $(jq -r 'keys[]' "$USAGE_FILE" 2>/dev/null); do
-            state=$(jq -r --arg n "$SKILL_NAME" '.[$n].state // "active"' "$USAGE_FILE" 2>/dev/null || echo "active")
-            use_count=$(jq -r --arg n "$SKILL_NAME" '.[$n].use_count // 0' "$USAGE_FILE" 2>/dev/null || echo "0")
+        while IFS= read -r SKILL_NAME; do
+            # .usage.json is written from LLM-authored proposals; a key that is
+            # not a plain skill name has no business being interpolated into a
+            # path below. proposal_schema enforces the same shape on the way in.
+            [[ "$SKILL_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]] || continue
+            {
+                IFS= read -r state || true
+                IFS= read -r use_count || true
+            } < <(python3 "${SCRIPT_DIR}/lib/jsonio.py" get "$USAGE_FILE" \
+                      "${SKILL_NAME}.state" "${SKILL_NAME}.use_count" 2>/dev/null)
+            : "${state:=active}"; : "${use_count:=0}"
 
             # Skip archived
             if [[ "$state" == "archived" ]]; then
@@ -232,7 +250,7 @@ if [[ "$LLM_PASS" == "true" ]]; then
             fi
 
             SKILL_INVENTORY+="- [${SKILL_NAME}] ($state, ${use_count} uses): $description"$'\n'
-        done
+        done < <(python3 "${SCRIPT_DIR}/lib/jsonio.py" keys "$USAGE_FILE" 2>/dev/null)
     fi
 
     # Write inventory to temp file for manual LLM subagent invocation
