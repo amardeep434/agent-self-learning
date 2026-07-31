@@ -2024,18 +2024,20 @@ class SuggestionOverrideAndScopeTest(CoachRulesEvalBase):
         self.assertEqual(merged["scope"], emitted["no-skills"]["scope"])
 
     def test_scope_note_is_rendered_into_the_reviewer_prompt_line(self):
-        """The jq in lib/review-common.sh's sl_review_coach_section is the only
-        thing that puts `scope` in front of the model. A field the renderer
-        drops is a field that does not exist.
+        """lib/coach_render.py is the only thing that puts `scope` in front of
+        the model. A field the renderer drops is a field that does not exist.
 
         This used to name scripts/session-review.sh and
         scripts/copilot-session-review.sh, because each carried its own copy
-        of that jq. The VS Code adapter would have made three copies, so the
-        block moved into lib/review-common.sh -- and this test failing on
-        that move is the point of it: it is the assertion that noticed the
-        renderer had gone somewhere else. It now pins the one renderer, plus
-        the fact that every review script routes through it, so a fourth
-        adapter that re-inlines its own jq is caught the same way.
+        of the jq that did this. The VS Code adapter would have made three
+        copies, so the block moved into lib/review-common.sh -- and this test
+        failing on that move is the point of it: it is the assertion that
+        noticed the renderer had gone somewhere else. It moved a second time on
+        2026-07-31, from jq into lib/coach_render.py when jq stopped being a
+        dependency, and this test caught that move too. It pins the one
+        renderer, plus the fact that every review script routes through it, so
+        a fourth adapter that re-inlines its own renderer is caught the same
+        way.
         """
         self.plain_turns(60)
         merged = self.merged_signals()
@@ -2044,10 +2046,14 @@ class SuggestionOverrideAndScopeTest(CoachRulesEvalBase):
                 k: merged["no-skills"][k]
                 for k in ("id", "severity", "suggestion")})
         self.assertIn("SCOPE:", line)
-        renderer = (REPO / "scripts" / "lib" / "review-common.sh").read_text()
-        self.assertIn(".scope", renderer,
-                      "the shared coach-signal renderer drops .scope, so the "
+        renderer = (REPO / "scripts" / "lib" / "coach_render.py").read_text()
+        self.assertIn('signal.get("scope")', renderer,
+                      "the shared coach-signal renderer drops scope, so the "
                       "window disclosure never reaches the model")
+        shared = (REPO / "scripts" / "lib" / "review-common.sh").read_text()
+        self.assertIn("coach_render.py", shared,
+                      "review-common.sh no longer routes through the one "
+                      "renderer this test pins")
         for script in ("session-review.sh", "copilot-session-review.sh",
                        "vscode-session-review.sh"):
             text = (REPO / "scripts" / script).read_text()
