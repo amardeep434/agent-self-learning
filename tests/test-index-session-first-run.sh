@@ -44,7 +44,9 @@ run_idx() {
         ${PYENV_ROOT:+PYENV_ROOT="$PYENV_ROOT"} bash "${IDX_SCRIPTS}/index-session.sh" "$@"
 }
 
-IDX_OUT="$(run_idx 2>&1)" || true
+# umask 022 is the typical ambient default; the DB carries full unredacted
+# session text, so it must be 0600 regardless.
+IDX_OUT="$(umask 022; run_idx 2>&1)" || true
 
 DB_PATH="$(env -i HOME="$TMP_HOME" PATH="$PATH" AGENT_LEARNING_HOME="$STORE" \
     python3 "${IDX_SCRIPTS}/lib/paths.py" get sessions_db)"
@@ -54,6 +56,9 @@ check "DB was created on first run" "yes" "$([[ -f "$DB_PATH" ]] && echo yes || 
 INDEXED_COUNT="$(env -i HOME="$TMP_HOME" PATH="$PATH" \
     sqlite3 "$DB_PATH" "SELECT count(*) FROM sessions WHERE session_id='sess-preexisting'" 2>/dev/null || echo ERROR)"
 check "pre-existing transcript is indexed on the very first run" "1" "$INDEXED_COUNT"
+
+DB_PERMS="$(stat -c %a "$DB_PATH" 2>/dev/null || stat -f %Lp "$DB_PATH" 2>/dev/null || echo ERROR)"
+check "search.db is created 0600 under umask 022" "600" "$DB_PERMS"
 
 # fix-p6: verify SEARCH actually works end to end, not just that a row
 # landed in the table -- the macOS CI failure this branch caught was
