@@ -65,24 +65,39 @@ prompt. The subagent should:
    review pipeline is reviewer-proposes / writer-persists:
    `scripts/persist-proposal.py` owns every write to the store, including the
    `<skill-name>/SKILL.md` layout and the `.usage.json` sidecar. A subagent
-   that writes directly bypasses threat scanning, the character-limit
-   enforcement, the near-duplicate refusal and the store lock.
-5. Respect budget limits: max 3 memory writes, max 2 skill operations
+   that writes directly bypasses the threat scan, the near-duplicate refusal,
+   the schema validation and the store lock.
+5. Respect the review budget: at most 3 new memory FACTS and 2 skill
+   operations per cycle. Those are the review prompts' conventions, not the
+   writer's limits -- what `lib/proposal_schema.py` actually ENFORCES is at
+   most one entry per legal memory file (2: MEMORY.md, USER.md) and at most
+   10 skills per proposal.
 
 ### Memory Review Behavior
 
-Memory is split into two bounded stores:
-- **MEMORY.md** (`<store>/memory/MEMORY.md`, max 2200 chars): Agent operational
-  notes -- project facts, corrections, tool quirks, workflow conventions.
-- **USER.md** (`<store>/memory/USER.md`, max 1375 chars): User profile --
-  name, role, communication style, tool preferences, timezone.
+Memory is two files, and there is **no character cap on either** -- memory is
+never truncated:
+- **MEMORY.md** (`<store>/memory/MEMORY.md`): Agent operational notes --
+  project facts, corrections, tool quirks, workflow conventions.
+- **USER.md** (`<store>/memory/USER.md`): User profile -- name, role,
+  communication style, tool preferences, timezone.
+
+What actually bounds them, all on the WRITE side and all refusals rather than
+trims (`scripts/persist-proposal.py`, `lib/proposal_schema.py`):
+- 64 KiB per memory entry, 256 KiB per proposal, and a 1 MiB hard wall per
+  file -- a write that would cross it is REFUSED with a named reason in
+  `persist-failures.log`, never silently cut
+- near-duplicate refusal: a line restating an existing one is rejected, so
+  growth is bounded by consolidation, not by deletion
+- `SL_MEMORY_INJECT_BUDGET` (32768 bytes) is ADVISORY only, and read-side:
+  exceeding it costs a log line at session start, not content
 
 Rules:
-- Each entry: one line, under 120 characters
+- Each entry: one line, under 120 characters (the review prompts' convention)
 - Read existing files first -- do not duplicate
-- Replace outdated entries rather than add + remove
+- Replace outdated entries rather than add + remove; consolidate with a
+  `replace` entry instead of dropping entries to make room
 - Never save secrets, tokens, API keys, or passwords
-- If at character limit, remove least relevant entry before adding
 
 ### Skill Review Behavior
 
