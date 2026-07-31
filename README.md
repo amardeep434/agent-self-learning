@@ -337,7 +337,7 @@ Only rows backed by a suite in `tests/run-all.sh` are marked supported.
 | Session-end background review | ✅ `Stop` | ✅ `sessionEnd` | ✅ `Stop` — **per turn**, not per session |
 | Mid-session turn counting | ✅ `PostToolUse` | ❌ not wired (deliberate — the session-end loop is the portable core) | ✅ `PostToolUse` — **required**, not optional, because `Stop` is per turn |
 | Independent of Claude Code | — | ✅ `test-claude-absent.sh` runs the full Copilot path with no `claude` binary and no `~/.claude` | — |
-| Session search indexing | ✅ (Claude JSONL) | ❌ planned | ❌ not wired — `index-session.sh` reads `~/.claude/projects` |
+| Session search indexing | ✅ (Claude JSONL) | ❌ not implemented — needs a probed Copilot event-to-message mapping; see `docs/superpowers/plans/2026-07-31-neutrality-remediation.md` WP5 | ❌ not wired — `index-session.sh` reads `~/.claude/projects` |
 | Coach signals (Routes A/B) | ✅ | ✅ | ✅ |
 | Live end-to-end, real session on disk | ✅ | ✅ 2026-07-25 / -26, real paid model call | ⚠️ **never** — no real VS Code hook has invoked our scripts |
 | Windows | ✅ green, with skips | ✅ green, with skips | ⚠️ untested — suites run, no hook has ever fired |
