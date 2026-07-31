@@ -1675,8 +1675,15 @@ git commit -m "docs: storage locations, migration, deprecation, corrected roadma
 > reviewers were being spawned with no transcript at all, so every review before `7cf4782` was a
 > paid model call that could not, by construction, learn anything. Fixing it (round P0/P0b)
 > required exactly the adapters deferred here — `scripts/lib/transcript.py`. *Deep security
-> audit* was also built anyway, as `tests/test-adversarial-sweep.py`. The remaining six
-> deferrals are correctly absent from the tree.
+> audit* was also built anyway, as `tests/test-adversarial-sweep.py`.
+>
+> **SUPERSEDED again (2026-07-31):** "the remaining six deferrals are correctly absent from
+> the tree" is no longer true either. *VS Code hook spike and adapter* SHIPPED on 2026-07-28
+> (565e762 — `scripts/vscode-session-review.sh`, `config/vscode-hooks.json`,
+> `tests/test-vscode-*.sh`), and *measurement* is partially built: `scripts/lib/telemetry.py`
+> reads real harness usage records, which is the usage-reader half of that deferral
+> (continuous holdout and reporting norms remain absent). Re-derive before trusting any count
+> here: `git log --oneline --diff-filter=A -- scripts/vscode-session-review.sh scripts/lib/telemetry.py`.
 
 Session-source adapters (Copilot `session-store.db`, Claude JSONL) · VS Code hook spike and adapter · Copilot `postToolUse` turn counting · measurement (usage reader, continuous holdout, reporting norms) · failure-triggered review · install UX, install manifest, manifest-driven uninstall · deep security audit · all `graphify-offline` work (XML, BeanShell, PDF extraction).
 

@@ -505,6 +505,8 @@ Environment variables of the same name override the file.
 | `SL_COACH_RULES_ENABLED` | `false` | Coach Route A (rule evaluation) |
 | `SL_COACH_EXPORT_ENABLED` | `false` | Coach Route B (fork auto-export) |
 | `SL_COACH_EXPORT_PATH` | `~/.aiec/summary-latest.json` | Route B input file |
+| `SL_SKILL_STALE_DAYS` | `30` | **Environment only** (read by `skill-lifecycle.py` directly, not via `self-learning.conf`). Days of skill inactivity before it is marked stale. The old `CLAUDE_SKILL_STALE_DAYS` is honored for one release with a deprecation notice on stderr |
+| `SL_SKILL_ARCHIVE_DAYS` | `90` | **Environment only**, same as above. Days of skill inactivity before it is archived. The old `CLAUDE_SKILL_ARCHIVE_DAYS` is honored for one release with a deprecation notice on stderr |
 | `SL_SKILLOPT_ENABLED` | `false` | Route C: SkillOpt skill optimization (opt-in) |
 | `SL_SKILLOPT_REPO` | (empty) | Path to a microsoft/SkillOpt checkout. **Optional** when `skillopt-sleep` is on `PATH`; a checkout wins when both are present, matching upstream's own precedence |
 | `SL_SKILLOPT_RUN_CONFIRMED` | `false` | Safety gate; the expensive `run` verb refuses until set true after a dry-run cost review |
