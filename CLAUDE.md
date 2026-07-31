@@ -36,16 +36,27 @@ Measured twice: on 2026-07-28 ad-hoc invocations of `session-review.sh` /
 `copilot-session-review.sh` / `vscode-session-review.sh` / `turn-counter.sh` left six lines
 in the live `persist-failures.log` — payloads with no `sessionId`/`transcript_path`, i.e.
 test calls, not sessions — and `doctor.sh` correctly reported UNHEALTHY on them.
-**`bash tests/run-all.sh` is NOT clean of live-store writes** — an earlier version of this
-paragraph claimed it was, and that claim was wrong. `tests/test-review-cli-flags.sh:120-124`
-invokes the **real installed `copilot`** (`copilot --max-ai-credits 30 -p ""`) to prove the
-CLI still accepts the flags this project passes. That starts a genuine session, which
-creates `~/.copilot/session-state/<uuid>` and fires your installed `sessionEnd` hook.
-MEASURED 2026-07-29, that one suite alone: **+697 bytes to the live `logs/persist.log`, +1
-Copilot session directory** — so it may also consume Copilot credits. No memory or skill
-content is written; the damage is log noise and a session dir, not corrupted state.
+`tests/test-review-cli-flags.sh` was **rewritten on 2026-07-31** (fcd8f08, c868c9e, then
+78ba7e7) so it no longer starts a session: it probes the real binaries through
+`copilot help limits` and `claude … mcp list`, each wrapped in an explicit session-count
+guard that fails the suite if the probe created one, and mutation **M6** pins that a
+reintroduced `-p ""` probe fails both guards. Re-derive rather than trust this sentence:
 
-The false "verified clean" claim came from a broken check: `find <store> -newermt … || echo
+```bash
+grep -n 'help limits\|mcp list\|sessions 0 -> 0' tests/test-review-cli-flags.sh
+git log --oneline -5 -- tests/test-review-cli-flags.sh
+```
+
+**HISTORY, kept because the lesson outlives the fix.** Before that rewrite,
+`bash tests/run-all.sh` was NOT clean of live-store writes — and an earlier version of this
+paragraph claimed it was, which was wrong. The suite invoked the **real installed `copilot`**
+(`copilot --max-ai-credits 30 -p ""`), which starts a genuine session, creates
+`~/.copilot/session-state/<uuid>` and fires your installed `sessionEnd` hook. MEASURED
+2026-07-29, that one suite alone: **+697 bytes to the live `logs/persist.log`, +1 Copilot
+session directory** — so it may also have consumed Copilot credits. No memory or skill
+content was written; the damage was log noise and a session dir, not corrupted state.
+
+That false "verified clean" claim came from a broken check: `find <store> -newermt … || echo
 none`. `find` exits 0 with empty output, so the `||` never fires, and silence was read as
 absence. That is this project's signature defect inside its own verification — when
 measuring "did anything change", compare a **byte count or checksum before and after**,
@@ -56,13 +67,16 @@ distinguishes an ABSENT log ("never ran, or ran and never failed") from an EMPTY
 and recorded zero failures"), so deleting the file asserts something different from
 truncating it.
 
-> ⚠️ **A sandboxed `HOME` is not automatically hermetic.** `tests/test-review-cli-flags.sh`
-> invokes the *real* `claude` and `copilot` binaries, which materialise `$HOME/.claude` and
-> `$HOME/.copilot` in whatever `HOME` is set — including an **empty** Copilot
-> `session-store.db`. `tests/test-telemetry.py` then fails later in the same run with
-> `copilot session-store.db store exists but parsed to zero records`. Reproduced
-> 2026-07-29. Run the suite either against a real populated `$HOME`, or with a `PATH` that
-> has neither binary on it (which is what CI does).
+> ⚠️ **A sandboxed `HOME` is not automatically hermetic** — MEASURED 2026-07-29,
+> **PRE-rewrite; needs re-measurement against the current suite.**
+> `tests/test-review-cli-flags.sh` invokes the *real* `claude` and `copilot` binaries, which
+> materialise `$HOME/.claude` and `$HOME/.copilot` in whatever `HOME` is set — including an
+> **empty** Copilot `session-store.db`. `tests/test-telemetry.py` then failed later in the
+> same run with `copilot session-store.db store exists but parsed to zero records`. The
+> subcommand probes still invoke the real binaries, so the failure mode is plausibly intact,
+> but nobody has reproduced it since the rewrite. Until someone does, run the suite either
+> against a real populated `$HOME`, or with a `PATH` that has neither binary on it (which is
+> what CI does).
 
 ### 2. Fail loudly, never silently
 
@@ -102,7 +116,9 @@ the limitation and prints its own reason.
 - `scripts/` — deployable hook, review, curator, install/uninstall and doctor scripts
   (bash + Python). `install.sh` copies these into the vendor-neutral store resolved by
   `scripts/lib/paths.py` (its `scripts` key) — **not** `~/.claude/scripts/self-learning`.
-- `prompts/` — review prompt templates (memory, skill, combined, curator).
+- `prompts/` — curator review prompt and authoring standards (`curator-review.md`,
+  `authoring-standards.md`); the per-review prompts were inlined into the review scripts
+  (26aaf68).
 - `config/` — defaults plus the three hook-registration templates, each carrying a
   `__SL_SCRIPTS_DIR__` placeholder substituted by `install.sh` at install time:
   `settings-hooks.json` (Claude Code), `copilot-hooks.json` (Copilot CLI — note its
