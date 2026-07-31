@@ -142,7 +142,11 @@ TOTAL_PINNED=0
 
 USAGE_FILE="${SKILLS_DIR}/${SL_USAGE_FILENAME}"
 if [[ -f "$USAGE_FILE" ]]; then
-    for SKILL_NAME in $(jq -r 'keys[]' "$USAGE_FILE" 2>/dev/null); do
+    while IFS= read -r SKILL_NAME; do
+        # .usage.json is written from LLM-authored proposals; a key that is not
+        # a plain skill name has no business reaching the tallies or the paths
+        # built from it. proposal_schema enforces the same shape on the way in.
+        [[ "$SKILL_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]] || continue
         state=$(jq -r --arg n "$SKILL_NAME" '.[$n].state // "active"' "$USAGE_FILE" 2>/dev/null || echo "active")
         pinned=$(jq -r --arg n "$SKILL_NAME" '.[$n].pinned // false' "$USAGE_FILE" 2>/dev/null || echo "false")
 
@@ -154,7 +158,7 @@ if [[ -f "$USAGE_FILE" ]]; then
         if [[ "$pinned" == "true" ]]; then
             TOTAL_PINNED=$((TOTAL_PINNED + 1))
         fi
-    done
+    done < <(jq -r 'keys[]' "$USAGE_FILE" 2>/dev/null)
 fi
 
 cat >> "$REPORT_FILE" << EOF
@@ -218,7 +222,11 @@ if [[ "$LLM_PASS" == "true" ]]; then
     # Build skill inventory for the LLM
     SKILL_INVENTORY=""
     if [[ -f "$USAGE_FILE" ]]; then
-        for SKILL_NAME in $(jq -r 'keys[]' "$USAGE_FILE" 2>/dev/null); do
+        while IFS= read -r SKILL_NAME; do
+            # .usage.json is written from LLM-authored proposals; a key that is
+            # not a plain skill name has no business being interpolated into a
+            # path below. proposal_schema enforces the same shape on the way in.
+            [[ "$SKILL_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]] || continue
             state=$(jq -r --arg n "$SKILL_NAME" '.[$n].state // "active"' "$USAGE_FILE" 2>/dev/null || echo "active")
             use_count=$(jq -r --arg n "$SKILL_NAME" '.[$n].use_count // 0' "$USAGE_FILE" 2>/dev/null || echo "0")
 
@@ -234,7 +242,7 @@ if [[ "$LLM_PASS" == "true" ]]; then
             fi
 
             SKILL_INVENTORY+="- [${SKILL_NAME}] ($state, ${use_count} uses): $description"$'\n'
-        done
+        done < <(jq -r 'keys[]' "$USAGE_FILE" 2>/dev/null)
     fi
 
     # Write inventory to temp file for manual LLM subagent invocation

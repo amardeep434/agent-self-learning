@@ -40,6 +40,15 @@ def resolve_home(env: dict | None = None, platform: str | None = None) -> Path:
 
     explicit = env.get("AGENT_LEARNING_HOME")
     if explicit:
+        if not os.path.isabs(explicit):
+            # Same refusal as the $HOME-unset case below, for the same reason: a
+            # relative override resolves against the caller's CWD, so the store
+            # silently moves between invocations of the same install.
+            raise RuntimeError(
+                "AGENT_LEARNING_HOME must be an absolute path, got: "
+                f"{explicit}. Refusing a path relative to the current working "
+                "directory."
+            )
         return Path(explicit)
 
     xdg = env.get("XDG_DATA_HOME")
