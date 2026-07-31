@@ -94,41 +94,57 @@ remove "${HOME}/.copilot/hooks/self-learning.json"
 
 # Strip our hooks from settings.json (backup first, keep everything else intact).
 # Best-effort: this runs AFTER files are deleted, so it must never abort the
-# uninstall — guard on jq, tolerate both the nested and legacy-flat hook schemas,
+# uninstall — guard on python3, tolerate both the nested and legacy-flat hook schemas,
 # and warn (not fail) if the edit cannot be applied.
 SETTINGS="${HOME}/.claude/settings.json"
 # Match our hooks by the SCRIPT NAMES they invoke, not by the literal string
 # "self-learning". That string only ever appeared in the pre-Task-7b layout
 # (~/.claude/scripts/self-learning/...); a correctly-registered hook today reads
 # `bash ~/.local/share/agent-learning/scripts/turn-counter.sh`, which contains
-# no such substring -- so both the gate below and the jq filter used to skip
+# no such substring -- so both the gate below and the filter used to skip
 # right past the hooks they exist to remove, and say nothing. The test only fed
 # this the legacy shape, so nothing caught it.
 SL_HOOK_PATTERN='self-learning|/(turn-counter|session-review|index-session)\.sh'
 if [[ -f "$SETTINGS" ]] && grep -qE "$SL_HOOK_PATTERN" "$SETTINGS"; then
-    if ! command -v jq >/dev/null 2>&1; then
-        echo "  jq not found — leaving settings.json unchanged; remove self-learning hooks manually" >&2
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "  python3 not found — leaving settings.json unchanged; remove self-learning hooks manually" >&2
     else
         BAK="${SETTINGS}.pre-uninstall-$(date +%s)"
         stripped=false
         # settings.json may hold sensitive values; keep backup/temp files private.
-        # Filter handles both schemas: nested groups ({matcher,hooks:[{command}]})
-        # and legacy-flat entries ({matcher,command}).
+        # The filter handles both schemas: nested groups
+        # ({matcher,hooks:[{command}]}) and legacy-flat entries
+        # ({matcher,command}). It was a jq program until jq stopped being a
+        # dependency of this project; python3 is already required by everything
+        # else here.
         ( umask 077
           cp "$SETTINGS" "$BAK" && \
-          jq --arg pat "$SL_HOOK_PATTERN" '
-            if .hooks then
-              .hooks |= map_values(
-                map(if has("hooks")
-                    then (.hooks |= map(select((.command // "") | test($pat) | not)))
-                    else . end)
-                | map(select(if has("hooks")
-                             then ((.hooks | length) > 0)
-                             else ((.command // "") | test($pat) | not) end))
-              )
-            else . end
-          ' "$BAK" > "${SETTINGS}.tmp" 2>/dev/null
-        ) && [[ -s "${SETTINGS}.tmp" ]] && jq . "${SETTINGS}.tmp" >/dev/null 2>&1 && stripped=true || true
+          SL_HOOK_PATTERN="$SL_HOOK_PATTERN" python3 -c '
+import json, os, re, sys
+
+pattern = re.compile(os.environ["SL_HOOK_PATTERN"])
+
+
+def keep(entry):
+    if isinstance(entry, dict) and "hooks" in entry:
+        entry["hooks"] = [h for h in entry["hooks"]
+                          if not pattern.search((h or {}).get("command", ""))]
+        return len(entry["hooks"]) > 0
+    return not pattern.search((entry or {}).get("command", ""))
+
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    doc = json.load(handle)
+hooks = doc.get("hooks")
+if isinstance(hooks, dict):
+    doc["hooks"] = {event: [e for e in entries if keep(e)]
+                    for event, entries in hooks.items()}
+json.dump(doc, sys.stdout, indent=2)
+sys.stdout.write("\n")
+' "$BAK" > "${SETTINGS}.tmp" 2>/dev/null
+        ) && [[ -s "${SETTINGS}.tmp" ]] \
+          && python3 -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))' "${SETTINGS}.tmp" >/dev/null 2>&1 \
+          && stripped=true || true
         chmod 600 "$BAK" "${SETTINGS}.tmp" 2>/dev/null || true
         if [[ "$stripped" == "true" ]]; then
             mv "${SETTINGS}.tmp" "$SETTINGS"

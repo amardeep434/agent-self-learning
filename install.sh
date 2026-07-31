@@ -11,7 +11,8 @@
 #   bash install.sh --uninstall  # Remove installed files (delegates to uninstall.sh)
 #
 # Prerequisites:
-#   - jq, python3 must be installed
+#   - python3 must be installed (jq is no longer required by the installer;
+#     scripts/turn-counter.sh is the one runtime script that still uses it)
 #   - sqlite3 (the CLI) is optional: fix-p6 moved session-search schema
 #     init off the CLI and onto python3's own bundled sqlite3 module (which
 #     macOS's system CLI often lacks FTS5 support for, unlike Python's), so
@@ -89,7 +90,7 @@ echo "=== agent-self-learning Installer ==="
 echo ""
 
 MISSING_DEPS=()
-for cmd in jq python3; do
+for cmd in python3; do
     if ! command -v "$cmd" &>/dev/null; then
         MISSING_DEPS+=("$cmd")
     fi
