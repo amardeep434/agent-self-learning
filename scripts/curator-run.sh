@@ -97,8 +97,10 @@ echo "[CURATOR] Starting curator run at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 BACKUP_FILE="${BACKUP_DIR}/skills-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
 if [[ -d "$SKILLS_DIR" ]]; then
     BACKUP_STATUS=0
-    sl_with_store_lock tar -czf "$BACKUP_FILE" \
-        -C "$(dirname "$SKILLS_DIR")" "$(basename "$SKILLS_DIR")" 2>/dev/null \
+    # umask 077 inside the tar: the archive carries 0600 SKILL.md bodies and
+    # must not itself land world-readable at the ambient umask.
+    sl_with_store_lock bash -c 'umask 077; tar -czf "$1" -C "$2" "$3"' _ \
+        "$BACKUP_FILE" "$(dirname "$SKILLS_DIR")" "$(basename "$SKILLS_DIR")" 2>/dev/null \
         || BACKUP_STATUS=$?
     case "$BACKUP_STATUS" in
         0)  echo "[CURATOR] Backup created: $BACKUP_FILE" ;;

@@ -171,12 +171,29 @@ check "with settings.json present, turn-counter hook detected" "yes" \
 ## curator-run.sh
 ## ============================================================
 
-CURATOR_OUT="$(run_env bash "${SCRIPT_DIR}/scripts/curator-run.sh" 2>&1)" || true
+CURATOR_OUT="$(umask 022; run_env bash "${SCRIPT_DIR}/scripts/curator-run.sh" 2>&1)" || true
 
 check "curator created backup dir under store (matches install.sh's SL_HOME/backups/curator)" "yes" \
     "$([[ -d "${STORE}/backups/curator" ]] && echo yes || echo no)"
 check "curator did NOT create a backup dir under ~/.claude" "no" \
     "$([[ -d "${TMP_HOME}/.claude/backups" ]] && echo yes || echo no)"
+
+# The backup tarball contains 0600 SKILL.md bodies; the archive itself must
+# not downgrade them to a world-readable file. Probed (hard rule 3): skip
+# where the filesystem does not enforce chmod at all.
+CURATOR_PROBE="${TMP_HOME}/.curator-perm-probe"
+: > "$CURATOR_PROBE"; chmod 600 "$CURATOR_PROBE" 2>/dev/null || true
+CURATOR_PROBE_PERMS="$(stat -c %a "$CURATOR_PROBE" 2>/dev/null || stat -f %Lp "$CURATOR_PROBE" 2>/dev/null || echo ERROR)"
+CURATOR_BACKUP="$(ls -1 "${STORE}/backups/curator/"*.tar.gz 2>/dev/null | head -1 || true)"
+if [[ "$CURATOR_PROBE_PERMS" != "600" ]]; then
+    echo "SKIP: curator backup permission assertion (chmod not enforced here: probe reads $CURATOR_PROBE_PERMS)"
+elif [[ -z "$CURATOR_BACKUP" ]]; then
+    echo "FAIL: curator produced no backup tarball to check permissions on"
+    FAILURES=$((FAILURES+1))
+else
+    check "curator backup tarball is 0600 under umask 022" "600" \
+        "$(stat -c %a "$CURATOR_BACKUP" 2>/dev/null || stat -f %Lp "$CURATOR_BACKUP")"
+fi
 
 REPORT_FILE="${RESOLVED_LOGS}/curator/$(date +%Y-%m-%d)-curator-report.md"
 check "curator report written under resolved store logs" "yes" \
