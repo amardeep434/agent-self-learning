@@ -26,10 +26,10 @@ _HOOK_RAW="$(sl_read_stdin_safe)"
 # are schema-constrained, and a transcript path with an embedded newline would
 # already have been unusable everywhere else in this project.
 {
-    IFS= read -r HOOK_SESSION_ID
-    IFS= read -r HOOK_TOOL_NAME
-    IFS= read -r HOOK_EVENT_NAME
-    IFS= read -r HOOK_TRANSCRIPT_PATH
+    IFS= read -r HOOK_SESSION_ID || true
+    IFS= read -r HOOK_TOOL_NAME || true
+    IFS= read -r HOOK_EVENT_NAME || true
+    IFS= read -r HOOK_TRANSCRIPT_PATH || true
 } < <(printf '%s' "$_HOOK_RAW" | python3 "${_HI_LIB_DIR}/jsonio.py" get - \
         session_id tool_name hook_event_name transcript_path 2>/dev/null)
 

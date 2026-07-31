@@ -29,9 +29,9 @@ COPILOT_HOOK_RAW="$_COPILOT_HOOK_RAW"
 # these fields can contain a newline: sessionId is a uuid and cwd/reason are
 # harness-generated.
 {
-    IFS= read -r COPILOT_HOOK_SESSION_ID
-    IFS= read -r COPILOT_HOOK_CWD
-    IFS= read -r COPILOT_HOOK_REASON
+    IFS= read -r COPILOT_HOOK_SESSION_ID || true
+    IFS= read -r COPILOT_HOOK_CWD || true
+    IFS= read -r COPILOT_HOOK_REASON || true
 } < <(printf '%s' "$_COPILOT_HOOK_RAW" | python3 "${_CHI_LIB_DIR}/jsonio.py" get - \
         sessionId cwd reason 2>/dev/null)
 
