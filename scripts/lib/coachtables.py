@@ -169,8 +169,15 @@ RULES_MANIFEST = {
 
 
 def rule_digest(data: bytes) -> str:
-    """SHA-256 of a rule file's raw bytes."""
-    return hashlib.sha256(data).hexdigest()
+    """SHA-256 of a rule file's bytes, CRLF-normalized to LF first.
+
+    A Windows checkout with core.autocrlf materialises the vendored .md files
+    with CRLF endings; hashing raw bytes then mismatches every manifest entry
+    (measured: 45/45 skipped on windows-latest CI). Line endings are checkout
+    representation, not content -- an attacker cannot hide a text change behind
+    them -- so they are normalized out of the pin.
+    """
+    return hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()
 
 
 MODEL_TIERS_ANCHOR = "const MODEL_TIERS: Record<string, number> = {"

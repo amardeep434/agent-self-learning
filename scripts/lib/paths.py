@@ -40,7 +40,14 @@ def resolve_home(env: dict | None = None, platform: str | None = None) -> Path:
 
     explicit = env.get("AGENT_LEARNING_HOME")
     if explicit:
-        if not os.path.isabs(explicit):
+        # A leading "/" counts as absolute even where ntpath disagrees
+        # (Python 3.13 made drive-less rooted paths non-absolute on Windows):
+        # this project's Windows execution runs under Git Bash/MSYS, where
+        # /tmp/... is the normal absolute form and is converted before native
+        # python.exe sees it (see the module docstring). The guard exists to
+        # refuse genuinely CWD-relative values like "relative/dir", not to
+        # police drive semantics.
+        if not os.path.isabs(explicit) and not explicit.startswith("/"):
             # Same refusal as the $HOME-unset case below, for the same reason: a
             # relative override resolves against the caller's CWD, so the store
             # silently moves between invocations of the same install.
