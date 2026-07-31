@@ -19,17 +19,26 @@ source "${_HI_LIB_DIR}/stdin-safe.sh"
 
 _HOOK_RAW="$(sl_read_stdin_safe)"
 
-_hook_field() {
-    # $1 = jq field name, $2 = default
-    local val
-    val=$(printf '%s' "$_HOOK_RAW" | jq -r --arg d "$2" ".${1} // \$d" 2>/dev/null) || val="$2"
-    [[ -z "$val" ]] && val="$2"
-    printf '%s' "$val"
-}
+# ONE python3 spawn for all four fields, replacing four jq spawns (and the jq
+# dependency). lib/jsonio.py prints exactly one line per requested key --
+# missing or null included -- so these four reads never shift out of step.
+# None of these fields can contain a newline: session ids and hook event names
+# are schema-constrained, and a transcript path with an embedded newline would
+# already have been unusable everywhere else in this project.
+{
+    IFS= read -r HOOK_SESSION_ID
+    IFS= read -r HOOK_TOOL_NAME
+    IFS= read -r HOOK_EVENT_NAME
+    IFS= read -r HOOK_TRANSCRIPT_PATH
+} < <(printf '%s' "$_HOOK_RAW" | python3 "${_HI_LIB_DIR}/jsonio.py" get - \
+        session_id tool_name hook_event_name transcript_path 2>/dev/null)
 
-HOOK_SESSION_ID="$(_hook_field session_id unknown)"
-HOOK_TOOL_NAME="$(_hook_field tool_name unknown)"
-HOOK_EVENT_NAME="$(_hook_field hook_event_name unknown)"
-HOOK_TRANSCRIPT_PATH="$(_hook_field transcript_path "")"
+# Defaults, applied identically whether the field was absent, null, empty, or
+# the payload was unparseable (in which case jsonio.py printed nothing at all
+# and the reads above left these unset).
+: "${HOOK_SESSION_ID:=unknown}"
+: "${HOOK_TOOL_NAME:=unknown}"
+: "${HOOK_EVENT_NAME:=unknown}"
+: "${HOOK_TRANSCRIPT_PATH:=}"
 
 export HOOK_SESSION_ID HOOK_TOOL_NAME HOOK_EVENT_NAME HOOK_TRANSCRIPT_PATH

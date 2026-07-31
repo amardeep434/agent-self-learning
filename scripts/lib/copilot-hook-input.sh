@@ -21,17 +21,25 @@ source "${_CHI_LIB_DIR}/stdin-safe.sh"
 
 _COPILOT_HOOK_RAW="$(sl_read_stdin_safe)"
 
-_chi_field() {
-    # $1 = jq field name, $2 = default
-    local val
-    val=$(printf '%s' "$_COPILOT_HOOK_RAW" | jq -r --arg d "$2" ".${1} // \$d" 2>/dev/null) || val="$2"
-    [[ -z "$val" ]] && val="$2"
-    printf '%s' "$val"
-}
-
 COPILOT_HOOK_RAW="$_COPILOT_HOOK_RAW"
-COPILOT_HOOK_SESSION_ID="$(_chi_field sessionId "")"
-COPILOT_HOOK_CWD="$(_chi_field cwd "")"
-COPILOT_HOOK_REASON="$(_chi_field reason "")"
+
+# ONE python3 spawn for all three fields, replacing three jq spawns (and the jq
+# dependency). lib/jsonio.py prints exactly one line per requested key --
+# missing or null included -- so these reads never shift out of step. None of
+# these fields can contain a newline: sessionId is a uuid and cwd/reason are
+# harness-generated.
+{
+    IFS= read -r COPILOT_HOOK_SESSION_ID
+    IFS= read -r COPILOT_HOOK_CWD
+    IFS= read -r COPILOT_HOOK_REASON
+} < <(printf '%s' "$_COPILOT_HOOK_RAW" | python3 "${_CHI_LIB_DIR}/jsonio.py" get - \
+        sessionId cwd reason 2>/dev/null)
+
+# Empty default for every field, applied identically whether it was absent,
+# null, empty, or the payload was unparseable (jsonio.py then printed nothing
+# and the reads above left these unset).
+: "${COPILOT_HOOK_SESSION_ID:=}"
+: "${COPILOT_HOOK_CWD:=}"
+: "${COPILOT_HOOK_REASON:=}"
 
 export COPILOT_HOOK_RAW COPILOT_HOOK_SESSION_ID COPILOT_HOOK_CWD COPILOT_HOOK_REASON
