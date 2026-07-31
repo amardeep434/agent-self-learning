@@ -2,6 +2,13 @@
 # Self-Learning System Configuration
 # Adapted from NousResearch Hermes Agent architecture.
 # All values shown are defaults -- omit to use default.
+#
+# Every key in this file MUST have a consumer under scripts/. Aspirational knobs
+# live in plan docs, not here: a documented parameter nothing reads is worse than
+# an undocumented one, because it reads as a setting you can change. Verify with
+#   grep -rn "<key>" scripts/ | grep -v __pycache__
+# 2026-07-31: the phantom half of this file was deleted after that grep returned
+# zero for every key removed.
 
 version: "1.0"
 
@@ -13,9 +20,6 @@ review:
   enabled: true
   interval: 10                     # Turns between mid-session reviews
   max_iterations: 16               # Max tool uses per review subagent
-  max_memory_writes: 3             # Max memory entries per review cycle
-  max_skill_ops: 2                 # Max skill create/update per review cycle
-  digest_size: 24                  # Max messages in conversation digest
   quiet: true                      # Suppress review output from user view
   on_stop: true                    # Run final review on session end
   min_turns_for_stop: 5            # Minimum turns before Stop hook review fires
@@ -23,13 +27,13 @@ review:
   log_dir: "<store>/logs/reviews"
 
 # Memory System
+#
+# There is deliberately NO character cap here. memory_char_limit/user_char_limit
+# existed in this file until 2026-07-31 and contradicted the shipped design:
+# memory is never truncated. The only size knob that exists is the ADVISORY
+# session_start_injection.memory_inject_budget_bytes at the bottom of this file.
 memory:
-  memory_char_limit: 2200          # Max characters for MEMORY.md
-  user_char_limit: 1375            # Max characters for USER.md
-  entry_delimiter: "\n\u00a7\n"    # Entry separator (section sign)
   threat_scan_scope: "strict"      # Threat scanning strictness
-  drift_detection: true            # Detect external modifications
-  backup_on_drift: true            # Save .bak before overwriting drifted file
 
 # Skill Library
 skills:
@@ -63,39 +67,10 @@ curator:
 session_search:
   enabled: true
   db_path: "<store>/sessions/search.db"
-  retention_days: 90               # Auto-delete sessions older than this
-  discover_scan_limit: 300         # Max FTS rows scanned before dedup
-  discovery_limit: 3               # Default sessions per DISCOVERY query
-  scroll_window: 5                 # Messages before/after anchor in SCROLL
-  read_head: 20                    # First N messages in READ (large sessions)
-  read_tail: 10                    # Last N messages in READ (large sessions)
-  browse_limit: 10                 # Default sessions in BROWSE
-  bookend_size: 3                  # Start/end messages per DISCOVERY result
-  hit_context_window: 5            # Messages around FTS hit in DISCOVERY
-  hidden_sources:                  # Sources excluded from search/browse
-    - subagent
-    - tool
-  demoted_sources:                 # Sources ranked below interactive
-    - cron
-  index_on_stop: true              # Index session when Stop hook fires
-  batch_index_cron: "17 3 * * 0"   # Weekly batch index (Sunday 3:17am)
-
-# Identity
-identity:
-  file: "<store>/IDENTITY.md"    # Identity file path
-  hot_reload: false                # Reload identity each turn (not each session)
 
 # Security
 security:
   threat_scan_on_write: true       # Scan memory/skill writes
-  threat_scan_on_load: true        # Scan memory at load time
-  block_on_threat: true            # Block writes with threats (vs. warn)
-
-# Prompt Assembly
-prompt:
-  date_format: "date_only"         # "date_only" for cache stability, "datetime" for precision
-  skills_cache_enabled: true       # Cache assembled skills text to disk
-  skills_cache_path: "<store>/cache/skills-manifest.json"
 
 # Session-start delivery (Route B). The read-back half: learned memory is
 # injected into each new session via a SessionStart hook.
