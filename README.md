@@ -87,7 +87,7 @@ SESSION START
     |
     v
 +-------------------+     +--------------------+     +------------------+
-| Load frozen       |     | MEMORY.md (no cap) |     | USER.md (1375ch) |
+| Load frozen       |     | MEMORY.md (no cap) |     | USER.md (no cap) |
 | snapshots from    |<----| learned-skills/    |     | .usage.json      |
 | disk into prompt  |     | sessions/search.db |     |                  |
 +--------+----------+     +--------------------+     +------------------+
@@ -340,9 +340,12 @@ Only rows backed by a suite in `tests/run-all.sh` are marked supported.
 | Session search indexing | ✅ (Claude JSONL) | ❌ planned | ❌ not wired — `index-session.sh` reads `~/.claude/projects` |
 | Coach signals (Routes A/B) | ✅ | ✅ | ✅ |
 | Live end-to-end, real session on disk | ✅ | ✅ 2026-07-25 / -26, real paid model call | ⚠️ **never** — no real VS Code hook has invoked our scripts |
+| Windows | ✅ green, with skips | ✅ green, with skips | ⚠️ untested — suites run, no hook has ever fired |
+| macOS | ✅ green | ✅ green | ⚠️ untested — same |
 
 > **On "wired, never observed firing".** Delivery exists as of 2026-07-30 and is exercised
-> by 55 passing suites, but **no real hook has ever fired it** on Claude Code or VS Code.
+> by the full suite (`bash tests/run-all.sh`; never count suites in prose — the glob is the
+> truth), but **no real hook has ever fired it** on Claude Code or VS Code.
 > Every harness contract behind it was read out of shipped code and disassembly, not
 > observed at runtime — the sole exception is Copilot CLI's, where the real
 > `runtime.node` parser was invoked directly. So these rows stay ⚠️ deliberately: a green
@@ -368,8 +371,6 @@ Only rows backed by a suite in `tests/run-all.sh` are marked supported.
 > [`docs/upstream-audit-2026-07-30.md`](docs/upstream-audit-2026-07-30.md) for the evidence
 > and [`docs/superpowers/plans/2026-07-30-learned-context-delivery.md`](docs/superpowers/plans/2026-07-30-learned-context-delivery.md)
 > for the plan this implements.
-| Windows | ✅ green, with skips | ✅ green, with skips | ⚠️ untested — suites run, no hook has ever fired |
-| macOS | ✅ green | ✅ green | ⚠️ untested — same |
 
 **CI results are per-OS**, not per-harness: the whole matrix cell passes or fails, so both
 CLI columns necessarily show the same platform result. The matrix is
