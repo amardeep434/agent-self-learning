@@ -496,7 +496,7 @@ Environment variables of the same name override the file.
 | `SL_REVIEW_MIN_TURNS` | `5` | Minimum session turns before a review runs |
 | `SL_REVIEW_MAX_TURNS` | `16` | Turn cap for the spawned Claude Code reviewer (`--max-turns`) |
 | `SL_COPILOT_REVIEW_MODEL` | (CLI default) | Model for Copilot reviews; use the cheapest available. Must match `^[A-Za-z0-9._-]+$` |
-| `SL_COPILOT_MAX_AI_CREDITS` | (empty — off) | Optional cost ceiling for Copilot reviews (`--max-ai-credits`). Integer, minimum 30; anything else is dropped with a reason on stderr |
+| `SL_COPILOT_MAX_AI_CREDITS` | `30` | Cost ceiling for Copilot reviews (`--max-ai-credits`). Integer, minimum 30; anything else is dropped with a reason on stderr. Set it **empty** to restore unlimited (amended 2026-07-31; see below) |
 | `SL_VSCODE_REVIEWER` | (empty — auto) | Which CLI reviews a VS Code session: `copilot` or `claude`. See note below |
 | `SL_PERSIST_LOCK_TIMEOUT` | `20` (seconds) | How long a writer waits for the store lock before failing loudly |
 | `SL_MEMORY_INJECT_BUDGET` | `32768` (bytes) | Size at which `MEMORY.md` is **reported** as worth consolidating when injected at session start. Advisory only — memory is never truncated; exceeding it costs a line in `persist-failures.log`, not content. Roughly 4 bytes per token, so the default is ~8K tokens added per session start **and after every compaction** |
@@ -529,11 +529,14 @@ The two harnesses bound the background reviewer differently, and the asymmetry i
   known only after a response returns, so it bounds a runaway loop rather than any single
   call.
 
-`SL_COPILOT_MAX_AI_CREDITS` is **off by default** rather than defaulted to the minimum.
-`copilot` errors on unknown options, so passing the flag unconditionally would hard-break
-the whole review on any CLI older than the release that added it — and the review runs in
-a detached pipeline, so the only symptom would be lines in `persist-failures.log` while
-learning quietly stopped.
+`SL_COPILOT_MAX_AI_CREDITS` **ships at 30** (the CLI's documented minimum). This was
+amended on 2026-07-31 — it used to default to empty/unlimited, deliberately. The cost of
+the amendment is real and is stated here rather than hidden: `copilot` errors on unknown
+options, so on a Copilot CLI older than the release that added `--max-ai-credits` the
+review now fails until you set `SL_COPILOT_MAX_AI_CREDITS=` (empty) in
+`self-learning.conf`. That failure is **loud** — a named line in `persist-failures.log`
+that `doctor.sh` surfaces — whereas unbounded spend in a detached pipeline was silent, and
+a silent-failure pipeline with no spend ceiling is the worse of the two.
 
 To confirm the flags against your own installed binaries at any time (no model calls, no
 tokens): `bash tests/test-review-cli-flags.sh`.
