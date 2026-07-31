@@ -73,6 +73,13 @@ def render(obj):
 
 
 def main(argv):
+    # Same LF-only discipline as lib/paths.py and lib/jsonio.py (fix round E):
+    # native-Windows Python writes "\r\n" into pipes, and this output is spliced
+    # verbatim into a review prompt by a bash caller.
+    try:
+        sys.stdout.reconfigure(newline="\n")
+    except (AttributeError, ValueError):
+        pass
     if len(argv) != 2:
         return 0
     try:

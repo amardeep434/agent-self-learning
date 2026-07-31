@@ -57,8 +57,18 @@ INDEXED_COUNT="$(env -i HOME="$TMP_HOME" PATH="$PATH" \
     sqlite3 "$DB_PATH" "SELECT count(*) FROM sessions WHERE session_id='sess-preexisting'" 2>/dev/null || echo ERROR)"
 check "pre-existing transcript is indexed on the very first run" "1" "$INDEXED_COUNT"
 
-DB_PERMS="$(stat -c %a "$DB_PATH" 2>/dev/null || stat -f %Lp "$DB_PATH" 2>/dev/null || echo ERROR)"
-check "search.db is created 0600 under umask 022" "600" "$DB_PERMS"
+# Probed, never inferred (hard rule 3), same block as test-install-paths.sh: on
+# a filesystem that does not enforce chmod (MSYS/Git Bash, some network mounts)
+# the 0600 assertion is meaningless and skips with its own printed reason.
+PERM_PROBE="${TMP_HOME}/.perm-probe"
+: > "$PERM_PROBE"; chmod 600 "$PERM_PROBE" 2>/dev/null || true
+PROBE_PERMS="$(stat -c %a "$PERM_PROBE" 2>/dev/null || stat -f %Lp "$PERM_PROBE" 2>/dev/null || echo ERROR)"
+if [[ "$PROBE_PERMS" != "600" ]]; then
+    echo "SKIP: search.db permission assertion (chmod not enforced here: probe file reads $PROBE_PERMS)"
+else
+    DB_PERMS="$(stat -c %a "$DB_PATH" 2>/dev/null || stat -f %Lp "$DB_PATH" 2>/dev/null || echo ERROR)"
+    check "search.db is created 0600 under umask 022" "600" "$DB_PERMS"
+fi
 
 # fix-p6: verify SEARCH actually works end to end, not just that a row
 # landed in the table -- the macOS CI failure this branch caught was

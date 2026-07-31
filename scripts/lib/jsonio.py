@@ -102,6 +102,15 @@ def cmd_set(path, pairs):
 
 
 def main(argv):
+    # Fix round E's lesson, same as lib/paths.py: on native Windows, Python's
+    # text-mode stdout writes "\n" as "\r\n" even into a pipe. Every bash
+    # consumer reads this output with `IFS= read -r`, which strips the newline
+    # but KEEPS the carriage return, corrupting every field it reads. Force
+    # LF-only output regardless of platform.
+    try:
+        sys.stdout.reconfigure(newline="\n")
+    except (AttributeError, ValueError):
+        pass
     if len(argv) < 3:
         print("usage: jsonio.py get <file|-> <key>... | set <file> <k>=<v>... "
               "| keys <file|->", file=sys.stderr)
