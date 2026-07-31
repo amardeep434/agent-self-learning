@@ -136,13 +136,17 @@ def _scan_threats():
     return _scan_threats_module
 
 
-def _gate_line(text: str) -> "tuple[str, str | None]":
+def _gate_line(text: str, scope: str = "relaxed") -> "tuple[str, str | None]":
     """Return (safe_text, blocked_category).
 
     A line that trips a threat pattern is replaced wholesale, not edited: a
     partial rewrite of an injection attempt can still carry the instruction,
     and the categories here (prompt_injection, credentials, private keys) are
     ones where no part of the line is worth keeping.
+
+    The default scope is "relaxed" because THIS module's caller is MEMORY.md
+    injection; mirror-skills.py passes "strict" for skill bodies. See
+    gate_for_injection's docstring for why the two channels differ.
     """
     if not text.strip():
         return text, None
@@ -169,7 +173,7 @@ def _gate_line(text: str) -> "tuple[str, str | None]":
         #       for scope in ("strict","relaxed"):
         #           if st.scan_for_threats(l, scope=scope): print(scope, l[:90])
         #   EOF
-        findings = _scan_threats().scan_for_threats(text, scope="relaxed")
+        findings = _scan_threats().scan_for_threats(text, scope=scope)
     except (ImportError, OSError, AttributeError):
         # A threat table we cannot load must not silently become "no threats".
         # Fail closed: block the line and say why.
@@ -180,7 +184,7 @@ def _gate_line(text: str) -> "tuple[str, str | None]":
     return f"[BLOCKED: {category}]", category
 
 
-def gate_for_injection(text: str) -> "tuple[str, list[str]]":
+def gate_for_injection(text: str, scope: str = "relaxed") -> "tuple[str, list[str]]":
     """Gate text line by line, returning (safe_text, blocked_categories).
 
     Hermes' pattern, both halves: the blocked marker goes into the INJECTED
@@ -191,11 +195,17 @@ def gate_for_injection(text: str) -> "tuple[str, list[str]]":
 
     Line granularity suits MEMORY.md, which is one lesson per line -- one
     poisoned entry costs that entry, not the whole block.
+
+    scope splits by CHANNEL, deliberately. MEMORY.md injection runs "relaxed"
+    for the measured-false-positive reason in _gate_line. Skill bodies
+    (mirror-skills.py) run "strict": those files are auto-loaded by the harness
+    as instructions, so shell-substitution and encoded-payload checks stay on
+    there even though they cost false positives on prose.
     """
     blocked: list[str] = []
     safe_lines: list[str] = []
     for line in text.splitlines():
-        safe, category = _gate_line(line)
+        safe, category = _gate_line(line, scope)
         if category:
             blocked.append(category)
         safe_lines.append(safe)
@@ -215,7 +225,7 @@ def gate_for_injection(text: str) -> "tuple[str, list[str]]":
     # blunt block-everything outcome is reserved for a payload that per-line
     # gating genuinely missed, which is the only case that needs it.
     joined = " ".join(line.strip() for line in gated.splitlines())
-    _, whole_category = _gate_line(joined)
+    _, whole_category = _gate_line(joined, scope)
     if whole_category:
         return (f"[BLOCKED: {whole_category} detected across line breaks]",
                 blocked + [whole_category])
