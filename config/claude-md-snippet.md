@@ -101,7 +101,7 @@ Rules:
   schema the writer validates against; a name it rejects discards the whole
   proposal, valid memory entries included.)
 - Descriptions: one sentence, max 60 characters, ends with period
-- Author field: always "claude-code-review" (never environment-derived)
+- Author field: always "agent-review" (never environment-derived)
 - When the user corrects how you handle a task, update the skill that governs
   that task -- memory alone is not enough
 
