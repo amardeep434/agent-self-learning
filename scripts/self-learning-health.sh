@@ -165,13 +165,15 @@ else
         if [[ "$SELF_CHECK_RC" -ne 0 ]]; then
             fail "writer self-check failed (persist-proposal.py exited ${SELF_CHECK_RC})" \
                 "Inspect: ${SELF_CHECK_OUT}"
-        # Was `jq -e '.skipped | length == 1'`. jsonio.py prints a list value as
-        # JSON, so exactly one planned write is a bracketed list with no comma in
-        # it -- and an unparseable or empty result fails the test, as before.
-        elif ! SELF_CHECK_SKIPPED="$(printf '%s' "$SELF_CHECK_OUT" \
-                  | python3 "${SCRIPT_DIR}/lib/jsonio.py" get - skipped 2>/dev/null)" \
-             || [[ "$SELF_CHECK_SKIPPED" != \[*\] || "$SELF_CHECK_SKIPPED" == "[]" \
-                   || "$SELF_CHECK_SKIPPED" == *,* ]]; then
+        # Was `jq -e '.skipped | length == 1'`, and this preserves that exact
+        # shape test: a length check on the parsed list, not a glob over its
+        # rendering (a glob false-failed on a planned-write path containing a
+        # comma). An unparseable or empty result fails the test, as before.
+        elif ! printf '%s' "$SELF_CHECK_OUT" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+sys.exit(0 if isinstance(doc.get("skipped"), list) and len(doc["skipped"]) == 1 else 1)
+' 2>/dev/null; then
             fail "writer self-check produced unexpected output" \
                 "persist-proposal.py --dry-run did not return the expected plan: ${SELF_CHECK_OUT}"
         else

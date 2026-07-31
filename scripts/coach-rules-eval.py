@@ -2253,6 +2253,12 @@ def main():
     # (hand-assembled rule sets, test fixtures) are not claiming to be the
     # vendored corpus and are not held to its manifest.
     verify_hashes = (rules_dir / "UPSTREAM.md").is_file()
+    if not verify_hashes and any(rules_dir.glob("*.md")):
+        # Deleting UPSTREAM.md from an installed corpus would otherwise disable
+        # verification with no signal at all -- say so, once per run.
+        print("coach-rules-eval: {} has no UPSTREAM.md marker; treating it as a "
+              "hand-assembled rule set, RULES_MANIFEST verification is OFF for "
+              "this run".format(rules_dir), file=sys.stderr)
     for rule_file in sorted(rules_dir.glob("*.md")):
         if rule_file.name == "UPSTREAM.md":
             continue

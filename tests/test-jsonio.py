@@ -113,6 +113,17 @@ class SetTest(unittest.TestCase):
         run(["set", str(self.path), "k=v"])
         self.assertEqual([p.name for p in Path(self.tmp).iterdir()], ["state.json"])
 
+    def test_pair_without_equals_exits_2_and_writes_nothing(self):
+        out = run(["set", str(self.path), "orphan"])
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("malformed pair", out.stderr)
+        self.assertFalse(self.path.exists())
+
+    def test_pair_without_key_exits_2(self):
+        out = run(["set", str(self.path), "=value"])
+        self.assertEqual(out.returncode, 2)
+        self.assertFalse(self.path.exists())
+
     def test_unparseable_existing_file_exits_3_and_is_not_clobbered(self):
         self.path.write_text("{not json", encoding="utf-8")
         out = run(["set", str(self.path), "k=v"])

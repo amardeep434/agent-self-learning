@@ -76,7 +76,13 @@ def cmd_set(path, pairs):
     if not isinstance(obj, dict):
         raise SystemExit(3)
     for pair in pairs:
-        key, _, value = pair.partition("=")
+        key, sep, value = pair.partition("=")
+        if not sep or not key:
+            # A pair with no `=` (or no key) is caller error; setting it as an
+            # empty-string value would be a silent miswrite. Fail loudly.
+            print("jsonio.py set: malformed pair (want <key>=<value>): "
+                  + pair, file=sys.stderr)
+            raise SystemExit(2)
         parsed = json.loads(value[5:]) if value.startswith("json:") else value
         cur = obj
         parts = key.split(".")
