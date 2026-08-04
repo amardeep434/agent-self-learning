@@ -99,4 +99,14 @@ jobs:
           fi
 
       - name: Run tests
-        run: bash tests/run-all.sh
+        # Windows gets a higher per-suite ceiling: process spawns under Git
+        # Bash are both slow and highly variable on the hosted runners --
+        # tests/test-coach-rules-eval.py measured 43s on one windows-latest
+        # run and was killed at 120s mid-test on the next (run 30888916106),
+        # same code both times. 300s still bounds a genuine hang without
+        # letting runner variance fail a healthy suite.
+        run: |
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            export RUN_ALL_SUITE_TIMEOUT=300
+          fi
+          bash tests/run-all.sh
