@@ -28,16 +28,16 @@ In **PowerShell**:
 git --version                     # need Git for Windows (provides Git Bash)
 python --version                  # need 3.9+
 $PSVersionTable.PSVersion         # need 7+ for the Copilot CLI hooks
-where.exe jq                      # jq must resolve; if not, winget install jqlang.jq
 copilot --version                 # GitHub Copilot CLI, authenticated
 code --version                    # VS Code
 ```
 
-**Copy back:** all six outputs.
+**Copy back:** all five outputs.
 
-If `jq` does not resolve, stop and install it. A missing `jq` is now *reported* rather
-than silently disabling reviews (that was a defect fixed on 2026-07-28), but you want the
-system working, not merely honest about being broken.
+`jq` is deliberately NOT on this list any more. It used to be required for one JSON read
+in the PostToolUse hook; `scripts/lib/turn_counter_core.py` does that read in the Python
+process the hook already spawns, so the project has no runtime dependency on jq at all.
+Do not install it on this machine — if the system needs it, that is the bug.
 
 Backup, in **Git Bash** (not PowerShell):
 

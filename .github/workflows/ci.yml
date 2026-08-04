@@ -39,10 +39,18 @@ jobs:
       # too); tests/test-no-python3-name.sh is the regression guard. Do not
       # reintroduce a shim here -- it would re-mask precisely this class.
 
-      # jq is preinstalled on ubuntu-latest and windows-latest, but not
-      # guaranteed on macos-latest images; install explicitly rather than
-      # assume. `brew install` exits 0 (with a warning) if already present,
-      # so this is safe either way.
+      # jq is TEST-SUITE tooling, not a runtime dependency. Nothing this
+      # project installs shells out to jq any more -- turn-counter.sh was the
+      # last user and lib/turn_counter_core.py absorbed that read -- but the
+      # suites still use it to ASSERT on JSON they produced
+      # (test-*-hooks-json.sh, test-turn-counter.sh, ...), and a test that
+      # reads a file with the same code that wrote it proves less. So it is
+      # installed for the runner, never required of a user.
+      #
+      # Preinstalled on ubuntu-latest and windows-latest but not guaranteed on
+      # macos-latest images; install explicitly rather than assume.
+      # `brew install` exits 0 (with a warning) if already present, so this is
+      # safe either way.
       - name: Install jq (macOS)
         if: runner.os == 'macOS'
         run: brew install jq
@@ -74,8 +82,10 @@ jobs:
             exit 1
           fi
           echo "[capability probe] interpreter: ${SL_PYTHON} ($("${SL_PYTHON}" --version 2>&1))"
-          # REQUIRED: absence of any of these means a suite would silently
-          # degrade rather than test anything, so fail loudly and early.
+          # REQUIRED OF THE RUNNER, not of a user: absence of either means a
+          # suite would silently degrade rather than test anything, so fail
+          # loudly and early. jq is here as TEST tooling only -- see the
+          # macOS install step above; no shipped script invokes it.
           for tool in jq bash; do
             if ! command -v "$tool" >/dev/null 2>&1; then
               echo "::error::required tool '$tool' is not resolvable on PATH — failing loudly instead of letting a downstream suite silently degrade" >&2

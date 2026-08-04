@@ -12,8 +12,10 @@
 #
 # Prerequisites:
 #   - Python 3 must be installed, reachable as any of `python3`, `python` or
-#     the Windows `py -3` launcher (jq is no longer required by the installer;
-#     scripts/turn-counter.sh is the one runtime script that still uses it)
+#     the Windows `py -3` launcher. It is the ONLY runtime dependency: jq was
+#     the last one and turn-counter.sh, its last user, stopped needing it when
+#     lib/turn_counter_core.py absorbed that JSON read into the Python process
+#     the hook already spawns.
 #   - sqlite3 (the CLI) is optional: fix-p6 moved session-search schema
 #     init off the CLI and onto python3's own bundled sqlite3 module (which
 #     macOS's system CLI often lacks FTS5 support for, unlike Python's), so

@@ -112,10 +112,16 @@ the limitation and prints its own reason.
   which is not Python. `tests/test-no-python3-name.sh` is the regression guard.
 - **Hook budget: <100ms.** `turn-counter.sh` was once documented at <50ms. Re-measured
   2026-08-04 (`date +%s%N`, 6 runs each, sandboxed store, native interpreter first on
-  PATH), across the SL_PYTHON change: **66-70ms before, 68-73ms after** — the interpreter
-  resolution in `lib/python-resolve.sh` costs one extra `--version` probe, ~3ms, and
-  short-circuits on the exported `SL_PYTHON` for the rest of the process tree. Earlier
-  measurement (fix round C, 5-6 runs): **50-68ms** with a native `python3` on PATH,
+  PATH), across two changes on the same day:
+  - SL_PYTHON resolution: **66-70ms → 68-73ms**. One extra `--version` probe, ~3ms,
+    short-circuited thereafter by the exported `SL_PYTHON`.
+  - jq removal (`lib/turn_counter_core.py`): **67-73ms → 61-69ms**, i.e. ~5ms FASTER.
+    The hook is now two Python spawns (`lib/paths.py all`, then the core) and no jq.
+    Note the shape: an earlier attempt swapped `jq` for `lib/jsonio.py` in place and was
+    reverted at **97-129ms** because it ADDED a spawn. Consolidating work into a process
+    you already pay for is the only move that fits this budget; substituting one tool for
+    another does not.
+  Earlier measurement (fix round C, 5-6 runs): **50-68ms** with a native `python3` on PATH,
   **130-155ms** with a pyenv/asdf shim in front of it — the shim itself costs ~85ms,
   confirmed by timing it against the real interpreter binary. ~22-25ms of the native figure
   is `config.sh`'s one `python3 lib/paths.py all` subprocess spawn per invocation. <50ms is
