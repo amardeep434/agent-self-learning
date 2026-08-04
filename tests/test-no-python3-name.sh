@@ -32,6 +32,9 @@ source "${SCRIPT_DIR}/tests/lib/path-compare.sh"
 _sl_py_name="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)"
 REAL_PY=""
 [[ -n "$_sl_py_name" ]] && REAL_PY="$("$_sl_py_name" -c 'import sys; print(sys.executable)' 2>/dev/null || true)"
+# Native Windows python prints \r\n; strip ALL CRs so the forwarders this
+# suite builds never embed one (same capture-side lesson as test-python-resolve.sh).
+REAL_PY="${REAL_PY//$'\r'/}"
 if [[ -z "$REAL_PY" || ! -x "$REAL_PY" ]]; then
     echo "SKIP: no working Python 3 on this machine (probed python3/python, then sys.executable)."
     exit 0

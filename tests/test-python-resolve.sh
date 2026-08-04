@@ -30,6 +30,9 @@ RESOLVER="${SCRIPT_DIR}/scripts/lib/python-resolve.sh"
 _SL_PY_NAME="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)"
 REAL_PY=""
 [[ -n "$_SL_PY_NAME" ]] && REAL_PY="$("$_SL_PY_NAME" -c 'import sys; print(sys.executable)' 2>/dev/null || true)"
+# Native Windows python prints \r\n; an unstripped \r here would leak into
+# every fake this suite builds and make case (e) assert against TWO CRs.
+REAL_PY="${REAL_PY//$'\r'/}"
 if [[ -z "$REAL_PY" || ! -x "$REAL_PY" ]]; then
     echo "SKIP: no working Python 3 on this machine -- probed 'python3'/'python' and asked for sys.executable; nothing to resolve TO."
     exit 0

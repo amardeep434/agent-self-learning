@@ -34,7 +34,11 @@ sl_resolve_python() {
         # "...python.exe\r" fails every later "${SL_PYTHON}" invocation with a
         # name no filesystem has. Same CRLF class round E fixed on the Python
         # side -- this is the one capture where the SHELL is the consumer.
-        SL_PYTHON="${SL_PYTHON%$'\r'}"
+        # ALL \r, not just a trailing one: a CR can also arrive mid-value when
+        # the printing interpreter was itself resolved from a CRLF-tainted
+        # source (measured on windows-latest via test case (e)), and a path
+        # never legitimately contains one.
+        SL_PYTHON="${SL_PYTHON//$'\r'/}"
         [[ -n "$SL_PYTHON" ]] && export SL_PYTHON && return 0
     fi
     SL_PYTHON=""
