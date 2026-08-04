@@ -56,6 +56,7 @@ gh api "repos/${REPO}/contents/${INTERPRETER_PATH}?ref=${COMMIT_SHA}" --jq '.con
 # that property by committing SHA-256 hashes, which behave identically because
 # leoProfanity.check() is exact whole-word set membership.
 LEO_VERSION="$("${SL_PYTHON}" -c 'import sys;sys.path.insert(0,"'"${SCRIPT_DIR}"'/scripts/lib");import coachtables;print(coachtables.PROFANITY_VERSION)')"
+LEO_VERSION="${LEO_VERSION%$'\r'}"   # native Windows python prints \r\n; this goes into a URL
 TMP_LEO="$(mktemp -d)"
 curl -fsSL "https://registry.npmjs.org/leo-profanity/-/leo-profanity-${LEO_VERSION}.tgz" \
     -o "${TMP_LEO}/leo.tgz"

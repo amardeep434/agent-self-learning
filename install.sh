@@ -228,6 +228,7 @@ import paths
 found = paths.legacy_home()
 print(found or '')
 " "${SCRIPT_DIR}/scripts/lib" 2>/dev/null || true)"
+LEGACY_HOME="${LEGACY_HOME%$'\r'}"   # native Windows python prints \r\n; this is a PATH
 
 if [[ -n "$LEGACY_HOME" ]]; then
     echo "NOTE: a legacy install was found at ${LEGACY_HOME}."

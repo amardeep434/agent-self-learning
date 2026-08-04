@@ -219,6 +219,7 @@ sl_review_coach_section() {
 
     signals_mtime=$("${SL_PYTHON}" -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' \
         "${SL_COACH_SIGNALS_FILE}")
+    signals_mtime="${signals_mtime%$'\r'}"   # native Windows python prints \r\n; this feeds arithmetic
     signals_age_days=$(( ( $(date +%s) - signals_mtime ) / 86400 ))
     (( signals_age_days <= 7 )) || return 0
 

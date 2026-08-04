@@ -84,6 +84,17 @@ def now_iso() -> str:
 
 
 def _main(argv: list[str]) -> int:
+    # LF-only stdout (fix round E, see lib/paths.py's _main for the full
+    # rationale). Native Windows Python emits "\r\n" for every print, bash
+    # strips only the record-terminating "\n" from `$(...)`, and this module's
+    # output IS read into bash variables -- config.sh's sl_iso_to_epoch feeds
+    # it straight into shell arithmetic. A trailing "\r" there is
+    # invisible and corrupts every downstream use of the value.
+    try:
+        sys.stdout.reconfigure(newline="\n")
+    except (AttributeError, ValueError):
+        pass
+
     if len(argv) >= 2 and argv[0] == "parse":
         epoch = parse_iso(argv[1])
         print(epoch if epoch is not None else 0)

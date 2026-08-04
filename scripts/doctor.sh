@@ -202,6 +202,7 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 print("yes" if m.DIR_FD_SUPPORTED else "no")
 ' "${SCRIPT_DIR}" 2>/dev/null || echo "unknown")"
+    DIR_FD_PROBE="${DIR_FD_PROBE%$'\r'}"   # native Windows python prints \r\n; the case below is exact
     case "${DIR_FD_PROBE}" in
         yes) echo "dir_fd TOCTOU fix: ACTIVE (persist-proposal.py writes are dir_fd-anchored; race closed)" ;;
         no)  echo "dir_fd TOCTOU fix: NOT AVAILABLE on this platform -- persist-proposal.py is using the" ;
@@ -235,6 +236,7 @@ sys.path.insert(0, sys.argv[1] + "/lib")
 import store_lock
 print(store_lock.BACKEND, "yes" if store_lock.BACKEND_RELEASES_ON_CRASH else "no")
 ' "${SCRIPT_DIR}" 2>/dev/null || echo "unknown unknown")"
+    LOCK_PROBE="${LOCK_PROBE%$'\r'}"   # native Windows python prints \r\n
     LOCK_BACKEND="${LOCK_PROBE%% *}"
     LOCK_CRASH_SAFE="${LOCK_PROBE##* }"
     case "${LOCK_BACKEND}" in
@@ -430,6 +432,10 @@ for label, root in m.mirror_roots():
     # be mis-parsed.
     print("root|{}|active|{}|{}".format(label, count, root))
 ' "${SCRIPT_DIR}" 2>/dev/null)"
+    # Every \r, not just a trailing one: this probe emits MANY lines and each
+    # is field-split below, so on native Windows python the \r would land
+    # inside the last field of every record rather than only at the end.
+    MIRROR_PROBE="${MIRROR_PROBE//$'\r'/}"
     if [[ -z "$MIRROR_PROBE" ]]; then
         echo "  could not probe (scripts/mirror-skills.py failed to import)"
     else
@@ -487,6 +493,7 @@ import paths
 h = paths.legacy_home()
 print(h if h else "")
 ' "${SCRIPT_DIR}/lib" 2>/dev/null || true)"
+    LEGACY_HOME="${LEGACY_HOME%$'\r'}"   # native Windows python prints \r\n; this is a PATH
 fi
 
 echo "legacy store:"

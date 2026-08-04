@@ -194,6 +194,17 @@ def search(db_path: str, query: str, limit: int = 20) -> list[dict]:
 
 
 def _main(argv: list[str]) -> int:
+    # LF-only stdout (fix round E, see lib/paths.py's _main for the full
+    # rationale). Native Windows Python emits "\r\n" for every print, bash
+    # strips only the record-terminating "\n" from `$(...)`, and this module's
+    # output IS read into bash variables -- index-session.sh and install.sh
+    # string-compare the result. A trailing "\r" there is
+    # invisible and corrupts every downstream use of the value.
+    try:
+        sys.stdout.reconfigure(newline="\n")
+    except (AttributeError, ValueError):
+        pass
+
     if not argv:
         print(
             "usage: session_db.py ensure-schema <db_path> <base_schema.sql> [<fts5_schema.sql>]\n"
