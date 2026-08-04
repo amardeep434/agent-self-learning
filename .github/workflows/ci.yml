@@ -26,25 +26,18 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      # actions/setup-python on Windows only provides `python.exe`, never a
-      # `python3` on PATH (this is a known upstream gap, not a project bug).
-      # Every script in this repo shells out to `python3` by convention
-      # (config.sh, install.sh, curator-run.sh, ...), so without this shim
-      # every Windows job would fail with "python3: command not found"
-      # before a single test suite ran. Shimming here keeps that convention
-      # intact everywhere else instead of scattering python/python3
-      # fallbacks across scripts/.
-      - name: Ensure python3 resolves (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          set -euo pipefail
-          PY_PATH="$(command -v python)"
-          PY_DIR="$(dirname "$PY_PATH")"
-          if [[ ! -e "${PY_DIR}/python3.exe" ]]; then
-            cp "$PY_PATH" "${PY_DIR}/python3.exe"
-          fi
-          command -v python3
-          python3 --version
+      # DELETED: an "Ensure python3 resolves (Windows)" step that copied
+      # python.exe to python3.exe. actions/setup-python on Windows provides
+      # only `python.exe`, exactly like the python.org/winget installers this
+      # repo's README recommends -- so the runner was RIGHT and the shim made
+      # Windows CI green against an alias no real Windows machine has. The
+      # owner's laptop then failed install.sh preflight with "Missing required
+      # dependencies: python3" that six green Windows cells could not see.
+      # The scripts now resolve the interpreter through
+      # scripts/lib/python-resolve.sh (which runs a candidate and requires it
+      # to report Python 3, defeating the fake Microsoft-Store python3 alias
+      # too); tests/test-no-python3-name.sh is the regression guard. Do not
+      # reintroduce a shim here -- it would re-mask precisely this class.
 
       # jq is preinstalled on ubuntu-latest and windows-latest, but not
       # guaranteed on macos-latest images; install explicitly rather than
@@ -70,9 +63,20 @@ jobs:
       - name: Verify required tools are on PATH
         run: |
           set -euo pipefail
+          # Python is verified through the project's OWN resolver, not through
+          # `command -v python3`. That name does not exist on the Windows
+          # runners (nor on a real Windows machine), which is the entire point
+          # of deleting the shim above: CI must run the code the way the
+          # platform actually presents Python, or it verifies a fiction.
+          source scripts/lib/python-resolve.sh
+          if ! sl_resolve_python; then
+            echo "::error::no Python 3 resolvable (tried python3, python, py -3) — failing loudly instead of letting a downstream suite silently degrade" >&2
+            exit 1
+          fi
+          echo "[capability probe] interpreter: ${SL_PYTHON} ($("${SL_PYTHON}" --version 2>&1))"
           # REQUIRED: absence of any of these means a suite would silently
           # degrade rather than test anything, so fail loudly and early.
-          for tool in python3 jq bash; do
+          for tool in jq bash; do
             if ! command -v "$tool" >/dev/null 2>&1; then
               echo "::error::required tool '$tool' is not resolvable on PATH — failing loudly instead of letting a downstream suite silently degrade" >&2
               exit 1
