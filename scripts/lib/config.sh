@@ -67,13 +67,18 @@ _sl_config_degraded() {
         >> "${log_dir}/persist-failures.log" 2>/dev/null || true
 }
 
-# Degraded fallback only if python3/paths.py could not run at all (e.g. no
-# python3 on PATH). paths.py remains the single authoritative resolver
-# (global constraint); this is a bash-side MIRROR of its override chain
-# (AGENT_LEARNING_HOME > XDG_DATA_HOME/agent-learning > $HOME default),
-# not a reimplementation of its full resolution logic (no LOCALAPPDATA
-# branch -- python3 is a hard dependency of this project's Windows CI, so
-# this path only matters for Linux/macOS/Git-Bash boxes missing python3).
+# Degraded fallback only if the interpreter or paths.py could not run at all.
+# paths.py remains the single authoritative resolver (global constraint); this
+# is a bash-side MIRROR of its override chain, in its exact order:
+# AGENT_LEARNING_HOME > XDG_DATA_HOME/agent-learning > (Windows only)
+# %LOCALAPPDATA%/agent-learning > $HOME/.local/share/agent-learning.
+#
+# The LOCALAPPDATA branch used to be missing, with a comment claiming python3
+# was a hard dependency of Windows CI so the fallback could not matter there.
+# That was exactly backwards on a REAL Windows machine, which is where
+# resolution fails: paths.py resolves %LOCALAPPDATA%\agent-learning while this
+# fallback resolved C:\Users\<u>\.local\share\agent-learning -- two stores,
+# silently, the class this project exists to eliminate.
 #
 # I6 / deferred minor 3: commit 384a319 added a hardcoded
 # ${HOME}/.local/share/agent-learning literal here to fix "never silently
@@ -92,6 +97,14 @@ _sl_compute_fallback_home() {
         printf '%s' "$AGENT_LEARNING_HOME"
     elif [[ -n "${XDG_DATA_HOME:-}" ]]; then
         printf '%s/agent-learning' "$XDG_DATA_HOME"
+    elif [[ -n "${LOCALAPPDATA:-}" && ( -n "${MSYSTEM:-}" || "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ) ]]; then
+        # Windows is decided by two values that only exist there together, not
+        # by a platform NAME: LOCALAPPDATA (which Git Bash inherits and
+        # exports) plus an MSYS/Cygwin marker. LOCALAPPDATA alone would also
+        # match a Wine/WSL environment carrying it through WSLENV, where
+        # paths.py -- which branches on sys.platform -- would NOT take this
+        # branch, and the two must agree or the store forks in two.
+        printf '%s/agent-learning' "$LOCALAPPDATA"
     else
         printf '%s/.local/share/agent-learning' "$HOME"
     fi
@@ -104,6 +117,17 @@ if [[ -z "${SL_PYTHON:-}" ]]; then
 fi
 
 if [[ -f "$_sl_paths_py" && -n "${SL_PYTHON:-}" ]]; then
+    # Stdout is captured, not piped through a process substitution, so the
+    # spawn's EXIT STATUS is available -- it was `2>/dev/null` on a process
+    # substitution before, which discarded both the status and the reason on
+    # the single most important spawn in the project (rule 2 violation: the
+    # store silently moved to the fallback location with nothing recorded).
+    # Stderr is folded into the same capture rather than costing a second
+    # spawn: the parse loop below only reacts to lines whose key matches one
+    # of the eight it knows, so a diagnostic line is inert as input while
+    # still being available, verbatim, as the reason in the failure log.
+    _sl_paths_rc=0
+    _sl_paths_out="$("${SL_PYTHON}" "$_sl_paths_py" all 2>&1)" || _sl_paths_rc=$?
     while IFS='=' read -r _k _v; do
         # Fix round E, defence in depth: paths.py's own stdout now forces LF
         # line endings (see its _main docstring) so this trailing-\r strip
@@ -123,7 +147,11 @@ if [[ -f "$_sl_paths_py" && -n "${SL_PYTHON:-}" ]]; then
             config_file) _sl_pp_config_file="$_v" ;;
             scripts)     _sl_pp_scripts="$_v" ;;
         esac
-    done < <("${SL_PYTHON}" "$_sl_paths_py" all 2>/dev/null)
+    done <<< "$_sl_paths_out"
+    if [[ "$_sl_paths_rc" -ne 0 || -z "$_sl_pp_home" ]]; then
+        _sl_config_degraded paths_resolution_degraded \
+            "lib/paths.py could not be run (exit ${_sl_paths_rc}) via ${SL_PYTHON}; falling back to the bash-side mirror at ${_sl_fallback_home}, which may not be the store paths.py resolves. Output: ${_sl_paths_out//$'\n'/ }"
+    fi
 fi
 
 SL_CONFIG_FILE="${SL_CONFIG_FILE:-${_sl_pp_config_file:-${_sl_fallback_home}/self-learning.conf}}"
