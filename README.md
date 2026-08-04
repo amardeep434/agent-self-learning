@@ -183,9 +183,16 @@ the one setting that registers it:
 
 ```jsonc
 "chat.hookFilesLocations": {
-  "/path/to/store/vscode-hooks.json": true
+  "~/AppData/Local/agent-learning/vscode-hooks.json": true   // Windows default store
+  // Linux/macOS default: "~/.local/share/agent-learning/vscode-hooks.json"
 }
 ```
+
+The path **must** be `~/`-relative with forward slashes: VS Code rejects absolute paths
+and `\` separators in this setting outright ("Paths must be relative or start with '~/'"),
+and silently ignores an absolute forward-slash path — measured on Windows, where the
+installer used to print the absolute form and VS Code hooks never fired. `install.sh` now
+prints the `~/`-relative entry for your actual store location.
 
 It does **not** edit your VS Code settings.json — an installer writing into an editor's
 user settings is not something this project does.

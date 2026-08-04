@@ -592,8 +592,24 @@ else
     echo "  To review VS Code Copilot Chat sessions, add this to VS Code's"
     echo "  settings.json (Preferences: Open User Settings (JSON)):"
     echo ""
+    # VS Code refuses absolute paths and backslash separators in
+    # chat.hookFilesLocations ("Paths must be relative or start with '~/'") --
+    # measured on VS Code/Windows 2026-08-04, where the absolute form this
+    # block used to print was silently ignored (forward-slash form) or
+    # rejected outright (backslash form). The store defaults under \$HOME on
+    # every platform, so print the ~/-relative spelling VS Code accepts.
+    VSCODE_HOOK_SETTING="$VSCODE_HOOK_DST"
+    case "$VSCODE_HOOK_DST" in
+        ("${HOME%/}/"*) VSCODE_HOOK_SETTING="~/${VSCODE_HOOK_DST#"${HOME%/}/"}" ;;
+        (*)
+            echo "  WARNING: the store is OUTSIDE your home directory, and VS Code's"
+            echo "  chat.hookFilesLocations refuses absolute paths -- the entry below"
+            echo "  will NOT register as printed. Move the store under your profile"
+            echo "  (unset AGENT_LEARNING_HOME) or use a workspace-relative path."
+            ;;
+    esac
     echo "      \"chat.hookFilesLocations\": {"
-    echo "        \"${VSCODE_HOOK_DST}\": true"
+    echo "        \"${VSCODE_HOOK_SETTING}\": true"
     echo "      }"
     echo ""
     echo "  NOTE: VS Code ALSO reads ~/.claude/settings.json as a hook source by"
