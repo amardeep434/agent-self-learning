@@ -59,10 +59,14 @@ This project has been bitten repeatedly by MSYS path conversion: `/c/Users/...` 
 `C:/Users/...`. Windows resolves the store under `%LOCALAPPDATA%`, a branch no other
 platform takes.
 
-In **Git Bash**, from the cloned repo:
+In **Git Bash**, from the cloned repo. The first two lines resolve the interpreter the
+same way every installed script does — this runbook used to open with a bare `python3`,
+which is the one command name a `winget install Python.Python.3.12` machine does not
+have, so it failed at its own first step on exactly the box it targets:
 
 ```bash
-python3 scripts/lib/paths.py all
+source scripts/lib/python-resolve.sh && sl_resolve_python && echo "using: $SL_PYTHON"
+"$SL_PYTHON" scripts/lib/paths.py all
 ```
 
 **Copy back:** the whole output. I am checking that `home` lands under `LOCALAPPDATA`,
@@ -117,7 +121,8 @@ behaviour — send me the message.
 Then, in **Git Bash**:
 
 ```bash
-bash "$(python3 scripts/lib/paths.py get scripts)/doctor.sh"
+source scripts/lib/python-resolve.sh && sl_resolve_python
+bash "$("$SL_PYTHON" scripts/lib/paths.py get scripts)/doctor.sh"
 ```
 
 **Copy back:** the doctor output in full. I am checking the resolved paths, that the
@@ -144,7 +149,8 @@ copilot -s --allow-tool read -p 'Acknowledge two things in one line each: first,
 Wait ~30 seconds for the detached review, then:
 
 ```bash
-S="$(python3 <repo>/scripts/lib/paths.py all | sed -n 's/^home=//p')"
+source <repo>/scripts/lib/python-resolve.sh && sl_resolve_python
+S="$("$SL_PYTHON" <repo>/scripts/lib/paths.py all | sed -n 's/^home=//p')"
 echo "--- persist.log ---";          tail -5 "$S/logs/persist.log"
 echo "--- persist-failures.log ---"; cat "$S/logs/persist-failures.log" 2>/dev/null || echo "(absent)"
 echo "--- MEMORY.md ---";            wc -c "$S/memory/MEMORY.md" 2>/dev/null || echo "(none yet)"
@@ -207,7 +213,8 @@ No CI runner has a Copilot store, so the Coach rules' telemetry path is exercise
 machines like yours.
 
 ```bash
-python3 <repo>/scripts/coach-rules-eval.py 2>&1 | tail -20
+source <repo>/scripts/lib/python-resolve.sh && sl_resolve_python
+"$SL_PYTHON" <repo>/scripts/coach-rules-eval.py 2>&1 | tail -20
 ```
 
 **Copy back:** the output, including any `[capability probe]` lines and every skip reason.

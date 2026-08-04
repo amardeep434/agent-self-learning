@@ -50,7 +50,7 @@ files beyond Copilot CLI's dedicated hooks directory.
 |------------|-----------|---------|---------------|
 | bash | all scripts | 4.0+ | via Git for Windows (Git Bash) or WSL. A Python-first port removing the Git Bash requirement is planned — see [`docs/superpowers/plans/2026-07-31-windows-python-first-port.md`](docs/superpowers/plans/2026-07-31-windows-python-first-port.md) (not started; blocked on a real-hardware probe) |
 | jq | the `turn-counter.sh` PostToolUse hook only — every other JSON read and write now uses `scripts/lib/jsonio.py` (stdlib python3). Kept in that one place because replacing it there measured 97-129ms against a <100ms hook budget (baseline 67-71ms) | 1.6+ | `winget install jqlang.jq` |
-| python3 | injector, coach signals, session indexing and search (incl. its bundled `sqlite3` module) | 3.9+, stdlib only — 3.9 is the CI floor; **3.8 is untested** | `winget install Python.Python.3.12` |
+| Python 3 — any of `python3`, `python`, or the `py -3` launcher | injector, coach signals, session indexing and search (incl. its bundled `sqlite3` module) | 3.9+, stdlib only — 3.9 is the CI floor; **3.8 is untested** | `winget install Python.Python.3.12`, which creates `python.exe` and `py.exe` and **never** a `python3`. Resolution is automatic (`scripts/lib/python-resolve.sh`) and validates that the interpreter actually runs and reports Python 3, so the fake Microsoft-Store `python3` alias — which exists on a default Windows PATH and is not Python — is detected and skipped |
 | sqlite3 (CLI, optional) | manual DB inspection; `self-learning-health.sh`'s database check (degrades to a warning, not a failure, if absent) | any | bundled with Git for Windows |
 | Claude Code | Claude adapter (optional) | current | — |
 | GitHub Copilot CLI | Copilot adapter (optional) | current, authenticated | PowerShell 7+ for its hooks |
@@ -154,6 +154,12 @@ printf '%s' "$(python3 scripts/lib/paths.py get scripts)" \
 
 This is the same renderer `install.sh` calls, so you get exactly the bytes it would have
 written. The same command renders `config/copilot-hooks.json` and `config/vscode-hooks.json`.
+
+> **On Windows, type `python` (or `py -3`) wherever this README's manual commands say
+> `python3`.** The installed scripts resolve the interpreter themselves and never depend
+> on that name — a command YOU type is the one place the name still matters, and
+> `winget install Python.Python.3.12` does not create a `python3`. If `python3` appears to
+> exist and prints nothing, that is the Microsoft-Store App Execution Alias, not Python.
 
 > **Two details that are load-bearing, not stylistic.**
 > The renderer replaced a one-liner substitution that silently corrupted any store path

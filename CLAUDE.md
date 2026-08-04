@@ -106,8 +106,16 @@ the limitation and prints its own reason.
   (`python-version: ["3.9", "3.13"]` in `.github/workflows/ci.yml`) and the lowest version
   anything here is actually run against. **3.8 is untested; do not claim it.** Write
   `from __future__ import annotations` in any module using `X | None` annotations.
-- **Hook budget: <100ms.** `turn-counter.sh` was once documented at <50ms. Measured (fix
-  round C, `date +%s%N` over 5-6 real runs): **50-68ms** with a native `python3` on PATH,
+  **Never invoke the interpreter by name.** Shell code calls `"${SL_PYTHON}"`, resolved
+  once by `scripts/lib/python-resolve.sh`; `python3` does not exist on a real Windows
+  Python install, and a `python3` that does exist there may be the Microsoft-Store alias,
+  which is not Python. `tests/test-no-python3-name.sh` is the regression guard.
+- **Hook budget: <100ms.** `turn-counter.sh` was once documented at <50ms. Re-measured
+  2026-08-04 (`date +%s%N`, 6 runs each, sandboxed store, native interpreter first on
+  PATH), across the SL_PYTHON change: **66-70ms before, 68-73ms after** — the interpreter
+  resolution in `lib/python-resolve.sh` costs one extra `--version` probe, ~3ms, and
+  short-circuits on the exported `SL_PYTHON` for the rest of the process tree. Earlier
+  measurement (fix round C, 5-6 runs): **50-68ms** with a native `python3` on PATH,
   **130-155ms** with a pyenv/asdf shim in front of it — the shim itself costs ~85ms,
   confirmed by timing it against the real interpreter binary. ~22-25ms of the native figure
   is `config.sh`'s one `python3 lib/paths.py all` subprocess spawn per invocation. <50ms is
