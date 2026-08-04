@@ -29,8 +29,13 @@ sl_resolve_python() {
     # Windows py launcher last: `py -3` is two words, so ask it once for the
     # absolute interpreter path and store that instead.
     if command -v py >/dev/null 2>&1 && py -3 --version 2>&1 | grep -q '^Python 3'; then
-        SL_PYTHON="$(py -3 -c 'import sys; print(sys.executable)')" \
-            && [[ -n "$SL_PYTHON" ]] && export SL_PYTHON && return 0
+        SL_PYTHON="$(py -3 -c 'import sys; print(sys.executable)' 2>/dev/null)" || SL_PYTHON=""
+        # Native-Windows py emits \r\n; $() strips only the \n, and a stored
+        # "...python.exe\r" fails every later "${SL_PYTHON}" invocation with a
+        # name no filesystem has. Same CRLF class round E fixed on the Python
+        # side -- this is the one capture where the SHELL is the consumer.
+        SL_PYTHON="${SL_PYTHON%$'\r'}"
+        [[ -n "$SL_PYTHON" ]] && export SL_PYTHON && return 0
     fi
     SL_PYTHON=""
     echo "agent-self-learning: no Python 3 found (tried: python3, python, py -3)." >&2

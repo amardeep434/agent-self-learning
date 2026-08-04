@@ -212,6 +212,12 @@ sl_review_coach_section() {
     local trailer="${1:-}"
     local signals_mtime signals_age_days section
 
+    # No interpreter -> no Coach section, silently here: the resolver's
+    # failure was already reported loudly by config.sh (python3_unresolvable),
+    # and an unguarded "${SL_PYTHON}" below would either trip `set -u` or
+    # abort the whole review under `set -e` when a stale signals file exists.
+    [[ -n "${SL_PYTHON:-}" ]] || return 0
+
     "${SL_PYTHON}" "${_RC_SCRIPTS_DIR}/coach-signals.py" \
         2>> "${SL_LOG_DIR}/reviews/coach-signals.err" || true
 

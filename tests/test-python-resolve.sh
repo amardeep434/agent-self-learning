@@ -115,6 +115,28 @@ check "(c) failure names py -3"   "yes" "$(grep -q 'py -3' <<<"$ERR" && echo yes
 check "(c) failure names the Store-stub trap" "yes" \
     "$(grep -qi 'store' <<<"$ERR" && echo yes || echo no)"
 
+# --- (e) py-launcher path arrives CRLF-terminated (native Windows py) ---
+# `py -3 -c 'print(sys.executable)'` emits \r\n on native Windows; $() strips
+# only the \n, so an unstripped capture stores "C:\...\python.exe\r" and every
+# later "${SL_PYTHON}" invocation fails with a name no filesystem has. Fake py
+# reproduces that byte-exactly; the resolver must hand back a \r-free path.
+E_BIN="$TMP/bin-e"; mk_bin "$E_BIN"
+cat > "${E_BIN}/py" <<PYEOF
+#!/bin/sh
+case "\$*" in
+    (*--version*) printf 'Python 3.12.0\n' ;;
+    (*) printf '%s\r\n' "${REAL_PY}" ;;
+esac
+PYEOF
+chmod +x "${E_BIN}/py"
+OUT="$(ask "$E_BIN")"
+check "(e) py-launcher CRLF path: resolves" "yes" \
+    "$(case "$OUT" in ("rc=0 "*) echo yes ;; (*) echo no ;; esac)"
+check "(e) stored path carries no carriage return" "yes" \
+    "$(case "$OUT" in (*$'\r'*) echo no ;; (*) echo yes ;; esac)"
+check "(e) stored path is executable as stored" "yes" \
+    "$(P="${OUT#rc=0 }"; [[ -x "$P" ]] && echo yes || echo no)"
+
 # --- idempotence: an already-exported SL_PYTHON short-circuits (hook budget) ---
 # Every hook fire sources config.sh; re-probing per call would add spawns to
 # the <100ms budget. A pre-set SL_PYTHON must be honored verbatim, with no

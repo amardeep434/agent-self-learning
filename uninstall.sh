@@ -211,11 +211,12 @@ else
     # would be the same data loss with an extra step.
     echo "  WARNING: no Python 3 (tried python3, python, py -3) or mirror-skills.py unavailable — mirrored skill" >&2
     echo "  directories under ~/.claude/skills and ~/.copilot/skills were NOT" >&2
-    echo "  removed, and CANNOT be identified safely without python3: the" >&2
+    echo "  removed, and CANNOT be identified safely without Python 3: the" >&2
     echo "  marker file alone does not prove a directory is ours, so deleting" >&2
     echo "  on that basis can destroy your own skills." >&2
     echo "  To finish: install Python 3 and re-run this script, or run" >&2
-    echo "    python3 <repo>/scripts/mirror-skills.py --uninstall-mirrors" >&2
+    echo "    python <repo>/scripts/mirror-skills.py --uninstall-mirrors" >&2
+    echo "  (use python3 or 'py -3' if that is the name your machine has)" >&2
     echo "  which applies the verified check." >&2
 fi
 
