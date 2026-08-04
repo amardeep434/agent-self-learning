@@ -33,8 +33,16 @@ remove() { if [[ -e "$1" ]]; then rm -rf "$1"; echo "  removed: $1"; fi; }
 # clean the resolved-path location (nothing to fall back to recompute with).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PATHS_PY="${SCRIPT_DIR}/scripts/lib/paths.py"
+# One resolver, shared with install.sh and config.sh: `command -v python3` is
+# the wrong question on Windows, where working installs provide `python`/`py -3`
+# and a fake Store `python3` may exist without being Python at all. Uninstall is
+# where getting this wrong is worst -- the guards below decide whether the
+# uninstaller can clean the resolved store at all.
+# shellcheck source=scripts/lib/python-resolve.sh
+source "${SCRIPT_DIR}/scripts/lib/python-resolve.sh"
+sl_resolve_python || true
 SL_HOME="" SL_SCRIPTS="" SL_CONFIG_FILE="" SL_STATE="" SL_LOGS=""
-if command -v python3 >/dev/null 2>&1 && [[ -f "$PATHS_PY" ]]; then
+if [[ -n "${SL_PYTHON:-}" && -f "$PATHS_PY" ]]; then
     while IFS='=' read -r _sl_key _sl_val; do
         # Fix round E, defence in depth: see scripts/lib/config.sh's identical
         # strip for the full rationale.
@@ -46,7 +54,7 @@ if command -v python3 >/dev/null 2>&1 && [[ -f "$PATHS_PY" ]]; then
             state)       SL_STATE="$_sl_val" ;;
             logs)        SL_LOGS="$_sl_val" ;;
         esac
-    done < <(python3 "$PATHS_PY" all 2>/dev/null || true)
+    done < <("${SL_PYTHON}" "$PATHS_PY" all 2>/dev/null || true)
 fi
 
 echo "Removing installed components..."
@@ -106,8 +114,8 @@ SETTINGS="${HOME}/.claude/settings.json"
 # this the legacy shape, so nothing caught it.
 SL_HOOK_PATTERN='self-learning|/(turn-counter|session-review|index-session)\.sh'
 if [[ -f "$SETTINGS" ]] && grep -qE "$SL_HOOK_PATTERN" "$SETTINGS"; then
-    if ! command -v python3 >/dev/null 2>&1; then
-        echo "  python3 not found — leaving settings.json unchanged; remove self-learning hooks manually" >&2
+    if [[ -z "${SL_PYTHON:-}" ]]; then
+        echo "  no Python 3 found (tried python3, python, py -3) — leaving settings.json unchanged; remove self-learning hooks manually" >&2
     else
         BAK="${SETTINGS}.pre-uninstall-$(date +%s)"
         stripped=false
@@ -119,7 +127,7 @@ if [[ -f "$SETTINGS" ]] && grep -qE "$SL_HOOK_PATTERN" "$SETTINGS"; then
         # else here.
         ( umask 077
           cp "$SETTINGS" "$BAK" && \
-          SL_HOOK_PATTERN="$SL_HOOK_PATTERN" python3 -c '
+          SL_HOOK_PATTERN="$SL_HOOK_PATTERN" "${SL_PYTHON}" -c '
 import json, os, re, sys
 
 pattern = re.compile(os.environ["SL_HOOK_PATTERN"])
@@ -143,7 +151,7 @@ json.dump(doc, sys.stdout, indent=2)
 sys.stdout.write("\n")
 ' "$BAK" > "${SETTINGS}.tmp" 2>/dev/null
         ) && [[ -s "${SETTINGS}.tmp" ]] \
-          && python3 -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))' "${SETTINGS}.tmp" >/dev/null 2>&1 \
+          && "${SL_PYTHON}" -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))' "${SETTINGS}.tmp" >/dev/null 2>&1 \
           && stripped=true || true
         chmod 600 "$BAK" "${SETTINGS}.tmp" 2>/dev/null || true
         if [[ "$stripped" == "true" ]]; then
@@ -190,8 +198,8 @@ fi
 # and say so. Falling back to the weak test would be choosing the exact rule that
 # destroyed data.
 MIRROR_PY="${SCRIPT_DIR}/scripts/mirror-skills.py"
-if command -v python3 >/dev/null 2>&1 && [[ -f "$MIRROR_PY" ]]; then
-    python3 "$MIRROR_PY" --uninstall-mirrors || \
+if [[ -n "${SL_PYTHON:-}" && -f "$MIRROR_PY" ]]; then
+    "${SL_PYTHON}" "$MIRROR_PY" --uninstall-mirrors || \
         echo "  WARNING: some mirrored skill directories could not be removed" >&2
 else
     # Deliberately does NOT say "delete any directory containing a
@@ -201,12 +209,12 @@ else
     # marker, as does a hand-dropped or symlinked one. Refusing to run the
     # unsafe rule ourselves and then instructing the human to run it by hand
     # would be the same data loss with an extra step.
-    echo "  WARNING: python3 or mirror-skills.py unavailable — mirrored skill" >&2
+    echo "  WARNING: no Python 3 (tried python3, python, py -3) or mirror-skills.py unavailable — mirrored skill" >&2
     echo "  directories under ~/.claude/skills and ~/.copilot/skills were NOT" >&2
     echo "  removed, and CANNOT be identified safely without python3: the" >&2
     echo "  marker file alone does not prove a directory is ours, so deleting" >&2
     echo "  on that basis can destroy your own skills." >&2
-    echo "  To finish: install python3 and re-run this script, or run" >&2
+    echo "  To finish: install Python 3 and re-run this script, or run" >&2
     echo "    python3 <repo>/scripts/mirror-skills.py --uninstall-mirrors" >&2
     echo "  which applies the verified check." >&2
 fi

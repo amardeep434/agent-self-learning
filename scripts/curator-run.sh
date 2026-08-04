@@ -171,7 +171,7 @@ if [[ -f "$USAGE_FILE" ]]; then
         {
             IFS= read -r state || true
             IFS= read -r pinned || true
-        } < <(python3 "${SCRIPT_DIR}/lib/jsonio.py" get "$USAGE_FILE" \
+        } < <("${SL_PYTHON}" "${SCRIPT_DIR}/lib/jsonio.py" get "$USAGE_FILE" \
                   "${SKILL_NAME}.state" "${SKILL_NAME}.pinned" 2>/dev/null)
         : "${state:=active}"; : "${pinned:=false}"
 
@@ -183,7 +183,7 @@ if [[ -f "$USAGE_FILE" ]]; then
         if [[ "$pinned" == "true" ]]; then
             TOTAL_PINNED=$((TOTAL_PINNED + 1))
         fi
-    done < <(python3 "${SCRIPT_DIR}/lib/jsonio.py" keys "$USAGE_FILE" 2>/dev/null)
+    done < <("${SL_PYTHON}" "${SCRIPT_DIR}/lib/jsonio.py" keys "$USAGE_FILE" 2>/dev/null)
 fi
 
 cat >> "$REPORT_FILE" << EOF
@@ -209,7 +209,7 @@ echo "[CURATOR] Running deterministic lifecycle transitions..."
 TRANSITION_LOG=""
 LIFECYCLE_STATUS=0
 if [[ -f "${SCRIPT_DIR}/skill-lifecycle.py" ]]; then
-    TRANSITION_LOG=$(python3 "${SCRIPT_DIR}/skill-lifecycle.py" 2>&1) || LIFECYCLE_STATUS=$?
+    TRANSITION_LOG=$("${SL_PYTHON}" "${SCRIPT_DIR}/skill-lifecycle.py" 2>&1) || LIFECYCLE_STATUS=$?
     # fix-p8: the previous `|| true` swallowed EVERY lifecycle failure,
     # including a lock timeout (exit 3) and a corrupt .usage.json (exit 2),
     # leaving a report that reads as a clean run. The curator runs unattended
@@ -255,7 +255,7 @@ if [[ "$LLM_PASS" == "true" ]]; then
             {
                 IFS= read -r state || true
                 IFS= read -r use_count || true
-            } < <(python3 "${SCRIPT_DIR}/lib/jsonio.py" get "$USAGE_FILE" \
+            } < <("${SL_PYTHON}" "${SCRIPT_DIR}/lib/jsonio.py" get "$USAGE_FILE" \
                       "${SKILL_NAME}.state" "${SKILL_NAME}.use_count" 2>/dev/null)
             : "${state:=active}"; : "${use_count:=0}"
 
@@ -271,7 +271,7 @@ if [[ "$LLM_PASS" == "true" ]]; then
             fi
 
             SKILL_INVENTORY+="- [${SKILL_NAME}] ($state, ${use_count} uses): $description"$'\n'
-        done < <(python3 "${SCRIPT_DIR}/lib/jsonio.py" keys "$USAGE_FILE" 2>/dev/null)
+        done < <("${SL_PYTHON}" "${SCRIPT_DIR}/lib/jsonio.py" keys "$USAGE_FILE" 2>/dev/null)
     fi
 
     # Write inventory to temp file for manual LLM subagent invocation

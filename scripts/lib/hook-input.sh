@@ -14,6 +14,16 @@
 # that never comes in normal usage.
 
 _HI_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# One resolver for the interpreter (scripts/lib/python-resolve.sh):
+# `python3` is a name real Windows Python installs never provide.
+# Sourced here, not assumed from config.sh, because this file is also
+# sourced directly (by its own suite, and by scripts that predate
+# config.sh in their own load order). Re-resolution is free once
+# SL_PYTHON is exported.
+# shellcheck source=scripts/lib/python-resolve.sh
+source "${_HI_LIB_DIR}/python-resolve.sh"
+sl_resolve_python || true
 # shellcheck disable=SC1091
 source "${_HI_LIB_DIR}/stdin-safe.sh"
 
@@ -30,7 +40,7 @@ _HOOK_RAW="$(sl_read_stdin_safe)"
     IFS= read -r HOOK_TOOL_NAME || true
     IFS= read -r HOOK_EVENT_NAME || true
     IFS= read -r HOOK_TRANSCRIPT_PATH || true
-} < <(printf '%s' "$_HOOK_RAW" | python3 "${_HI_LIB_DIR}/jsonio.py" get - \
+} < <(printf '%s' "$_HOOK_RAW" | "${SL_PYTHON}" "${_HI_LIB_DIR}/jsonio.py" get - \
         session_id tool_name hook_event_name transcript_path 2>/dev/null)
 
 # Defaults, applied identically whether the field was absent, null, empty, or

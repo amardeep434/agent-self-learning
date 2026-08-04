@@ -336,7 +336,14 @@ check "F: writer stderr temp file is cleaned up" "" \
 G_DIR="$(mktemp -d)"
 CASE_DIRS+=("$G_DIR")
 mkdir -p "$G_DIR/home" "$G_DIR/store/state" "$G_DIR/store/logs" "$G_DIR/bin"
-printf '#!/usr/bin/env bash\nexit 127\n' > "$G_DIR/bin/python3"
+# The shim answers `--version` and fails at everything else. lib/python-resolve.sh
+# now PROBES a candidate interpreter (it must run and report Python 3) before
+# accepting it, so a shim that failed unconditionally would simply be skipped in
+# favour of the real `python` further down PATH -- and this case would silently
+# stop testing a broken reader at all. Answering --version keeps the shim the
+# selected interpreter, which is what makes the READ below fail, which is what
+# scenario G is about.
+printf '#!/usr/bin/env bash\n[[ "$1" == "--version" ]] && { echo "Python 3.99.0"; exit 0; }\nexit 127\n' > "$G_DIR/bin/python3"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$G_DIR/bin/claude"
 chmod +x "$G_DIR/bin/python3" "$G_DIR/bin/claude"
 printf '%s\n' \

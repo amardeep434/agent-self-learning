@@ -55,7 +55,9 @@ cp "${SCRIPT_DIR}/scripts/session-start-context.sh" \
    "${SCRIPT_DIR}/scripts/mirror-skills.py" \
    "${SCRIPT_DIR}/scripts/inject-agents-md.py" \
    "${SCRIPT_DIR}/scripts/scan-threats.py" "$STUB_DIR/"
-mkdir -p "$STUB_DIR/lib"; cp "${SCRIPT_DIR}"/scripts/lib/*.py "$STUB_DIR/lib/" 2>/dev/null || true
+# lib/*.sh as well as lib/*.py: the wrapper sources lib/python-resolve.sh
+# (the one interpreter resolver) before it can run anything at all.
+mkdir -p "$STUB_DIR/lib"; cp "${SCRIPT_DIR}"/scripts/lib/*.py "${SCRIPT_DIR}"/scripts/lib/*.sh "$STUB_DIR/lib/" 2>/dev/null || true
 printf '#!/usr/bin/env python3\nimport sys\nsys.exit(3)\n' > "$STUB_DIR/session-start-context.py"
 RC=0
 printf '%s' "$PAYLOAD" | env -i HOME="$H2" AGENT_LEARNING_HOME="$H2/store" PATH="$PATH" \

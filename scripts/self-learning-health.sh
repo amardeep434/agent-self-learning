@@ -142,8 +142,8 @@ section "Persistence Writer Self-Check"
 WRITER_SCRIPT="${SCRIPT_DIR}/persist-proposal.py"
 if [[ ! -f "$WRITER_SCRIPT" ]]; then
     fail "writer self-check skipped -- persist-proposal.py not present" "Run install.sh"
-elif ! command -v python3 >/dev/null 2>&1; then
-    fail "writer self-check skipped -- python3 not found on PATH" "Install python3"
+elif [[ -z "${SL_PYTHON:-}" ]]; then
+    fail "writer self-check skipped -- no Python 3 on PATH (tried python3, python, py -3)" "Install python3"
 else
     SELF_CHECK_HOME="$(mktemp -d 2>/dev/null || echo "")"
     if [[ -z "$SELF_CHECK_HOME" ]]; then
@@ -159,7 +159,7 @@ else
         SELF_CHECK_RC=0
         SELF_CHECK_OUT="$(printf '%s' "$CANNED_PROPOSAL" | \
             AGENT_LEARNING_HOME="$SELF_CHECK_HOME" SL_CONFIG_FILE="/nonexistent/self-check.conf" \
-            python3 "$WRITER_SCRIPT" --dry-run 2>&1)" || SELF_CHECK_RC=$?
+            "${SL_PYTHON}" "$WRITER_SCRIPT" --dry-run 2>&1)" || SELF_CHECK_RC=$?
         rm -rf "$SELF_CHECK_HOME"
 
         if [[ "$SELF_CHECK_RC" -ne 0 ]]; then
@@ -169,7 +169,7 @@ else
         # shape test: a length check on the parsed list, not a glob over its
         # rendering (a glob false-failed on a planned-write path containing a
         # comma). An unparseable or empty result fails the test, as before.
-        elif ! printf '%s' "$SELF_CHECK_OUT" | python3 -c '
+        elif ! printf '%s' "$SELF_CHECK_OUT" | "${SL_PYTHON}" -c '
 import json, sys
 doc = json.load(sys.stdin)
 sys.exit(0 if isinstance(doc.get("skipped"), list) and len(doc["skipped"]) == 1 else 1)
@@ -200,8 +200,8 @@ section "Hook Registration (Claude Code)"
 # bug class, and worse for being the tool that actually ships in every
 # install while doctor.sh (which caught it) did not yet.
 SETTINGS_FILE="${HOME}/.claude/settings.json"
-if command -v python3 >/dev/null 2>&1; then
-    SL_SCRIPTS_DIR="$(python3 "${SCRIPT_DIR}/lib/paths.py" get scripts 2>/dev/null || true)"
+if [[ -n "${SL_PYTHON:-}" ]]; then
+    SL_SCRIPTS_DIR="$("${SL_PYTHON}" "${SCRIPT_DIR}/lib/paths.py" get scripts 2>/dev/null || true)"
 else
     SL_SCRIPTS_DIR=""
 fi
@@ -214,9 +214,9 @@ fi
 # dependency this check never named. Fail loudly and specifically instead:
 # one clear FAIL that says python3 is the blocker, and skip the per-hook
 # freshness checks entirely rather than emit misleading verdicts for them.
-if ! command -v python3 >/dev/null 2>&1; then
-    fail "cannot verify hook freshness -- python3 not found on PATH" \
-        "Install python3 so scripts/lib/paths.py (this project's sole path resolver) can run"
+if [[ -z "${SL_PYTHON:-}" ]]; then
+    fail "cannot verify hook freshness -- no Python 3 on PATH (tried python3, python, py -3)" \
+        "Install Python 3 (python3, python or py -3) so scripts/lib/paths.py (this project's sole path resolver) can run"
 elif [[ -f "$SETTINGS_FILE" ]]; then
     for pair in "turn-counter.sh:PostToolUse turn-counter" \
                 "session-review.sh:Stop session-review" \
@@ -254,9 +254,9 @@ fi
 section "Hook Registration (Copilot CLI)"
 
 COPILOT_HOOKS_FILE="${HOME}/.copilot/hooks/self-learning.json"
-if ! command -v python3 >/dev/null 2>&1; then
-    fail "cannot verify Copilot hook freshness -- python3 not found on PATH" \
-        "Install python3 so scripts/lib/paths.py (this project's sole path resolver) can run"
+if [[ -z "${SL_PYTHON:-}" ]]; then
+    fail "cannot verify Copilot hook freshness -- no Python 3 on PATH (tried python3, python, py -3)" \
+        "Install Python 3 (python3, python or py -3) so scripts/lib/paths.py (this project's sole path resolver) can run"
 elif [[ -f "$COPILOT_HOOKS_FILE" ]]; then
     state="$(sl_check_hook_fresh "$COPILOT_HOOKS_FILE" "copilot-session-review.sh" "$SL_SCRIPTS_DIR")"
     case "$state" in
@@ -303,7 +303,7 @@ section "Turn Counter"
 
 COUNTER_FILE="${SL_STATE_DIR}/turn_counter.json"
 if [[ -f "$COUNTER_FILE" ]]; then
-    if TOTAL=$(python3 "${SCRIPT_DIR}/lib/jsonio.py" get "$COUNTER_FILE" total_turns_this_session 2>/dev/null); then
+    if TOTAL=$("${SL_PYTHON}" "${SCRIPT_DIR}/lib/jsonio.py" get "$COUNTER_FILE" total_turns_this_session 2>/dev/null); then
         pass "turn_counter.json is valid JSON"
         [[ -z "$TOTAL" ]] && TOTAL=0
         if [[ "$QUIET" != "--quiet" ]]; then
@@ -355,7 +355,7 @@ section "Learned Skills"
 
 USAGE_FILE="${SL_SKILLS_DIR}/${SL_USAGE_FILENAME}"
 if [[ -f "$USAGE_FILE" ]]; then
-    if USAGE_KEYS=$(python3 "${SCRIPT_DIR}/lib/jsonio.py" keys "$USAGE_FILE" 2>/dev/null); then
+    if USAGE_KEYS=$("${SL_PYTHON}" "${SCRIPT_DIR}/lib/jsonio.py" keys "$USAGE_FILE" 2>/dev/null); then
         SKILL_COUNT=$(printf '%s' "$USAGE_KEYS" | grep -c . || true)
         pass ".usage.json is valid JSON ($SKILL_COUNT skills tracked)"
 
@@ -374,7 +374,7 @@ if [[ -f "$USAGE_FILE" ]]; then
                     active|stale|archived) ;;
                     *) INVALID=$((INVALID + 1)) ;;
                 esac
-            done < <(python3 "${SCRIPT_DIR}/lib/jsonio.py" get "$USAGE_FILE" "${STATE_KEYS[@]}" 2>/dev/null)
+            done < <("${SL_PYTHON}" "${SCRIPT_DIR}/lib/jsonio.py" get "$USAGE_FILE" "${STATE_KEYS[@]}" 2>/dev/null)
         fi
         if [[ "$INVALID" -gt 0 ]]; then
             warn "$INVALID skill(s) in invalid state (expected: active, stale, or archived)"

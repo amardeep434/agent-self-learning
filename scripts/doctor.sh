@@ -143,9 +143,9 @@ done
 # the single resolver, never recomputed here.
 SL_SCRIPTS_DIR=""
 _SL_PYTHON3_AVAILABLE=0
-if command -v python3 >/dev/null 2>&1; then
+if [[ -n "${SL_PYTHON:-}" ]]; then
     _SL_PYTHON3_AVAILABLE=1
-    SL_SCRIPTS_DIR="$(python3 "${SCRIPT_DIR}/lib/paths.py" get scripts 2>/dev/null || true)"
+    SL_SCRIPTS_DIR="$("${SL_PYTHON}" "${SCRIPT_DIR}/lib/paths.py" get scripts 2>/dev/null || true)"
 fi
 printf '  %-12s %s\n' "scripts" "${SL_SCRIPTS_DIR:-<unresolved: python3/paths.py unavailable>}"
 echo
@@ -192,7 +192,7 @@ if [[ "${_SL_PYTHON3_AVAILABLE}" == "1" ]]; then
     # inside a quoted -c string). Passed as sys.argv[1] instead, matching
     # the safe pattern already used a few lines down in this same file
     # (legacy-home probe) and in tests/lib/path-compare.sh.
-    DIR_FD_PROBE="$(python3 -c '
+    DIR_FD_PROBE="$("${SL_PYTHON}" -c '
 import sys
 script_dir = sys.argv[1]
 sys.path.insert(0, script_dir)
@@ -210,7 +210,7 @@ print("yes" if m.DIR_FD_SUPPORTED else "no")
         *)   echo "dir_fd TOCTOU fix: could not probe (persist-proposal.py failed to import)" ;;
     esac
 else
-    echo "dir_fd TOCTOU fix: cannot probe -- python3 unavailable"
+    echo "dir_fd TOCTOU fix: cannot probe -- no Python 3 available (tried python3, python, py -3)"
 fi
 echo
 
@@ -229,7 +229,7 @@ echo
 if [[ "${_SL_PYTHON3_AVAILABLE}" == "1" ]]; then
     # Same argv-not-interpolated-into--c discipline as 2b above (Git Bash
     # only auto-translates POSIX paths passed as their own argv token).
-    LOCK_PROBE="$(python3 -c '
+    LOCK_PROBE="$("${SL_PYTHON}" -c '
 import sys
 sys.path.insert(0, sys.argv[1] + "/lib")
 import store_lock
@@ -252,7 +252,7 @@ print(store_lock.BACKEND, "yes" if store_lock.BACKEND_RELEASES_ON_CRASH else "no
         echo "  lock file: ${SL_STATE_DIR}/persist.lock"
     fi
 else
-    echo "write lock: cannot probe -- python3 unavailable"
+    echo "write lock: cannot probe -- no Python 3 available (tried python3, python, py -3)"
 fi
 echo
 
@@ -277,8 +277,8 @@ if command -v claude >/dev/null 2>&1; then
     CLAUDE_SETTINGS="${HOME}/.claude/settings.json"
     echo "    hooks (~/.claude/settings.json):"
     if [[ "$_SL_PYTHON3_AVAILABLE" -eq 0 ]]; then
-        echo "    cannot verify hook freshness -- python3 not found on PATH"
-        echo "    Fix: install python3 so scripts/lib/paths.py (this project's sole path resolver) can run"
+        echo "    cannot verify hook freshness -- no Python 3 on PATH (tried python3, python, py -3)"
+        echo "    Fix: install Python 3 (python3, python or py -3) so scripts/lib/paths.py (this project's sole path resolver) can run"
         STATUS=1
     else
         _sl_report_hooks "$CLAUDE_SETTINGS" turn-counter.sh session-review.sh index-session.sh
@@ -308,8 +308,8 @@ if command -v copilot >/dev/null 2>&1; then
     COPILOT_HOOKS="${HOME}/.copilot/hooks/self-learning.json"
     echo "    hooks (~/.copilot/hooks/self-learning.json):"
     if [[ "$_SL_PYTHON3_AVAILABLE" -eq 0 ]]; then
-        echo "    cannot verify hook freshness -- python3 not found on PATH"
-        echo "    Fix: install python3 so scripts/lib/paths.py (this project's sole path resolver) can run"
+        echo "    cannot verify hook freshness -- no Python 3 on PATH (tried python3, python, py -3)"
+        echo "    Fix: install Python 3 (python3, python or py -3) so scripts/lib/paths.py (this project's sole path resolver) can run"
         STATUS=1
     else
         # session-start-context.sh IS written into this file by install.sh
@@ -386,13 +386,13 @@ echo
 # ---------------------------------------------------------------------------
 echo "skill mirror (Route A -- scripts/mirror-skills.py publishes learned skills):"
 if [[ "${_SL_PYTHON3_AVAILABLE}" -eq 0 ]]; then
-    echo "  cannot check -- python3 not found on PATH"
+    echo "  cannot check -- no Python 3 on PATH (tried python3, python, py -3)"
 else
     # Same argv-not-interpolated-into--c discipline as sections 2b/2c above.
     # Emits one "root|<label>|<state>|<count>|<path>" line per candidate root,
     # plus one "store|<count>|<path>" line. Parsed below rather than formatted
     # in Python so all of doctor.sh's output style stays in one language.
-    MIRROR_PROBE="$(python3 -c '
+    MIRROR_PROBE="$("${SL_PYTHON}" -c '
 import importlib.util, sys
 from pathlib import Path
 script_dir = Path(sys.argv[1])
@@ -479,8 +479,8 @@ echo
 # 4. Legacy ~/.claude store -- DETECT ONLY. Never move or modify user data.
 # ---------------------------------------------------------------------------
 LEGACY_HOME=""
-if command -v python3 >/dev/null 2>&1; then
-    LEGACY_HOME="$(python3 -c '
+if [[ -n "${SL_PYTHON:-}" ]]; then
+    LEGACY_HOME="$("${SL_PYTHON}" -c '
 import sys
 sys.path.insert(0, sys.argv[1])
 import paths
@@ -626,11 +626,11 @@ echo
 if [[ "${SL_COACH_RULES_ENABLED:-false}" == "true" ]]; then
     echo "coach rules (Route A) coverage:"
     if [[ "$_SL_PYTHON3_AVAILABLE" -eq 0 ]]; then
-        echo "  cannot check -- python3 not found on PATH"
+        echo "  cannot check -- no Python 3 on PATH (tried python3, python, py -3)"
     elif [[ ! -d "${SL_COACH_RULES_DIR:-}" ]]; then
         echo "  rules dir not found: ${SL_COACH_RULES_DIR:-<unset>}"
     else
-        COVERAGE_LINE="$(python3 "${SCRIPT_DIR}/coach-rules-eval.py" \
+        COVERAGE_LINE="$("${SL_PYTHON}" "${SCRIPT_DIR}/coach-rules-eval.py" \
             "${SL_COACH_RULES_DIR}" "${SL_SEARCH_DB}" 2>&1 >/dev/null \
             | grep 'vendored rules evaluated' || true)"
         if [[ -n "$COVERAGE_LINE" ]]; then

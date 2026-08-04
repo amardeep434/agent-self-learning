@@ -43,7 +43,7 @@ mkdir -p "$LOG_DIR"
 # is deliberately UNCHANGED -- a real transcript failure still logs loudly
 # AND still spawns the review; only the provably-empty case short-circuits.
 TRANSCRIPT_STATUS=0
-TRANSCRIPT_DIGEST="$(python3 "${LIB_DIR}/transcript.py" "${COPILOT_HOOK_SESSION_ID}" \
+TRANSCRIPT_DIGEST="$("${SL_PYTHON}" "${LIB_DIR}/transcript.py" "${COPILOT_HOOK_SESSION_ID}" \
     --log-file "${SL_LOG_DIR}/persist-failures.log" \
     --notice-log "${SL_LOG_DIR}/persist.log" \
     2>>"${LOG_DIR}/transcript.err")" || TRANSCRIPT_STATUS=$?

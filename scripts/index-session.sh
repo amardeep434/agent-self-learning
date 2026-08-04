@@ -53,7 +53,7 @@ if [[ "$DB_EXISTED" -eq 0 ]]; then
     BASE_SCHEMA_FILE="${SCRIPT_DIR}/session-search-schema.sql"
     FTS5_SCHEMA_FILE="${SCRIPT_DIR}/session-search-fts5.sql"
     if [[ -f "$BASE_SCHEMA_FILE" ]]; then
-        if ! SCHEMA_RESULT=$(python3 "${SCRIPT_DIR}/lib/session_db.py" \
+        if ! SCHEMA_RESULT=$("${SL_PYTHON}" "${SCRIPT_DIR}/lib/session_db.py" \
                 ensure-schema "$DB_PATH" "$BASE_SCHEMA_FILE" "$FTS5_SCHEMA_FILE" 2>&1); then
             # A real failure (not merely FTS5 being unavailable -- that
             # case returns 0, see session_db.py) -- loud and fatal, never
@@ -89,10 +89,10 @@ fi
 # already a hard dependency of this project (config.sh shells out to it on
 # every hook invocation via lib/paths.py), so this adds no new dependency.
 if [[ "$DB_EXISTED" -eq 0 ]]; then
-    LATEST_SESSION=$(python3 "${SCRIPT_DIR}/lib/list-transcripts.py" "$SESSIONS_DIR" --limit 20)
+    LATEST_SESSION=$("${SL_PYTHON}" "${SCRIPT_DIR}/lib/list-transcripts.py" "$SESSIONS_DIR" --limit 20)
 else
-    DB_MTIME=$(python3 -c "import os, sys; print(os.path.getmtime(sys.argv[1]))" "$DB_PATH")
-    LATEST_SESSION=$(python3 "${SCRIPT_DIR}/lib/list-transcripts.py" "$SESSIONS_DIR" \
+    DB_MTIME=$("${SL_PYTHON}" -c "import os, sys; print(os.path.getmtime(sys.argv[1]))" "$DB_PATH")
+    LATEST_SESSION=$("${SL_PYTHON}" "${SCRIPT_DIR}/lib/list-transcripts.py" "$SESSIONS_DIR" \
         --since-mtime "$DB_MTIME" --limit 20)
 fi
 
@@ -111,7 +111,7 @@ while IFS= read -r SESSION_FILE; do
 
     # Parse JSONL and insert via Python helper (derives session_id itself
     # from the filename stem)
-    python3 "${SCRIPT_DIR}/index-session.py" \
+    "${SL_PYTHON}" "${SCRIPT_DIR}/index-session.py" \
         "$SESSION_FILE" "$DB_PATH" "$PROJECT_PATH"
 
 done <<< "$LATEST_SESSION"

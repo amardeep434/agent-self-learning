@@ -26,6 +26,14 @@
 #   74  lock unavailable (e.g. unwritable state dir); also logged
 #   *   whatever the protected command itself returned
 
+# One resolver for the interpreter (scripts/lib/python-resolve.sh): `python3`
+# is a name real Windows Python installs never provide. Sourced here, not
+# assumed from config.sh, because this file is also sourced directly (by its
+# own suite). Re-resolution is free once SL_PYTHON is exported.
+# shellcheck source=scripts/lib/python-resolve.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/python-resolve.sh"
+sl_resolve_python || true
+
 # sl_with_store_lock <cmd> [args...]
 #
 # Runs <cmd> holding the store lock. Uses $SL_STATE_DIR when set (config.sh
@@ -37,7 +45,7 @@ sl_with_store_lock() {
     if [[ -n "${SL_STATE_DIR:-}" ]]; then
         state_args=(--state-dir "${SL_STATE_DIR}")
     fi
-    python3 "${lib_dir}/store_lock.py" run "${state_args[@]}" -- "$@"
+    "${SL_PYTHON}" "${lib_dir}/store_lock.py" run "${state_args[@]}" -- "$@"
 }
 
 # sl_store_lock_backend
@@ -45,5 +53,5 @@ sl_with_store_lock() {
 # (flock|msvcrt|exclusive), or "unknown" if it could not be probed.
 sl_store_lock_backend() {
     local lib_dir="${_SL_STORE_LOCK_LIB_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
-    python3 "${lib_dir}/store_lock.py" backend 2>/dev/null || echo "unknown"
+    "${SL_PYTHON}" "${lib_dir}/store_lock.py" backend 2>/dev/null || echo "unknown"
 }

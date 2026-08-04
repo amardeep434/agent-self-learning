@@ -23,6 +23,7 @@ trap 'rm -rf "$TMP_HOME" "$IDX_SCRIPTS"' EXIT
 mkdir -p "${IDX_SCRIPTS}/lib"
 cp "${SCRIPT_DIR}/scripts/index-session.sh" "${SCRIPT_DIR}/scripts/index-session.py" "$IDX_SCRIPTS/"
 cp "${SCRIPT_DIR}/scripts/lib/config.sh" "${SCRIPT_DIR}/scripts/lib/paths.py" \
+   "${SCRIPT_DIR}/scripts/lib/python-resolve.sh" \
    "${SCRIPT_DIR}/scripts/lib/isotime.py" "${SCRIPT_DIR}/scripts/lib/list-transcripts.py" \
    "${SCRIPT_DIR}/scripts/lib/session_db.py" "${IDX_SCRIPTS}/lib/"
 cp "${SCRIPT_DIR}/schema/session-search-schema.sql" \
