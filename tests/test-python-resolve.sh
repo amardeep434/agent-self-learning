@@ -135,8 +135,18 @@ chmod +x "${E_BIN}/py"
 OUT="$(ask "$E_BIN")"
 check "(e) py-launcher CRLF path: resolves" "yes" \
     "$(case "$OUT" in ("rc=0 "*) echo yes ;; (*) echo no ;; esac)"
-check "(e) stored path carries no carriage return" "yes" \
-    "$(case "$OUT" in (*$'\r'*) echo no ;; (*) echo yes ;; esac)"
+# Asserted IN-PROCESS, not on the captured transport: under env -i on MSYS
+# the capture pipe can be text-mode, so the child's own trailing \n arrives
+# as \r\n and $() keeps the \r -- a transport artifact that says nothing
+# about the VALUE. Measured: the transport-side form of this check failed on
+# windows-latest (run 30895987032) while the path itself was clean and
+# executable. The claim under test is "SL_PYTHON contains no CR", so test it
+# where the variable lives.
+_E_RC=0
+env -i HOME="$TMP/home" PATH="$E_BIN" bash -c \
+    "source '${RESOLVER}'; sl_resolve_python || exit 2; [[ \"\$SL_PYTHON\" == *\$'\r'* ]] && exit 1; exit 0" \
+    || _E_RC=$?
+check "(e) SL_PYTHON value carries no carriage return (in-process)" "0" "$_E_RC"
 check "(e) stored path is executable as stored" "yes" \
     "$(P="${OUT#rc=0 }"; [[ -x "$P" ]] && echo yes || echo no)"
 
