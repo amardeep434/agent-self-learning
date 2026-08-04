@@ -376,12 +376,22 @@ check "no-python fallback mirrors paths.py's LOCALAPPDATA branch on Windows" \
 # ...and must NOT take that branch where paths.py would not: paths.py branches
 # on sys.platform, so a LOCALAPPDATA leaked into a Linux environment (WSLENV,
 # Wine) must not move the store there or the two resolvers disagree again.
-OUT=$(env -i HOME="$_sl_fallback_home_dir" PATH="$_sl_nopy_dir" \
-    LOCALAPPDATA="$_sl_localappdata_dir" \
-    SL_CONFIG_FILE="/nonexistent/x.conf" \
-    bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; echo \"\$SL_HOME\"")
-check "LOCALAPPDATA without an MSYS marker does NOT move the store" \
-    "${_sl_fallback_home_dir}/.local/share/agent-learning" "$OUT"
+# OSTYPE is a bash-INTERNAL variable, not an environment variable: env -i
+# cannot strip it, and every child bash on an MSYS/Cygwin host is born with
+# OSTYPE=msys. So the "no MSYS marker" scenario is unbuildable on a real
+# Windows host -- the branch CORRECTLY fires there, which is the whole point
+# of the marker. Probe the host and skip rather than infer (hard rule 3);
+# the ubuntu/macos CI cells keep asserting the non-Windows behaviour.
+if [[ "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]; then
+    echo "SKIP: LOCALAPPDATA-without-MSYS-marker case (host bash reports OSTYPE=${OSTYPE}, which is bash-internal and survives env -i, so the scenario cannot be built here)"
+else
+    OUT=$(env -i HOME="$_sl_fallback_home_dir" PATH="$_sl_nopy_dir" \
+        LOCALAPPDATA="$_sl_localappdata_dir" \
+        SL_CONFIG_FILE="/nonexistent/x.conf" \
+        bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; echo \"\$SL_HOME\"")
+    check "LOCALAPPDATA without an MSYS marker does NOT move the store" \
+        "${_sl_fallback_home_dir}/.local/share/agent-learning" "$OUT"
+fi
 
 # The same degradation must be LOUD (hard rule 2): the old code discarded both
 # the exit status and the stderr of the paths.py spawn with 2>/dev/null.
