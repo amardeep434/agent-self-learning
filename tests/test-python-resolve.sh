@@ -66,10 +66,13 @@ D_BIN="$TMP/bin-d"; mk_bin "$D_BIN"
 sl_forwarder "$REAL_PY" "${D_BIN}/python3"
 sl_forwarder "$REAL_PY" "${D_BIN}/python"
 OUT="$(ask "$D_BIN")"
+# Leading-paren case patterns throughout these substitutions: macOS's default
+# bash 3.2 misparses an unparenthesized `)` pattern inside $(...) — measured as
+# 5 FAILs on the macos-latest cells; the (pattern) form is POSIX and both parse.
 check "(d) real python3 present: resolves" "yes" \
-    "$(case "$OUT" in "rc=0 "*) echo yes ;; *) echo no ;; esac)"
+    "$(case "$OUT" in ("rc=0 "*) echo yes ;; (*) echo no ;; esac)"
 check "(d) python3 is preferred over python" "yes" \
-    "$(case "$OUT" in *"/python3") echo yes ;; *) echo no ;; esac)"
+    "$(case "$OUT" in (*"/python3") echo yes ;; (*) echo no ;; esac)"
 check "(d) resolved interpreter actually runs and is Python 3" "yes" \
     "$(P="${OUT#rc=0 }"; [[ -x "$P" ]] && "$P" --version 2>&1 | grep -q '^Python 3' && echo yes || echo no)"
 
@@ -78,9 +81,9 @@ A_BIN="$TMP/bin-a"; mk_bin "$A_BIN"
 sl_forwarder "$REAL_PY" "${A_BIN}/python"
 OUT="$(ask "$A_BIN")"
 check "(a) python-only PATH: resolves" "yes" \
-    "$(case "$OUT" in "rc=0 "*) echo yes ;; *) echo no ;; esac)"
+    "$(case "$OUT" in ("rc=0 "*) echo yes ;; (*) echo no ;; esac)"
 check "(a) python-only PATH: points at the python shim" "yes" \
-    "$(case "$OUT" in *"/python") echo yes ;; *) echo no ;; esac)"
+    "$(case "$OUT" in (*"/python") echo yes ;; (*) echo no ;; esac)"
 
 # --- (b) fake Microsoft-Store python3 stub in front of a real python ---
 # The real stub prints "Python was not found; run without arguments to
@@ -97,7 +100,7 @@ chmod +x "${B_BIN}/python3"
 sl_forwarder "$REAL_PY" "${B_BIN}/python"
 OUT="$(ask "$B_BIN")"
 check "(b) Store stub skipped, real python chosen" "yes" \
-    "$(case "$OUT" in *"/python") echo yes ;; *) echo no ;; esac)"
+    "$(case "$OUT" in (*"/python") echo yes ;; (*) echo no ;; esac)"
 check "(b) resolved interpreter actually runs and is Python 3" "yes" \
     "$(P="${OUT#rc=0 }"; [[ -x "$P" ]] && "$P" --version 2>&1 | grep -q '^Python 3' && echo yes || echo no)"
 
