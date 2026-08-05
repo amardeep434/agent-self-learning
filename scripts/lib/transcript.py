@@ -950,6 +950,17 @@ def _log_notice(notice_file: "str | None", component: str, reason: str) -> None:
 
 
 def main(argv: "list[str] | None" = None) -> int:
+    # LF-only stdout (fix round E, see lib/paths.py's _main for the full
+    # rationale). Native Windows Python emits "\r\n" for every print, bash
+    # strips only the record-terminating "\n" from `$(...)`, and this module's
+    # output IS read into bash variables -- every review script embeds the
+    # digest in the prompt it pays for. A trailing "\r" there is
+    # invisible and corrupts every downstream use of the value.
+    try:
+        sys.stdout.reconfigure(newline="\n")
+    except (AttributeError, ValueError):
+        pass
+
     parser = argparse.ArgumentParser(
         description="Print a bounded, redacted transcript digest for a Copilot CLI or Claude Code session."
     )

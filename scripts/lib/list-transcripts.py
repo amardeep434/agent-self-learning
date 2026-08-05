@@ -84,6 +84,17 @@ def list_transcripts(root: str, since_mtime: float | None, limit: int) -> list[s
 
 
 def _main(argv: list[str]) -> int:
+    # LF-only stdout (fix round E, see lib/paths.py's _main for the full
+    # rationale). Native Windows Python emits "\r\n" for every print, bash
+    # strips only the record-terminating "\n" from `$(...)`, and this module's
+    # output IS read into bash variables -- index-session.sh uses each line as
+    # a file path. A trailing "\r" there is
+    # invisible and corrupts every downstream use of the value.
+    try:
+        sys.stdout.reconfigure(newline="\n")
+    except (AttributeError, ValueError):
+        pass
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", help="directory to search recursively for *.jsonl files")
     parser.add_argument(

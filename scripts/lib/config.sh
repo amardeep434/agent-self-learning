@@ -32,7 +32,102 @@ _sl_paths_py="${_sl_lib_dir}/paths.py"
 _sl_isotime_py="${_sl_lib_dir}/isotime.py"
 _sl_pp_home="" _sl_pp_state="" _sl_pp_skills="" _sl_pp_memory="" _sl_pp_logs=""
 _sl_pp_sessions_db="" _sl_pp_config_file="" _sl_pp_scripts=""
-if [[ -f "$_sl_paths_py" ]]; then
+
+# The interpreter is resolved BEFORE the paths.py spawn below, because that
+# spawn is the first Python use in every flow -- and "python3" is a name real
+# Windows Python installs never provide. lib/python-resolve.sh is the single
+# place that decides; nothing here may fall back to a bare name.
+# shellcheck source=scripts/lib/python-resolve.sh
+source "${_sl_lib_dir}/python-resolve.sh"
+sl_resolve_python || true      # loud reporting happens below, once paths are known
+
+# _sl_config_degraded <reason-slug> <human sentence>
+#
+# Rule 2 (fail loudly): config.sh is sourced by every hook, so a broken
+# precondition here is invisible unless it reaches persist-failures.log --
+# the one channel doctor.sh reads. It is also sourced on EVERY tool use, so
+# an unthrottled append would bury doctor.sh's "N persistence failure(s)"
+# count under thousands of identical lines. Same trade turn-counter.sh
+# already makes, same marker-file shape, one line per interval per reason.
+_SL_CONFIG_DEGRADED_INTERVAL="${_SL_CONFIG_DEGRADED_INTERVAL:-3600}"
+_sl_config_degraded() {
+    local slug="$1" sentence="$2" log_dir marker now last=0
+    log_dir="${_sl_pp_logs:-${_sl_fallback_home}/logs}"
+    marker="${log_dir}/.config-degraded.${slug}"
+    now="$(date +%s 2>/dev/null)" || return 0
+    mkdir -p "$log_dir" 2>/dev/null || return 0
+    if [[ -f "$marker" ]]; then
+        read -r last < "$marker" || last=0
+        [[ "$last" =~ ^[0-9]+$ ]] || last=0
+        (( now - last < _SL_CONFIG_DEGRADED_INTERVAL )) && return 0
+    fi
+    printf '%s\n' "$now" > "$marker" 2>/dev/null || true
+    printf '%s config: %s -- %s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$slug" "$sentence" \
+        >> "${log_dir}/persist-failures.log" 2>/dev/null || true
+}
+
+# Degraded fallback only if the interpreter or paths.py could not run at all.
+# paths.py remains the single authoritative resolver (global constraint); this
+# is a bash-side MIRROR of its override chain, in its exact order:
+# AGENT_LEARNING_HOME > XDG_DATA_HOME/agent-learning > (Windows only)
+# %LOCALAPPDATA%/agent-learning > $HOME/.local/share/agent-learning.
+#
+# The LOCALAPPDATA branch used to be missing, with a comment claiming python3
+# was a hard dependency of Windows CI so the fallback could not matter there.
+# That was exactly backwards on a REAL Windows machine, which is where
+# resolution fails: paths.py resolves %LOCALAPPDATA%\agent-learning while this
+# fallback resolved C:\Users\<u>\.local\share\agent-learning -- two stores,
+# silently, the class this project exists to eliminate.
+#
+# I6 / deferred minor 3: commit 384a319 added a hardcoded
+# ${HOME}/.local/share/agent-learning literal here to fix "never silently
+# degrade to an empty path" -- but that literal ignores AGENT_LEARNING_HOME
+# and XDG_DATA_HOME entirely, so on a python3-less box with
+# AGENT_LEARNING_HOME set (e.g. for testing), files silently landed in a
+# phantom, unconfigured store instead of the one the caller asked for. That
+# is the same silent-wrong-location class as every other finding in this
+# round, just introduced while fixing a different one.
+#
+# Computed BEFORE the paths.py spawn (it used to sit after it) because
+# _sl_config_degraded needs a log directory to report INTO when that spawn
+# is the thing that failed.
+_sl_compute_fallback_home() {
+    if [[ -n "${AGENT_LEARNING_HOME:-}" ]]; then
+        printf '%s' "$AGENT_LEARNING_HOME"
+    elif [[ -n "${XDG_DATA_HOME:-}" ]]; then
+        printf '%s/agent-learning' "$XDG_DATA_HOME"
+    elif [[ -n "${LOCALAPPDATA:-}" && ( -n "${MSYSTEM:-}" || "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ) ]]; then
+        # Windows is decided by two values that only exist there together, not
+        # by a platform NAME: LOCALAPPDATA (which Git Bash inherits and
+        # exports) plus an MSYS/Cygwin marker. LOCALAPPDATA alone would also
+        # match a Wine/WSL environment carrying it through WSLENV, where
+        # paths.py -- which branches on sys.platform -- would NOT take this
+        # branch, and the two must agree or the store forks in two.
+        printf '%s/agent-learning' "$LOCALAPPDATA"
+    else
+        printf '%s/.local/share/agent-learning' "$HOME"
+    fi
+}
+_sl_fallback_home="$(_sl_compute_fallback_home)"
+
+if [[ -z "${SL_PYTHON:-}" ]]; then
+    _sl_config_degraded python3_unresolvable \
+        "no Python 3 could be resolved (tried python3, python, py -3), so lib/paths.py never ran; every path below comes from the bash fallback and may not be the store paths.py would resolve"
+fi
+
+if [[ -f "$_sl_paths_py" && -n "${SL_PYTHON:-}" ]]; then
+    # Stdout is captured, not piped through a process substitution, so the
+    # spawn's EXIT STATUS is available -- it was `2>/dev/null` on a process
+    # substitution before, which discarded both the status and the reason on
+    # the single most important spawn in the project (rule 2 violation: the
+    # store silently moved to the fallback location with nothing recorded).
+    # Stderr is folded into the same capture rather than costing a second
+    # spawn: the parse loop below only reacts to lines whose key matches one
+    # of the eight it knows, so a diagnostic line is inert as input while
+    # still being available, verbatim, as the reason in the failure log.
+    _sl_paths_rc=0
+    _sl_paths_out="$("${SL_PYTHON}" "$_sl_paths_py" all 2>&1)" || _sl_paths_rc=$?
     while IFS='=' read -r _k _v; do
         # Fix round E, defence in depth: paths.py's own stdout now forces LF
         # line endings (see its _main docstring) so this trailing-\r strip
@@ -52,35 +147,12 @@ if [[ -f "$_sl_paths_py" ]]; then
             config_file) _sl_pp_config_file="$_v" ;;
             scripts)     _sl_pp_scripts="$_v" ;;
         esac
-    done < <(python3 "$_sl_paths_py" all 2>/dev/null)
-fi
-
-# Degraded fallback only if python3/paths.py could not run at all (e.g. no
-# python3 on PATH). paths.py remains the single authoritative resolver
-# (global constraint); this is a bash-side MIRROR of its override chain
-# (AGENT_LEARNING_HOME > XDG_DATA_HOME/agent-learning > $HOME default),
-# not a reimplementation of its full resolution logic (no LOCALAPPDATA
-# branch -- python3 is a hard dependency of this project's Windows CI, so
-# this path only matters for Linux/macOS/Git-Bash boxes missing python3).
-#
-# I6 / deferred minor 3: commit 384a319 added a hardcoded
-# ${HOME}/.local/share/agent-learning literal here to fix "never silently
-# degrade to an empty path" -- but that literal ignores AGENT_LEARNING_HOME
-# and XDG_DATA_HOME entirely, so on a python3-less box with
-# AGENT_LEARNING_HOME set (e.g. for testing), files silently landed in a
-# phantom, unconfigured store instead of the one the caller asked for. That
-# is the same silent-wrong-location class as every other finding in this
-# round, just introduced while fixing a different one.
-_sl_compute_fallback_home() {
-    if [[ -n "${AGENT_LEARNING_HOME:-}" ]]; then
-        printf '%s' "$AGENT_LEARNING_HOME"
-    elif [[ -n "${XDG_DATA_HOME:-}" ]]; then
-        printf '%s/agent-learning' "$XDG_DATA_HOME"
-    else
-        printf '%s/.local/share/agent-learning' "$HOME"
+    done <<< "$_sl_paths_out"
+    if [[ "$_sl_paths_rc" -ne 0 || -z "$_sl_pp_home" ]]; then
+        _sl_config_degraded paths_resolution_degraded \
+            "lib/paths.py could not be run (exit ${_sl_paths_rc}) via ${SL_PYTHON}; falling back to the bash-side mirror at ${_sl_fallback_home}, which may not be the store paths.py resolves. Output: ${_sl_paths_out//$'\n'/ }"
     fi
-}
-_sl_fallback_home="$(_sl_compute_fallback_home)"
+fi
 
 SL_CONFIG_FILE="${SL_CONFIG_FILE:-${_sl_pp_config_file:-${_sl_fallback_home}/self-learning.conf}}"
 if [[ -f "$SL_CONFIG_FILE" ]]; then
@@ -281,6 +353,6 @@ sl_iso_to_epoch() {
     fi
     epoch=$(date -u -d "$ts" +%s 2>/dev/null) && [[ -n "$epoch" ]] && { echo "$epoch"; return 0; }
     epoch=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$ts" +%s 2>/dev/null) && [[ -n "$epoch" ]] && { echo "$epoch"; return 0; }
-    epoch=$(python3 "$_sl_isotime_py" parse "$ts" 2>/dev/null) && [[ -n "$epoch" ]] && { echo "$epoch"; return 0; }
+    epoch=$("${SL_PYTHON}" "$_sl_isotime_py" parse "$ts" 2>/dev/null) && [[ -n "$epoch" ]] && { echo "$epoch"; return 0; }
     echo 0
 }

@@ -51,7 +51,7 @@ HEALTH_OUT="$(env -i HOME="$TMP_HOME" PATH="$_sl_no_python_dir" \
 rm -rf "$_sl_no_python_dir"
 
 check "no python3: a clear FAIL names python3 as the cause" "yes" \
-    "$(printf '%s' "$HEALTH_OUT" | grep -qF 'cannot verify hook freshness -- python3 not found' && echo yes || echo no)"
+    "$(printf '%s' "$HEALTH_OUT" | grep -qF 'cannot verify hook freshness -- no Python 3 on PATH (tried python3, python, py -3)' && echo yes || echo no)"
 check "no python3: does NOT misreport the fresh turn-counter hook as STALE" "no" \
     "$(printf '%s' "$HEALTH_OUT" | grep -q 'turn counter hook registered but STALE' && echo yes || echo no)"
 

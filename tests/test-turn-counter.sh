@@ -106,6 +106,16 @@ fi
 # loud without flooding persist-failures.log (which doctor.sh reports on).
 # Cases 7-11 pin "loud", 12-13 pin "not flooding", 14 pins the one case that
 # must stay silent.
+#
+# INVERTED (WP8): the counter no longer touches jq at all -- lib/
+# turn_counter_core.py does the payload read, the state read and both writes
+# in the one Python process this hook already pays for, and jq stopped being
+# a runtime dependency of this project entirely. So the cases below that used
+# to pin "jq broken/absent => degrade loudly" now pin the opposite, which is
+# the whole point of the change: a machine with no jq COUNTS NORMALLY and
+# says nothing, because nothing is wrong. What must stay loud is a counter
+# file that genuinely cannot be read or written, and cases 8/9 drive the
+# throttle from that instead.
 # ---------------------------------------------------------------------------
 
 # A fresh, isolated store per case: these assertions count log LINES, so they
@@ -133,6 +143,17 @@ BROKEN_DIR="${TMP}/brokenjq"; mkdir -p "$BROKEN_DIR"
 printf '#!/usr/bin/env bash\nexit 127\n' > "$BROKEN_DIR/jq"
 chmod +x "$BROKEN_DIR/jq"
 
+# A counter PATH that can never be written: a directory where the file should
+# be. Unlike a corrupt counter file (case 11) -- which is reported once and
+# then REPAIRED, so the next fire is healthy -- this failure persists across
+# every fire, which is what the throttle cases need. A permission-based
+# version of the same thing was considered and rejected: it behaves
+# differently for root and would need a probe to stay honest.
+wedge_counter() {  # wedge_counter <store>
+    rm -f "$1/state/turn_counter.json"
+    mkdir -p "$1/state/turn_counter.json"
+}
+
 # A counter file from a session already in progress. Cases 7 and 9 need one:
 # with a jq that merely FAILS (rather than being absent from PATH) the breakage
 # is only discovered when there is state to read, so a store with no counter
@@ -145,10 +166,22 @@ seed_counter() {
         "$2" > "$1/state/turn_counter.json"
 }
 
-# 7) A broken jq must be REPORTED, not scored as a valid zero.
+# 7) A broken jq is now a NON-EVENT. This case used to assert the opposite;
+# it is inverted deliberately, and it is the assertion that would catch a
+# reintroduced jq dependency on this path.
 S=$(new_store); seed_counter "$S" sess-brokenjq
 run_hook "$S" sess-brokenjq "PATH=${BROKEN_DIR}:${PATH}"
-check "broken jq is reported to persist-failures.log" "1" "$(log_lines "$S")"
+check "a broken jq no longer degrades the counter" "0" "$(log_lines "$S")"
+check "a broken jq still counts the turn (43 = seeded 42 + 1)" "43" \
+    "$(jq -r .total_turns_this_session "$S/state/turn_counter.json")"
+
+# 8) Throttle: the SAME broken state across many tool uses must NOT append a
+# line per tool use. That would put thousands of lines in the one file
+# doctor.sh reports on ("N persistence failure(s) recorded") and destroy it as
+# a diagnostic -- which is why this hook cannot simply log every failure.
+S=$(new_store); wedge_counter "$S"
+for _ in 1 2 3 4 5 6 7 8 9 10; do run_hook "$S" sess-flood; done
+check "10 tool uses in the same broken state append exactly one line" "1" "$(log_lines "$S")"
 if grep -q "turn-counter" "$S/logs/persist-failures.log" 2>/dev/null; then
     echo "PASS: the failure line names turn-counter as the component"
 else
@@ -156,55 +189,55 @@ else
     FAILURES=$((FAILURES+1))
 fi
 
-# 8) Throttle: the SAME broken state across many tool uses must NOT append a
-# line per tool use. That would put thousands of lines in the one file
-# doctor.sh reports on ("N persistence failure(s) recorded") and destroy it as
-# a diagnostic -- which is why this hook cannot simply log every failure.
-S=$(new_store)
-for _ in 1 2 3 4 5 6 7 8 9 10; do run_hook "$S" sess-flood "PATH=${BROKEN_DIR}:${PATH}"; done
-check "10 tool uses in the same broken state append exactly one line" "1" "$(log_lines "$S")"
-
 # 9) ...but the throttle is a cooldown, not a one-shot: a machine that stays
 # broken must keep saying so, or a single line scrolls into history and the
 # breakage goes quiet again. Age the marker past the interval.
-S=$(new_store); seed_counter "$S" sess-cool
-run_hook "$S" sess-cool "PATH=${BROKEN_DIR}:${PATH}"
+S=$(new_store); wedge_counter "$S"
+run_hook "$S" sess-cool
 echo $(( $(date +%s) - 7200 )) > "$S/state/.counter-degraded"
-run_hook "$S" sess-cool "PATH=${BROKEN_DIR}:${PATH}"
+run_hook "$S" sess-cool
 check "a still-broken counter re-reports once the cooldown expires" "2" "$(log_lines "$S")"
 
-# 10) A genuinely absent jq (not merely a failing one) must be reported AND
-# must not clobber the counter file: overwriting it with defaults would
-# destroy real accumulated state that a working jq could still read later.
-# Built the way tests/test-review-failure-legibility.sh builds NO_CLAUDE_PATH
-# -- from the real locations of the tools, minus jq.
+# 10) THE POINT OF WP8. On a machine where jq is genuinely absent -- which is
+# every default Windows box, and the reason the docs used to say
+# `winget install jqlang.jq` -- the counter must simply WORK. This case used
+# to assert "absent jq is reported"; that was the correct behaviour while the
+# hook needed jq, and it is the wrong behaviour now.
 #
-# Selecting whole directories the way that suite does cannot work here: on this
-# machine jq lives in /usr/bin alongside every base tool, so any PATH holding
-# coreutils holds jq too. Symlink the individual tools into a private directory
-# instead, and skip only if a PROBE shows the result is unusable (Git Bash
-# without developer mode turns `ln -s` into a copy, which can break a copied
-# binary's DLL lookup) rather than assuming it from the platform name.
+# Selecting whole directories the way tests/test-review-failure-legibility.sh
+# does cannot work here: on this machine jq lives in /usr/bin alongside every
+# base tool, so any PATH holding coreutils holds jq too. Symlink the
+# individual tools into a private directory instead, and skip only if a PROBE
+# shows the result is unusable (Git Bash without developer mode turns `ln -s`
+# into a copy, which can break a copied binary's DLL lookup) rather than
+# assuming it from the platform name.
+#
+# `python3` is linked from sys.executable, NOT from `command -v python3`: on a
+# pyenv/asdf machine that name is a SHIM which needs the full ambient PATH and
+# produces nothing on a restricted one -- the hook would then exit early on an
+# unresolvable interpreter and this case would silently stop testing jq at all.
 NOJQ_DIR="${TMP}/nojq-bin"; mkdir -p "$NOJQ_DIR"
-for tool in bash python3 python date mkdir rm mv cat grep sed tr wc env sleep \
+for tool in bash date mkdir rm mv cat grep sed tr wc env sleep \
             dirname basename printf uname cut head tail find chmod ln; do
     tp="$(command -v "$tool" 2>/dev/null)" || continue
     ln -s "$tp" "${NOJQ_DIR}/${tool}" 2>/dev/null || cp "$tp" "${NOJQ_DIR}/${tool}" 2>/dev/null || true
 done
+REAL_PY="$(python3 -c 'import sys; print(sys.executable)' 2>/dev/null || true)"
+[[ -n "$REAL_PY" ]] && { ln -s "$REAL_PY" "${NOJQ_DIR}/python3" 2>/dev/null || cp "$REAL_PY" "${NOJQ_DIR}/python3" 2>/dev/null || true; }
 NOJQ_PATH="$NOJQ_DIR"
 if PATH="$NOJQ_PATH" command -v jq >/dev/null 2>&1 \
-   || ! PATH="$NOJQ_PATH" bash -c 'command -v python3 >/dev/null && date -u +%s >/dev/null' 2>/dev/null; then
+   || ! PATH="$NOJQ_PATH" bash -c 'python3 --version >/dev/null && date -u +%s >/dev/null' 2>/dev/null; then
     echo "SKIP: could not build a usable jq-free PATH on this machine"
     echo "      (probe: jq still reachable, or the linked tools do not run)."
     echo "      Case 7 already covers a jq that is present but cannot run."
 else
-    S=$(new_store)
-    printf '{"session_id":"keep","memory_turns":4,"skill_iterations":7,"last_review_at":"","session_started_at":"2020-01-01T00:00:00Z","total_turns_this_session":42}\n' \
-        > "$S/state/turn_counter.json"
+    S=$(new_store); seed_counter "$S" sess-nojq
     run_hook "$S" sess-nojq "PATH=${NOJQ_PATH}"
-    check "absent jq is reported" "1" "$(log_lines "$S")"
-    check "absent jq does not clobber accumulated counts" "42" \
+    check "no jq on PATH is not a failure any more" "0" "$(log_lines "$S")"
+    check "no jq on PATH still counts the turn (43 = seeded 42 + 1)" "43" \
         "$(jq -r .total_turns_this_session "$S/state/turn_counter.json")"
+    check "no jq on PATH still records the session boundary" "sess-nojq" \
+        "$(jq -r .session_id "$S/state/turn_counter.json")"
 fi
 
 # 11) A counter file that exists but cannot be parsed is NOT normal and must
@@ -230,12 +263,15 @@ check "recovery adds no further failure lines" "1" "$(log_lines "$S")"
 # 13) `// 0` only substitutes for null/false, so a counter stored as a STRING
 # flows straight through -- and then evaluates to 0 inside $(( )), because
 # bash treats a non-numeric word there as an unset variable name. Same silent
-# collapse wearing a different hat.
+# collapse wearing a different hat. (The core rejects it in Python now, but
+# the collapse it prevents is identical, so the case stays.)
 S=$(new_store)
 printf '{"session_id":"s","memory_turns":"abc","skill_iterations":3,"total_turns_this_session":9,"last_review_at":"","session_started_at":""}\n' \
     > "$S/state/turn_counter.json"
 run_hook "$S" sess-nonnumeric
 check "a non-numeric counter is reported rather than silently read as 0" "1" "$(log_lines "$S")"
+check "a non-numeric counter is then reset, not left to wedge counting" "1" \
+    "$(jq -r .total_turns_this_session "$S/state/turn_counter.json")"
 
 # 14) The one case that must stay SILENT: no counter file at all is simply the
 # first tool use of a session. Defaults are correct there, and a failure line
@@ -268,6 +304,68 @@ check "session_started_at survives the round trip unshifted" "$STARTED" \
     "$(jq -r .session_started_at "$S/state/turn_counter.json")"
 check "counting still accumulates across the combined read" "2" \
     "$(jq -r .total_turns_this_session "$S/state/turn_counter.json")"
+
+# ---------------------------------------------------------------------------
+# 16) The threshold crossing itself, end to end and across TWO fires. Cases 5
+# and 6 pin the cooldown gate; nothing pinned the signal file's own contents,
+# so a core that wrote `review_skills: false` on a skill-triggered review, or
+# never wrote the file at all until some later fire, would pass everything
+# above.
+# ---------------------------------------------------------------------------
+S=$(new_store)
+rm -f "$S/state/review_signal.json"
+run_hook "$S" sess-threshold SL_SKILL_REVIEW_INTERVAL=2 SL_MEMORY_REVIEW_INTERVAL=99
+check "one fire below the skill threshold writes no signal" "no" \
+    "$([[ -f "$S/state/review_signal.json" ]] && echo yes || echo no)"
+run_hook "$S" sess-threshold SL_SKILL_REVIEW_INTERVAL=2 SL_MEMORY_REVIEW_INTERVAL=99
+check "the fire that crosses the skill threshold writes the signal" "yes" \
+    "$([[ -f "$S/state/review_signal.json" ]] && echo yes || echo no)"
+check "signal says review_skills" "true" "$(jq -r .review_skills "$S/state/review_signal.json")"
+check "signal does NOT say review_memory" "false" "$(jq -r .review_memory "$S/state/review_signal.json")"
+check "signal carries the session id" "sess-threshold" "$(jq -r .session_id "$S/state/review_signal.json")"
+check "signal carries the turn count" "2" "$(jq -r .total_turns "$S/state/review_signal.json")"
+check "crossing the threshold resets skill_iterations" "0" \
+    "$(jq -r .skill_iterations "$S/state/turn_counter.json")"
+
+# 17) The cooldown as it is actually reached in practice: a signal has just
+# been written, last_review_at is set, and the threshold is crossed again
+# immediately. Case 5 seeds last_review_at by hand; this one arrives there the
+# way a real session does, which is the wiring case 5 cannot see.
+LAST_TRIGGER=$(jq -r .triggered_at "$S/state/review_signal.json")
+jq --arg t "$LAST_TRIGGER" '.last_review_at = $t' "$S/state/turn_counter.json" > "$S/state/tc.tmp"
+mv "$S/state/tc.tmp" "$S/state/turn_counter.json"
+rm -f "$S/state/review_signal.json"
+run_hook "$S" sess-threshold SL_SKILL_REVIEW_INTERVAL=1 SL_MEMORY_REVIEW_INTERVAL=99
+check "a second crossing within 60s of the first is suppressed" "no" \
+    "$([[ -f "$S/state/review_signal.json" ]] && echo yes || echo no)"
+check "the suppressed fire still advanced the turn count" "3" \
+    "$(jq -r .total_turns_this_session "$S/state/turn_counter.json")"
+
+# 18) No jq ANYWHERE in the shipped hook path. This is the assertion that
+# fails if someone reintroduces the dependency the WP8 change removed --
+# behavioural cases can be satisfied by a jq call that merely happens to work
+# on the developer's machine.
+#
+# Comment lines are stripped first: both files EXPLAIN at length why jq is
+# gone, and a naive `grep jq` matches that prose. Whole-line comments only --
+# a trailing `# ...` cannot hide a real call earlier on the same line.
+no_jq_code() {  # no_jq_code <file>
+    if sed 's/^[[:space:]]*[#].*$//' "$1" \
+        | grep -qE '(^|[^-[:alnum:]_./])jq([^-[:alnum:]_]|$)'; then echo yes; else echo no; fi
+}
+check "turn-counter.sh invokes no jq" "no" "$(no_jq_code "${SCRIPT_DIR}/scripts/turn-counter.sh")"
+# The guard must actually be able to SEE a jq call, or it is decorative.
+_jq_probe="${TMP}/jq-probe.sh"; printf 'x=$(jq -r .a f.json)\n' > "$_jq_probe"
+check "the no-jq guard detects a real jq call" "yes" "$(no_jq_code "$_jq_probe")"
+
+# The core is asserted the stronger way -- it must spawn NOTHING. Grepping it
+# for "jq" is useless (its own docstring explains at length why jq is gone),
+# and "no subprocesses at all" is the property that actually protects the
+# budget: this whole change is worthwhile only because the work happens in one
+# process rather than several.
+check "turn_counter_core.py spawns no subprocess of any kind" "no" \
+    "$(grep -qE '^[[:space:]]*(import|from)[[:space:]]+(subprocess|os\.system)|subprocess\.|os\.system\(|os\.popen\(|os\.exec' \
+        "${SCRIPT_DIR}/scripts/lib/turn_counter_core.py" && echo yes || echo no)"
 
 if [[ "$FAILURES" -gt 0 ]]; then exit 1; fi
 echo "All turn-counter tests passed."

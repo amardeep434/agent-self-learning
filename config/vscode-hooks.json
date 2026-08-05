@@ -2,38 +2,23 @@
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash '__SL_SCRIPTS_DIR__/session-start-context.sh'",
-            "timeout": 5
-          }
-        ]
+        "type": "command",
+        "command": "bash '__SL_SCRIPTS_DIR__/session-start-context.sh'",
+        "timeout": 5
       }
     ],
     "PostToolUse": [
       {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash '__SL_SCRIPTS_DIR__/turn-counter.sh'",
-            "timeout": 3
-          }
-        ]
+        "type": "command",
+        "command": "bash '__SL_SCRIPTS_DIR__/turn-counter.sh'",
+        "timeout": 3
       }
     ],
     "Stop": [
       {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash '__SL_SCRIPTS_DIR__/vscode-session-review.sh'",
-            "timeout": 15
-          }
-        ]
+        "type": "command",
+        "command": "bash '__SL_SCRIPTS_DIR__/vscode-session-review.sh'",
+        "timeout": 15
       }
     ]
   }

@@ -306,7 +306,7 @@ fi
 # tests/test-vscode-hooks-json.sh; pinned here so this suite fails too if the
 # script and its registration stop naming each other).
 check "hook template registers this script" "yes" \
-    "$(jq -r '.hooks.Stop[].hooks[].command' "${SCRIPT_DIR}/config/vscode-hooks.json" \
+    "$(jq -r '.hooks.Stop[].command' "${SCRIPT_DIR}/config/vscode-hooks.json" \
         | grep -q 'vscode-session-review\.sh' && echo yes || echo no)"
 
 # --- 10) The prompt must state the schema the writer actually enforces (I8).

@@ -106,8 +106,22 @@ the limitation and prints its own reason.
   (`python-version: ["3.9", "3.13"]` in `.github/workflows/ci.yml`) and the lowest version
   anything here is actually run against. **3.8 is untested; do not claim it.** Write
   `from __future__ import annotations` in any module using `X | None` annotations.
-- **Hook budget: <100ms.** `turn-counter.sh` was once documented at <50ms. Measured (fix
-  round C, `date +%s%N` over 5-6 real runs): **50-68ms** with a native `python3` on PATH,
+  **Never invoke the interpreter by name.** Shell code calls `"${SL_PYTHON}"`, resolved
+  once by `scripts/lib/python-resolve.sh`; `python3` does not exist on a real Windows
+  Python install, and a `python3` that does exist there may be the Microsoft-Store alias,
+  which is not Python. `tests/test-no-python3-name.sh` is the regression guard.
+- **Hook budget: <100ms.** `turn-counter.sh` was once documented at <50ms. Re-measured
+  2026-08-04 (`date +%s%N`, 6 runs each, sandboxed store, native interpreter first on
+  PATH), across two changes on the same day:
+  - SL_PYTHON resolution: **66-70ms → 68-73ms**. One extra `--version` probe, ~3ms,
+    short-circuited thereafter by the exported `SL_PYTHON`.
+  - jq removal (`lib/turn_counter_core.py`): **67-73ms → 61-69ms**, i.e. ~5ms FASTER.
+    The hook is now two Python spawns (`lib/paths.py all`, then the core) and no jq.
+    Note the shape: an earlier attempt swapped `jq` for `lib/jsonio.py` in place and was
+    reverted at **97-129ms** because it ADDED a spawn. Consolidating work into a process
+    you already pay for is the only move that fits this budget; substituting one tool for
+    another does not.
+  Earlier measurement (fix round C, 5-6 runs): **50-68ms** with a native `python3` on PATH,
   **130-155ms** with a pyenv/asdf shim in front of it — the shim itself costs ~85ms,
   confirmed by timing it against the real interpreter binary. ~22-25ms of the native figure
   is `config.sh`'s one `python3 lib/paths.py all` subprocess spawn per invocation. <50ms is
@@ -130,7 +144,10 @@ the limitation and prints its own reason.
   `__SL_SCRIPTS_DIR__` placeholder substituted by `install.sh` at install time:
   `settings-hooks.json` (Claude Code), `copilot-hooks.json` (Copilot CLI — note its
   different per-command shape: `bash`/`powershell`/`timeoutSec`), and `vscode-hooks.json`
-  (VS Code — Claude Code's nested schema, which VS Code parses, with `timeout` in SECONDS).
+  (VS Code — the FLAT documented schema, event → `[{type, command, timeout}]` with
+  `timeout` in SECONDS; VS Code parses Claude's nested schema ONLY from
+  `.claude/settings.json` locations and silently ignores it in hook files — measured
+  on Windows 2026-08-04).
   `install.sh` renders the VS Code one into the store and prints the
   `chat.hookFilesLocations` entry; it never edits VS Code's settings.json.
   `self-learning.conf` is the file that actually ships and is sourced at runtime;

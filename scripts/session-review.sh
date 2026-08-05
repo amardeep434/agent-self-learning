@@ -56,9 +56,9 @@ fi
 # round this cost. (jq was replaced by lib/jsonio.py; the exit-status-vs-value
 # distinction that fixed this is the same, and an empty read is a missing field,
 # which legitimately means 0.)
-if ! command -v python3 >/dev/null 2>&1; then
+if [[ -z "${SL_PYTHON:-}" ]]; then
     sl_review_precondition_failed session-review "$SL_LOG_DIR" \
-        "python3 is not on PATH, so the turn counter cannot be read -- no session can be reviewed"
+        "no Python 3 on PATH (tried python3, python, py -3), so the turn counter cannot be read -- no session can be reviewed"
     exit 0
 fi
 
@@ -66,9 +66,9 @@ fi
 # parsed at all, and prints an EMPTY line for a field that is merely absent.
 # Collapsing those two into "0 turns" is the exact defect this guard exists to
 # prevent, so a failed read is reported and an absent field is a legitimate 0.
-if ! TOTAL_TURNS=$(python3 "${LIB_DIR}/jsonio.py" get "$COUNTER_FILE" total_turns_this_session 2>/dev/null); then
+if ! TOTAL_TURNS=$("${SL_PYTHON}" "${LIB_DIR}/jsonio.py" get "$COUNTER_FILE" total_turns_this_session 2>/dev/null); then
     sl_review_precondition_failed session-review "$SL_LOG_DIR" \
-        "could not read .total_turns_this_session from ${COUNTER_FILE} -- the file is unreadable or malformed, or python3 failed on it; no session can be reviewed"
+        "could not read .total_turns_this_session from ${COUNTER_FILE} -- the file is unreadable or malformed, or the Python 3 interpreter failed on it; no session can be reviewed"
     exit 0
 fi
 [[ -z "$TOTAL_TURNS" ]] && TOTAL_TURNS=0
@@ -113,7 +113,7 @@ NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 # TURN (VS Code's Stop fires per turn, not per session). `auto` sniffs the
 # file's own `type` values instead, which separated the two real corpora
 # perfectly (330/330 Claude, 21/21 VS Code) -- see detect_transcript_format.
-TRANSCRIPT_DIGEST="$(python3 "${LIB_DIR}/transcript.py" --harness auto "${HOOK_TRANSCRIPT_PATH}" \
+TRANSCRIPT_DIGEST="$("${SL_PYTHON}" "${LIB_DIR}/transcript.py" --harness auto "${HOOK_TRANSCRIPT_PATH}" \
     --log-file "${SL_LOG_DIR}/persist-failures.log" \
     2>>"${LOG_DIR}/transcript.err" || true)"
 
@@ -229,7 +229,7 @@ fi
 # lib/jsonio.py reads, updates and writes atomically at 0600; the temp-then-mv
 # dance and the jq dependency both go away. Values reach JSON as data, so a
 # hostile timestamp cannot corrupt the file.
-python3 "${LIB_DIR}/jsonio.py" set "$COUNTER_FILE" \
+"${SL_PYTHON}" "${LIB_DIR}/jsonio.py" set "$COUNTER_FILE" \
     "last_review_at=${NOW}" \
     "memory_turns=json:0" \
     "skill_iterations=json:0" || true

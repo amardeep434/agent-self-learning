@@ -16,6 +16,16 @@
 # names.
 
 _CHI_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# One resolver for the interpreter (scripts/lib/python-resolve.sh):
+# `python3` is a name real Windows Python installs never provide.
+# Sourced here, not assumed from config.sh, because this file is also
+# sourced directly (by its own suite, and by scripts that predate
+# config.sh in their own load order). Re-resolution is free once
+# SL_PYTHON is exported.
+# shellcheck source=scripts/lib/python-resolve.sh
+source "${_CHI_LIB_DIR}/python-resolve.sh"
+sl_resolve_python || true
 # shellcheck disable=SC1091
 source "${_CHI_LIB_DIR}/stdin-safe.sh"
 
@@ -32,7 +42,7 @@ COPILOT_HOOK_RAW="$_COPILOT_HOOK_RAW"
     IFS= read -r COPILOT_HOOK_SESSION_ID || true
     IFS= read -r COPILOT_HOOK_CWD || true
     IFS= read -r COPILOT_HOOK_REASON || true
-} < <(printf '%s' "$_COPILOT_HOOK_RAW" | python3 "${_CHI_LIB_DIR}/jsonio.py" get - \
+} < <(printf '%s' "$_COPILOT_HOOK_RAW" | "${SL_PYTHON}" "${_CHI_LIB_DIR}/jsonio.py" get - \
         sessionId cwd reason 2>/dev/null)
 
 # Empty default for every field, applied identically whether it was absent,

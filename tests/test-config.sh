@@ -343,5 +343,63 @@ OUT=$(bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; sl_check_hook_fresh
 check "M13: a hook match followed by a flag (space boundary) still reports fresh" "fresh" "$OUT"
 rm -f "$_sl_hookfresh_conf"
 
+# --- The bash fallback must mirror paths.py's Windows branch --------------
+#
+# When no interpreter can be resolved, config.sh falls back to a bash-side
+# mirror of paths.py's override chain. That mirror had no LOCALAPPDATA branch,
+# with a comment asserting python3 was a hard dependency on Windows so the
+# case could not arise -- exactly backwards: a real Windows box is precisely
+# where resolution fails, and there paths.py resolves
+# %LOCALAPPDATA%\agent-learning while the fallback resolved
+# $HOME/.local/share/agent-learning. Two stores, silently.
+#
+# Simulated by the two values that only co-exist on Git Bash (LOCALAPPDATA +
+# MSYSTEM), on a PATH from which no Python can be resolved.
+_sl_nopy_dir="$(mktemp -d)"
+for _tool in bash sh grep sed cat printf date mkdir rm mktemp dirname basename; do
+    _tool_path="$(command -v "$_tool" 2>/dev/null || true)"
+    [[ -n "$_tool_path" ]] && sl_forwarder "$_tool_path" "${_sl_nopy_dir}/${_tool}"
+done
+_sl_fallback_home_dir="$(mktemp -d)"
+# A real directory, not a literal C:/... string: config.sh's degraded-report
+# path mkdir's a logs dir under whatever this resolves to, and a bare "C:"
+# would be created relative to the CWD on a POSIX box.
+_sl_localappdata_dir="$(mktemp -d)"
+
+OUT=$(env -i HOME="$_sl_fallback_home_dir" PATH="$_sl_nopy_dir" \
+    LOCALAPPDATA="$_sl_localappdata_dir" MSYSTEM=MINGW64 \
+    SL_CONFIG_FILE="/nonexistent/x.conf" \
+    bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; echo \"\$SL_HOME\"")
+check "no-python fallback mirrors paths.py's LOCALAPPDATA branch on Windows" \
+    "${_sl_localappdata_dir}/agent-learning" "$OUT"
+
+# ...and must NOT take that branch where paths.py would not: paths.py branches
+# on sys.platform, so a LOCALAPPDATA leaked into a Linux environment (WSLENV,
+# Wine) must not move the store there or the two resolvers disagree again.
+# OSTYPE is a bash-INTERNAL variable, not an environment variable: env -i
+# cannot strip it, and every child bash on an MSYS/Cygwin host is born with
+# OSTYPE=msys. So the "no MSYS marker" scenario is unbuildable on a real
+# Windows host -- the branch CORRECTLY fires there, which is the whole point
+# of the marker. Probe the host and skip rather than infer (hard rule 3);
+# the ubuntu/macos CI cells keep asserting the non-Windows behaviour.
+if [[ "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]; then
+    echo "SKIP: LOCALAPPDATA-without-MSYS-marker case (host bash reports OSTYPE=${OSTYPE}, which is bash-internal and survives env -i, so the scenario cannot be built here)"
+else
+    OUT=$(env -i HOME="$_sl_fallback_home_dir" PATH="$_sl_nopy_dir" \
+        LOCALAPPDATA="$_sl_localappdata_dir" \
+        SL_CONFIG_FILE="/nonexistent/x.conf" \
+        bash -c "source '${SCRIPT_DIR}/scripts/lib/config.sh'; echo \"\$SL_HOME\"")
+    check "LOCALAPPDATA without an MSYS marker does NOT move the store" \
+        "${_sl_fallback_home_dir}/.local/share/agent-learning" "$OUT"
+fi
+
+# The same degradation must be LOUD (hard rule 2): the old code discarded both
+# the exit status and the stderr of the paths.py spawn with 2>/dev/null.
+check "an unresolvable interpreter is named in persist-failures.log" "yes" \
+    "$(grep -q 'python3_unresolvable' \
+        "${_sl_localappdata_dir}/agent-learning/logs/persist-failures.log" \
+        2>/dev/null && echo yes || echo no)"
+rm -rf "$_sl_nopy_dir" "$_sl_fallback_home_dir" "$_sl_localappdata_dir"
+
 if [[ "$FAILURES" -gt 0 ]]; then exit 1; fi
 echo "All config tests passed."

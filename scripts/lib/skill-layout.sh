@@ -28,6 +28,16 @@
 # this whole layer exists to prevent).
 
 _sl_skill_layout_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# One resolver for the interpreter (scripts/lib/python-resolve.sh):
+# `python3` is a name real Windows Python installs never provide.
+# Sourced here, not assumed from config.sh, because this file is also
+# sourced directly (by its own suite, and by scripts that predate
+# config.sh in their own load order). Re-resolution is free once
+# SL_PYTHON is exported.
+# shellcheck source=scripts/lib/python-resolve.sh
+source "${_sl_skill_layout_lib_dir}/python-resolve.sh"
+sl_resolve_python || true
 _sl_skill_layout_py="${_sl_skill_layout_lib_dir}/skill_layout.py"
 
 SL_SKILL_MD_FILENAME="SKILL.md"
@@ -42,7 +52,7 @@ if [[ -f "$_sl_skill_layout_py" ]]; then
             usage_filename)    SL_USAGE_FILENAME="$_sl_sk_val" ;;
             archive_dirname)   SL_ARCHIVE_DIRNAME="$_sl_sk_val" ;;
         esac
-    done < <(python3 "$_sl_skill_layout_py" all 2>/dev/null)
+    done < <("${SL_PYTHON}" "$_sl_skill_layout_py" all 2>/dev/null)
 fi
 
 export SL_SKILL_MD_FILENAME SL_USAGE_FILENAME SL_ARCHIVE_DIRNAME

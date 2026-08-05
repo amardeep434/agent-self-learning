@@ -38,6 +38,7 @@ trap 'rm -rf "$TMP_HOME" "$IDX_SCRIPTS" "$NOFTS5_SITE" "$NOFTS5_BIN"' EXIT
 mkdir -p "${IDX_SCRIPTS}/lib"
 cp "${SCRIPT_DIR}/scripts/index-session.sh" "${SCRIPT_DIR}/scripts/index-session.py" "$IDX_SCRIPTS/"
 cp "${SCRIPT_DIR}/scripts/lib/config.sh" "${SCRIPT_DIR}/scripts/lib/paths.py" \
+   "${SCRIPT_DIR}/scripts/lib/python-resolve.sh" \
    "${SCRIPT_DIR}/scripts/lib/isotime.py" "${SCRIPT_DIR}/scripts/lib/list-transcripts.py" \
    "${SCRIPT_DIR}/scripts/lib/session_db.py" "${IDX_SCRIPTS}/lib/"
 cp "${SCRIPT_DIR}/schema/session-search-schema.sql" \
@@ -157,6 +158,7 @@ trap 'rm -rf "$TMP_HOME" "$IDX_SCRIPTS" "$NOFTS5_SITE" "$NOFTS5_BIN" "$GENUINE_F
 mkdir -p "${GENUINE_FAIL_SCRIPTS}/lib"
 cp "${SCRIPT_DIR}/scripts/index-session.sh" "${SCRIPT_DIR}/scripts/index-session.py" "$GENUINE_FAIL_SCRIPTS/"
 cp "${SCRIPT_DIR}/scripts/lib/config.sh" "${SCRIPT_DIR}/scripts/lib/paths.py" \
+   "${SCRIPT_DIR}/scripts/lib/python-resolve.sh" \
    "${SCRIPT_DIR}/scripts/lib/isotime.py" "${SCRIPT_DIR}/scripts/lib/list-transcripts.py" \
    "${SCRIPT_DIR}/scripts/lib/session_db.py" "${GENUINE_FAIL_SCRIPTS}/lib/"
 # A deliberately invalid base schema -- not an FTS5 problem at all.

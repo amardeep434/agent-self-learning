@@ -27,6 +27,16 @@
 # SL_COACH_SIGNALS_FILE, and friends.
 
 _RC_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# One resolver for the interpreter (scripts/lib/python-resolve.sh):
+# `python3` is a name real Windows Python installs never provide.
+# Sourced here, not assumed from config.sh, because this file is also
+# sourced directly (by its own suite, and by scripts that predate
+# config.sh in their own load order). Re-resolution is free once
+# SL_PYTHON is exported.
+# shellcheck source=scripts/lib/python-resolve.sh
+source "${_RC_LIB_DIR}/python-resolve.sh"
+sl_resolve_python || true
 _RC_SCRIPTS_DIR="$(cd "${_RC_LIB_DIR}/.." && pwd)"
 
 # ---------------------------------------------------------------------------
@@ -181,7 +191,7 @@ sl_review_coach_render() {
     # project. Behaviour is unchanged and pinned by
     # tests/test-coach-prevalence.sh. It prints nothing rather than a broken
     # section when the signals file cannot be read.
-    python3 "${_RC_LIB_DIR}/coach_render.py" "$1" 2>/dev/null || true
+    "${SL_PYTHON}" "${_RC_LIB_DIR}/coach_render.py" "$1" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -202,13 +212,20 @@ sl_review_coach_section() {
     local trailer="${1:-}"
     local signals_mtime signals_age_days section
 
-    python3 "${_RC_SCRIPTS_DIR}/coach-signals.py" \
+    # No interpreter -> no Coach section, silently here: the resolver's
+    # failure was already reported loudly by config.sh (python3_unresolvable),
+    # and an unguarded "${SL_PYTHON}" below would either trip `set -u` or
+    # abort the whole review under `set -e` when a stale signals file exists.
+    [[ -n "${SL_PYTHON:-}" ]] || return 0
+
+    "${SL_PYTHON}" "${_RC_SCRIPTS_DIR}/coach-signals.py" \
         2>> "${SL_LOG_DIR}/reviews/coach-signals.err" || true
 
     [[ -f "${SL_COACH_SIGNALS_FILE}" ]] || return 0
 
-    signals_mtime=$(python3 -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' \
+    signals_mtime=$("${SL_PYTHON}" -c 'import os,sys;print(int(os.path.getmtime(sys.argv[1])))' \
         "${SL_COACH_SIGNALS_FILE}")
+    signals_mtime="${signals_mtime%$'\r'}"   # native Windows python prints \r\n; this feeds arithmetic
     signals_age_days=$(( ( $(date +%s) - signals_mtime ) / 86400 ))
     (( signals_age_days <= 7 )) || return 0
 
@@ -283,8 +300,13 @@ sl_review_launch_detached() {
         component="$1"; stderr_log="$2"; logdir="$3"; writer="$4"; shift 4
         writer_err="${logdir}/.writer-stderr.$$"
         : >"$writer_err"
+        # SL_PYTHON is expanded by THIS child shell, not by the launcher: the
+        # body is single-quoted, so the name crosses the boundary as an
+        # environment variable (sl_resolve_python exports it) and is resolved
+        # here, after nohup. The `:-python3` arm is the last-resort default for
+        # a caller that somehow never sourced the resolver.
         "$@" 2>>"${logdir}/${stderr_log}" \
-            | python3 "$writer" >>"${logdir}/persist.log" 2>"$writer_err"
+            | "${SL_PYTHON:-python3}" "$writer" >>"${logdir}/persist.log" 2>"$writer_err"
         stages=("${PIPESTATUS[@]}")
         reviewer_status="${stages[0]}"
         writer_status="${stages[1]}"

@@ -273,9 +273,11 @@ else
         '.hooks.sessionEnd[].bash'
     assert_rendered_paths "claude hook" "${STORE}/settings-hooks.json" \
         '.hooks[][].hooks[].command'
-    # Site 4 (VS Code JSON rendered into the store).
+    # Site 4 (VS Code JSON rendered into the store). FLAT schema -- VS Code's
+    # documented shape for hook files; see tests/test-vscode-hooks-json.sh's
+    # header for the 2026-08-04 Windows measurement behind the flip.
     assert_rendered_paths "vscode hook" "${STORE}/vscode-hooks.json" \
-        '.hooks[][].hooks[].command'
+        '.hooks[][].command'
 
     # Site 2: the "up to date" comparison. A render that disagrees with what
     # it just wrote makes every subsequent install re-render forever, and (for

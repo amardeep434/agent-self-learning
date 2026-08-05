@@ -11,8 +11,11 @@
 #   bash install.sh --uninstall  # Remove installed files (delegates to uninstall.sh)
 #
 # Prerequisites:
-#   - python3 must be installed (jq is no longer required by the installer;
-#     scripts/turn-counter.sh is the one runtime script that still uses it)
+#   - Python 3 must be installed, reachable as any of `python3`, `python` or
+#     the Windows `py -3` launcher. It is the ONLY runtime dependency: jq was
+#     the last one and turn-counter.sh, its last user, stopped needing it when
+#     lib/turn_counter_core.py absorbed that JSON read into the Python process
+#     the hook already spawns.
 #   - sqlite3 (the CLI) is optional: fix-p6 moved session-search schema
 #     init off the CLI and onto python3's own bundled sqlite3 module (which
 #     macOS's system CLI often lacks FTS5 support for, unlike Python's), so
@@ -89,16 +92,19 @@ do_chmod() {
 echo "=== agent-self-learning Installer ==="
 echo ""
 
-MISSING_DEPS=()
-for cmd in python3; do
-    if ! command -v "$cmd" &>/dev/null; then
-        MISSING_DEPS+=("$cmd")
-    fi
-done
-
-if [[ ${#MISSING_DEPS[@]} -gt 0 ]]; then
-    echo "Error: Missing required dependencies: ${MISSING_DEPS[*]}" >&2
-    echo "Install them before running this script." >&2
+# Python is checked by RESOLUTION, not by name. `command -v python3` was the
+# wrong question twice over on Windows: the python.org/winget/Store installers
+# this project's own README recommends never create a `python3`, so a working
+# machine was refused; and where the Microsoft-Store App Execution Alias is on,
+# a FAKE `python3.exe` exists, passes a presence check, then fails at the
+# paths.py spawn 50 lines below with a completely misleading "could not resolve
+# install paths" error. lib/python-resolve.sh runs the candidate and requires
+# it to report Python 3 -- one resolver, shared with config.sh.
+# shellcheck source=scripts/lib/python-resolve.sh
+source "${SCRIPT_DIR}/scripts/lib/python-resolve.sh"
+if ! sl_resolve_python; then
+    echo "Error: Missing required dependency: Python 3." >&2
+    echo "Install it before running this script." >&2
     exit 1
 fi
 
@@ -138,7 +144,7 @@ while IFS='=' read -r _sl_key _sl_val; do
         config_file) SL_CONFIG_FILE="$_sl_val" ;;
         scripts)     SL_SCRIPTS="$_sl_val" ;;
     esac
-done < <(python3 "$PATHS_PY" all)
+done < <("${SL_PYTHON}" "$PATHS_PY" all)
 
 if [[ -z "$SL_HOME" || -z "$SL_SCRIPTS" ]]; then
     echo "Error: could not resolve install paths via ${PATHS_PY}" >&2
@@ -183,7 +189,7 @@ fi
 # would be converted too; see render-template.py for why the per-process
 # suppression switches are not an option either.
 render_hook_template() {
-    printf '%s' "$SL_SCRIPTS" | python3 "$RENDER_TEMPLATE_PY" "$1"
+    printf '%s' "$SL_SCRIPTS" | "${SL_PYTHON}" "$RENDER_TEMPLATE_PY" "$1"
 }
 
 # The inverse: strip whatever install location a rendered hook file names back
@@ -201,7 +207,7 @@ fi
 # --print-path to ask the same scan for the directory it would have rewritten,
 # rather than matching the path a second time with an expression of its own.
 normalize_hook_path() {
-    python3 "$NORMALIZE_HOOK_PY" "$@"
+    "${SL_PYTHON}" "$NORMALIZE_HOOK_PY" "$@"
 }
 
 echo "Install target (resolved by paths.py): ${SL_HOME}"
@@ -217,13 +223,14 @@ echo ""
 # baked into the middle of a quoted -c string -- passed as sys.argv[1]
 # instead, the same safe pattern doctor.sh's own legacy-home probe and
 # tests/lib/path-compare.sh's sl_legacy_home already use.
-LEGACY_HOME="$(python3 -c "
+LEGACY_HOME="$("${SL_PYTHON}" -c "
 import sys
 sys.path.insert(0, sys.argv[1])
 import paths
 found = paths.legacy_home()
 print(found or '')
 " "${SCRIPT_DIR}/scripts/lib" 2>/dev/null || true)"
+LEGACY_HOME="${LEGACY_HOME%$'\r'}"   # native Windows python prints \r\n; this is a PATH
 
 if [[ -n "$LEGACY_HOME" ]]; then
     echo "NOTE: a legacy install was found at ${LEGACY_HOME}."
@@ -585,8 +592,24 @@ else
     echo "  To review VS Code Copilot Chat sessions, add this to VS Code's"
     echo "  settings.json (Preferences: Open User Settings (JSON)):"
     echo ""
+    # VS Code refuses absolute paths and backslash separators in
+    # chat.hookFilesLocations ("Paths must be relative or start with '~/'") --
+    # measured on VS Code/Windows 2026-08-04, where the absolute form this
+    # block used to print was silently ignored (forward-slash form) or
+    # rejected outright (backslash form). The store defaults under \$HOME on
+    # every platform, so print the ~/-relative spelling VS Code accepts.
+    VSCODE_HOOK_SETTING="$VSCODE_HOOK_DST"
+    case "$VSCODE_HOOK_DST" in
+        ("${HOME%/}/"*) VSCODE_HOOK_SETTING="~/${VSCODE_HOOK_DST#"${HOME%/}/"}" ;;
+        (*)
+            echo "  WARNING: the store is OUTSIDE your home directory, and VS Code's"
+            echo "  chat.hookFilesLocations refuses absolute paths -- the entry below"
+            echo "  will NOT register as printed. Move the store under your profile"
+            echo "  (unset AGENT_LEARNING_HOME) or use a workspace-relative path."
+            ;;
+    esac
     echo "      \"chat.hookFilesLocations\": {"
-    echo "        \"${VSCODE_HOOK_DST}\": true"
+    echo "        \"${VSCODE_HOOK_SETTING}\": true"
     echo "      }"
     echo ""
     echo "  NOTE: VS Code ALSO reads ~/.claude/settings.json as a hook source by"
@@ -624,7 +647,7 @@ if [[ -f "$SCHEMA_SRC" ]]; then
             # Python's own sqlite3 module (raises immediately on a real
             # failure) and gates the FTS5-only part behind a functional
             # probe -- see scripts/lib/session_db.py's module docstring.
-            if ! SCHEMA_RESULT=$(python3 "${DEST_DIR}/lib/session_db.py" \
+            if ! SCHEMA_RESULT=$("${SL_PYTHON}" "${DEST_DIR}/lib/session_db.py" \
                     ensure-schema "$DB_PATH" "$SCHEMA_DST" "$FTS5_SCHEMA_DST" 2>&1); then
                 echo "  FATAL: failed to initialize session search database ($DB_PATH): $SCHEMA_RESULT" >&2
                 exit 1
@@ -637,7 +660,7 @@ if [[ -f "$SCHEMA_SRC" ]]; then
             echo "  Database already exists: $DB_PATH (skipping)"
         fi
     else
-        echo "[DRY RUN] python3 ${DEST_DIR}/lib/session_db.py ensure-schema $DB_PATH $SCHEMA_DST $FTS5_SCHEMA_DST"
+        echo "[DRY RUN] ${SL_PYTHON} ${DEST_DIR}/lib/session_db.py ensure-schema $DB_PATH $SCHEMA_DST $FTS5_SCHEMA_DST"
     fi
 else
     echo "  No schema/session-search-schema.sql found"

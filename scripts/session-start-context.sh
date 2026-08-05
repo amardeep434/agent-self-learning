@@ -26,18 +26,26 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# The interpreter is resolved by name-independent probe, not by `command -v
+# python3`: real Windows Python installs provide `python`/`py -3` and never
+# `python3`. This script does not source config.sh (it must stay a three-line
+# wrapper), so it sources the resolver directly -- same single resolver.
+# shellcheck source=scripts/lib/python-resolve.sh
+source "${SCRIPT_DIR}/lib/python-resolve.sh"
+sl_resolve_python || true
+
 # Diagnostics go to persist-failures.log, never stdout. Resolving that path
-# needs the store, and if python3 is missing we cannot resolve it -- so this
+# needs the store, and if Python is missing we cannot resolve it -- so this
 # one case writes to stderr, which hooks show to the user without corrupting
 # the JSON contract on stdout.
-if ! command -v python3 >/dev/null 2>&1; then
+if [[ -z "${SL_PYTHON:-}" ]]; then
     # `{}` on STDOUT, not just a note on stderr. session-start-context.py exists
     # to guarantee "exactly one JSON object" precisely because printing nothing
     # is indistinguishable from the hook never running -- and this branch, the
     # one nothing tested, violated that contract. stderr still carries the
     # reason for a human.
     echo "{}"
-    echo "session-start-context: python3 is not on PATH -- no learned context injected" >&2
+    echo "session-start-context: no Python 3 on PATH (tried python3, python, py -3) -- no learned context injected" >&2
     exit 0
 fi
 
@@ -59,13 +67,13 @@ fi
 # Route B failed, which is precisely the coupling the detached launch exists to
 # avoid.
 _status=0
-python3 "${SCRIPT_DIR}/session-start-context.py" || _status=$?
+"${SL_PYTHON}" "${SCRIPT_DIR}/session-start-context.py" || _status=$?
 
 # Launched UNCONDITIONALLY and before the exit: mirroring skills does not depend
 # on the memory injection having succeeded, and the two failing together was a
 # bug, not a policy.
 if [[ -f "${SCRIPT_DIR}/mirror-skills.py" ]]; then
-    nohup python3 "${SCRIPT_DIR}/mirror-skills.py" --quiet >/dev/null 2>&1 &
+    nohup "${SL_PYTHON}" "${SCRIPT_DIR}/mirror-skills.py" --quiet >/dev/null 2>&1 &
     disown 2>/dev/null || true
 fi
 
