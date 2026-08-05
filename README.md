@@ -463,6 +463,17 @@ reader should know before trusting the system further than it goes.
   (`~/.vscode-server/data/User/workspaceStorage`) are entirely unmeasured. Full spike
   record: [`docs/superpowers/vscode-adapter-spike.md`](docs/superpowers/vscode-adapter-spike.md).
 
+- **Enterprise machines: your org can kill VS Code hooks entirely, and nothing local will
+  tell you.** Hooks are a Preview feature, and GitHub Copilot's org-level **"Editor preview
+  features"** policy (visible to you at `github.com/settings/copilot`) disables them in
+  every client with zero errors in the extension's debug log — the hook file is simply
+  never read. Measured on a corporate Windows machine 2026-08-05: correct flat-schema file,
+  correct `~/`-relative registration AND the default `.github/hooks/` location, script chain
+  proven working by hand-piping the hook payload into bash — and no hook ever fired. If you
+  exhaust the checklist above and see silence, check that policy before debugging further;
+  only an org admin can change it. The Copilot CLI adapter is unaffected (its hooks are not
+  gated by the editor policy) and is the working path on such machines.
+
 - **Ask-only VS Code sessions are never reviewed.** They produce no `PostToolUse`
   (measured), so the turn counter never advances and the gate never opens. Accepted: it
   errs toward under-reviewing rather than toward per-turn spend.
