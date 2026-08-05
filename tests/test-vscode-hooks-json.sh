@@ -2,12 +2,21 @@
 # tests/test-vscode-hooks-json.sh
 #
 # Static guard on config/vscode-hooks.json, the VS Code Copilot Chat
-# hook-registration template. Modelled on tests/test-claude-hooks-json.sh,
-# because VS Code parses Claude Code's hook format -- the same nested
-# event -> matcher-group -> hooks[] schema, the same `command`, the same
-# `timeout` in SECONDS. It is NOT Copilot CLI's shape (`bash`/`powershell`/
-# `timeoutSec`), and a file in the wrong one of those two shapes parses as
-# JSON and registers nothing, which is the worst possible failure here.
+# hook-registration template. VS Code's documented schema for hook FILES
+# (`.github/hooks/*.json` and every `chat.hookFilesLocations` entry) is the
+# FLAT shape: event -> [ {type, command, timeout} ] -- no matcher wrapper,
+# no nested hooks[] array. The nested Claude Code schema is parsed ONLY from
+# the `.claude/settings.json` locations.
+#
+# MEASURED 2026-08-04 on a real Windows machine: this template shipped in the
+# nested schema, and VS Code silently ignored it from both a custom
+# hookFilesLocations entry and the default workspace `.github/hooks/`
+# location -- zero errors in the extension's debug log, zero hook fires,
+# while the identical command hand-piped into bash worked. The adapter
+# spike's "VS Code parses Claude's nested schema" observation was made via
+# the ~/.claude/settings.json route, which is a different parser path.
+# A file in the wrong shape parses as JSON and registers NOTHING, which is
+# the worst possible failure here -- hence this suite pins the flat shape.
 #
 # Two things asserted that the Claude counterpart does not, both consequences
 # of measurements in docs/superpowers/vscode-adapter-spike.md:
@@ -33,14 +42,15 @@ HOOK="${SCRIPT_DIR}/config/vscode-hooks.json"
 check "template exists" "yes" "$([[ -f "$HOOK" ]] && echo yes || echo no)"
 check "template parses as JSON" "yes" "$(jq -e . "$HOOK" >/dev/null 2>&1 && echo yes || echo no)"
 
-# --- The nested schema (Claude Code's, which VS Code parses). The flat
-# {matcher, command, timeout} shape parses as JSON and is silently ignored.
-check "PostToolUse uses the nested hooks[] schema" "yes" \
-    "$(jq -e '.hooks.PostToolUse[0].hooks[0].type == "command"' "$HOOK" >/dev/null 2>&1 && echo yes || echo no)"
-check "Stop uses the nested hooks[] schema" "yes" \
-    "$(jq -e '.hooks.Stop[0].hooks[0].type == "command"' "$HOOK" >/dev/null 2>&1 && echo yes || echo no)"
-check "no command sits directly on a matcher group (the flat schema)" "0" \
-    "$(jq '[.hooks[][] | select(has("command"))] | length' "$HOOK")"
+# --- The FLAT schema (VS Code's documented shape for hook files). The nested
+# Claude matcher/hooks[] shape parses as JSON and is silently ignored at
+# these locations -- measured, see header.
+check "PostToolUse entries sit directly under the event (flat schema)" "yes" \
+    "$(jq -e '.hooks.PostToolUse[0].type == "command"' "$HOOK" >/dev/null 2>&1 && echo yes || echo no)"
+check "Stop entries sit directly under the event (flat schema)" "yes" \
+    "$(jq -e '.hooks.Stop[0].type == "command"' "$HOOK" >/dev/null 2>&1 && echo yes || echo no)"
+check "no nested matcher/hooks[] wrapper anywhere (the Claude schema)" "0" \
+    "$(jq '[.hooks[][] | select(has("matcher") or has("hooks"))] | length' "$HOOK")"
 
 # --- NOT Copilot CLI's shape. These keys belong to ~/.copilot/hooks/, and a
 # template carrying them here would register nothing in VS Code while looking
@@ -49,32 +59,32 @@ check "no Copilot-CLI 'bash' key" "0" "$(grep -c '"bash"' "$HOOK" || true)"
 check "no Copilot-CLI 'powershell' key" "0" "$(grep -c '"powershell"' "$HOOK" || true)"
 check "no Copilot-CLI 'timeoutSec' key" "0" "$(grep -c 'timeoutSec' "$HOOK" || true)"
 
-ENTRY_COUNT="$(jq '[.hooks[][].hooks[]] | length' "$HOOK")"
+ENTRY_COUNT="$(jq '[.hooks[][]] | length' "$HOOK")"
 # Not a hardcoded count -- see the same change in test-claude-hooks-json.sh.
 # This said "2" until the SessionStart hook made it 3.
 check "at least one hook entry exists" "yes" \
     "$([[ "$ENTRY_COUNT" -ge 1 ]] && echo yes || echo no)"
 check "SessionStart is registered (the learned-context read-back)" "yes" \
-    "$(jq -e '.hooks.SessionStart[0].hooks[0].command | test("session-start-context")' "$HOOK" >/dev/null 2>&1 && echo yes || echo no)"
+    "$(jq -e '.hooks.SessionStart[0].command | test("session-start-context")' "$HOOK" >/dev/null 2>&1 && echo yes || echo no)"
 check "every entry has type=command" "$ENTRY_COUNT" \
-    "$(jq '[.hooks[][].hooks[] | select(.type == "command")] | length' "$HOOK")"
+    "$(jq '[.hooks[][] | select(.type == "command")] | length' "$HOOK")"
 
-# --- The timeout unit: SECONDS, like Claude Code, not milliseconds.
+# --- The timeout unit: SECONDS, not milliseconds.
 check "every timeout is a plausible number of SECONDS (1..600)" "$ENTRY_COUNT" \
-    "$(jq '[.hooks[][].hooks[] | select(.timeout >= 1 and .timeout <= 600)] | length' "$HOOK")"
+    "$(jq '[.hooks[][] | select(.timeout >= 1 and .timeout <= 600)] | length' "$HOOK")"
 
 # --- The script path must be the vendor-neutral store, resolved at install
 # time -- never a hardcoded ~/.claude path (defect A1's ruling).
 check "no hardcoded ~/.claude script path" "0" \
-    "$(jq -r '.hooks[][].hooks[].command' "$HOOK" | grep -c '\.claude' || true)"
+    "$(jq -r '.hooks[][].command' "$HOOK" | grep -c '\.claude' || true)"
 check "every command carries the scripts-dir placeholder" "$ENTRY_COUNT" \
-    "$(jq -r '.hooks[][].hooks[].command' "$HOOK" | grep -c '__SL_SCRIPTS_DIR__' || true)"
+    "$(jq -r '.hooks[][].command' "$HOOK" | grep -c '__SL_SCRIPTS_DIR__' || true)"
 
 # --- The per-turn Stop consequence: the turn gate must actually be wired.
 check "PostToolUse registers turn-counter.sh (the per-turn Stop gate)" "yes" \
-    "$(jq -r '.hooks.PostToolUse[].hooks[].command' "$HOOK" | grep -q 'turn-counter\.sh' && echo yes || echo no)"
+    "$(jq -r '.hooks.PostToolUse[].command' "$HOOK" | grep -q 'turn-counter\.sh' && echo yes || echo no)"
 check "Stop registers vscode-session-review.sh" "yes" \
-    "$(jq -r '.hooks.Stop[].hooks[].command' "$HOOK" | grep -q 'vscode-session-review\.sh' && echo yes || echo no)"
+    "$(jq -r '.hooks.Stop[].command' "$HOOK" | grep -q 'vscode-session-review\.sh' && echo yes || echo no)"
 
 # --- index-session.sh reads ~/.claude/projects; it is Claude-Code-specific
 # and must not be registered for VS Code.
@@ -104,7 +114,7 @@ while IFS= read -r cmd; do
         printf '  [diag] script_path bytes: ' >&2
         printf '%s' "$script_path" | od -c | head -2 >&2
     fi
-done < <(jq -r '.hooks[][].hooks[].command' "$HOOK")
+done < <(jq -r '.hooks[][].command' "$HOOK")
 
 # --- install.sh must actually render and place this template. A template no
 # installer touches is a file that documents an intention, not a feature --

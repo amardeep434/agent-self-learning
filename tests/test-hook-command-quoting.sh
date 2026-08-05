@@ -198,8 +198,16 @@ execution_pass() {
     # metacharacters in filenames.
     local slug="${prefix//[^A-Za-z0-9]/}"
 
-    # Claude Code and VS Code: the nested schema, `.command` on each entry.
+    # Claude Code (nested schema) and VS Code (FLAT schema -- its documented
+    # hook-file shape; see tests/test-vscode-hooks-json.sh's header for the
+    # 2026-08-04 Windows measurement). Same `.command` string either way,
+    # different depth.
+    local jq_filter
     for tpl in settings-hooks vscode-hooks; do
+        case "$tpl" in
+            (settings-hooks) jq_filter='.hooks[][].hooks[].command' ;;
+            (*)              jq_filter='.hooks[][].command' ;;
+        esac
         rendered="${TMP}/${slug}-${tpl}.json"
         render "${tpl}.json" > "$rendered"
         check "${prefix} ${tpl}: rendered output parses as JSON" "yes" \
@@ -212,7 +220,7 @@ execution_pass() {
             name="$(_expected_script_name "$cmd")"
             assert_runs "${prefix} ${tpl}/${name}" "$cmd" "$name"
             assert_names_real_script "${prefix} ${tpl}/${name}" "$cmd" "$name"
-        done < <(jq -r '.hooks[][].hooks[].command' "$rendered")
+        done < <(jq -r "$jq_filter" "$rendered")
         check "${prefix} ${tpl}: at least one command was exercised" "yes" \
             "$([[ "$seen" -gt 0 ]] && echo yes || echo no)"
     done

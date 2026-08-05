@@ -144,7 +144,10 @@ the limitation and prints its own reason.
   `__SL_SCRIPTS_DIR__` placeholder substituted by `install.sh` at install time:
   `settings-hooks.json` (Claude Code), `copilot-hooks.json` (Copilot CLI — note its
   different per-command shape: `bash`/`powershell`/`timeoutSec`), and `vscode-hooks.json`
-  (VS Code — Claude Code's nested schema, which VS Code parses, with `timeout` in SECONDS).
+  (VS Code — the FLAT documented schema, event → `[{type, command, timeout}]` with
+  `timeout` in SECONDS; VS Code parses Claude's nested schema ONLY from
+  `.claude/settings.json` locations and silently ignores it in hook files — measured
+  on Windows 2026-08-04).
   `install.sh` renders the VS Code one into the store and prints the
   `chat.hookFilesLocations` entry; it never edits VS Code's settings.json.
   `self-learning.conf` is the file that actually ships and is sourced at runtime;
